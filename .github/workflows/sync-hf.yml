@@ -13,6 +13,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          REPO="https://Dk902505902:${HF_TOKEN}@huggingface.co/spaces/Dk902505902/alderbrook-ai-town"
+          REPO="https://Dk-902505902:${HF_TOKEN}@huggingface.co/spaces/Dk-902505902/alderbrook-ai-town"
           git push --force "$REPO" main
           
