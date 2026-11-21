@@ -1,4 +1,4 @@
-name: Sync to Hugging Face Space
+name: Build and Sync to Hugging Face Space
 on:
   push:
     branches: [main]
@@ -7,12 +7,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
-      - name: Push to Hugging Face
+          node-version: 20
+      - name: Build static site
+        run: |
+          npm install
+          npm run build
+          cp README.md dist/README.md
+      - name: Push built site to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          cd dist
+          git init
+          git checkout -b main
+          git add .
+          git commit -m "Deploy built Alderbrook site"
           REPO="https://Dk-902505902:${HF_TOKEN}@huggingface.co/spaces/Dk-902505902/alderbrook-ai-town"
           git push --force "$REPO" main
           
