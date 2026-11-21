@@ -1,0 +1,308 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isTownOwner(townId) {
+      return isSignedIn() && request.auth.uid == townId;
+    }
+
+    function isParentOwner(townId) {
+      return exists(/databases/$(database)/documents/towns/$(townId)) &&
+        get(/databases/$(database)/documents/towns/$(townId)).data.ownerId == request.auth.uid;
+    }
+
+    function isValidLocation(loc) {
+      return loc in ['town_hall', 'workshop', 'market', 'park'];
+    }
+
+    function isValidLogLocation(loc) {
+      return loc in ['town_hall', 'workshop', 'market', 'park', 'plaza'];
+    }
+
+    function isValidAgentId(agentId) {
+      return isValidId(agentId) && agentId.size() <= 40;
+    }
+
+    function isValidHexColor(c) {
+      return c is string && c.size() == 7 && c.matches('^#[0-9a-fA-F]{6}$');
+    }
+
+    function isValidHatStyle(h) {
+      return h in ['straw', 'cap', 'helmet', 'hood', 'beret'];
+    }
+
+    function isValidPlotId(plotId) {
+      return plotId in ['plot_nw', 'plot_ne', 'plot_sw', 'plot_se', 'plot_n_west', 'plot_n_east', 'plot_s_west', 'plot_s_east'];
+    }
+
+    function isValidOptionalPlotId(plotId) {
+      return plotId == '' || isValidPlotId(plotId);
+    }
+
+    function isValidStructureType(st) {
+      return st in ['bakery', 'watchtower', 'greenhouse', 'windmill', 'library', 'granary', 'pavilion', 'clock_tower'];
+    }
+
+    function isValidTimeOfDay(tod) {
+      return tod in ['dawn', 'day', 'twilight', 'night'];
+    }
+
+    function isValidWeather(w) {
+      return w in ['summer', 'rain', 'winter', 'clear', 'fireflies'];
+    }
+
+    function isValidScore(val) {
+      return val is int && val >= 0 && val <= 100;
+    }
+
+    function isValidRemoteCommandType(t) {
+      return t in ['set_weather', 'hire_worker', 'god_decree', 'build_structure', 'build_plot'];
+    }
+
+    function isValidRemoteCommandStatus(st) {
+      return st in ['pending', 'executed', 'failed'];
+    }
+
+    function isValidTownState(data) {
+      return data.keys().hasAll(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && data.turnCount is int && data.turnCount >= 0 && data.turnCount <= 1000000
+        && data.activeAgentIndex is int && data.activeAgentIndex >= 0 && data.activeAgentIndex <= 14
+        && data.activeDecree is string && data.activeDecree.size() <= 300
+        && isValidScore(data.prosperity)
+        && isValidScore(data.orderLevel)
+        && isValidScore(data.morale)
+        && data.timeOfDay is string && isValidTimeOfDay(data.timeOfDay)
+        && data.weather is string && isValidWeather(data.weather)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAgentState(data, agentId) {
+      return data.keys().hasAll(['ownerId', 'agentId', 'name', 'rank', 'role', 'location', 'activePlotId', 'targetAgent', 'thought', 'dialogue', 'currentTask', 'userNote', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'agentId', 'name', 'rank', 'role', 'department', 'supervisor', 'accentColor', 'personality', 'assignedPlotId', 'hatStyle', 'coatColor', 'pantsColor', 'hatColor', 'trimColor', 'isHired', 'location', 'activePlotId', 'targetAgent', 'thought', 'dialogue', 'currentTask', 'userNote', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && data.agentId is string && data.agentId == agentId && isValidAgentId(data.agentId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 60
+        && data.rank is int && data.rank >= 1 && data.rank <= 3
+        && data.role is string && data.role.size() >= 1 && data.role.size() <= 60
+        && (!('department' in data) || (data.department is string && data.department.size() <= 60))
+        && (!('supervisor' in data) || (data.supervisor is string && data.supervisor.size() <= 60))
+        && (!('accentColor' in data) || isValidHexColor(data.accentColor))
+        && (!('personality' in data) || (data.personality is string && data.personality.size() <= 160))
+        && (!('assignedPlotId' in data) || (data.assignedPlotId is string && data.assignedPlotId.size() <= 20 && isValidOptionalPlotId(data.assignedPlotId)))
+        && (!('hatStyle' in data) || (data.hatStyle is string && isValidHatStyle(data.hatStyle)))
+        && (!('coatColor' in data) || isValidHexColor(data.coatColor))
+        && (!('pantsColor' in data) || isValidHexColor(data.pantsColor))
+        && (!('hatColor' in data) || isValidHexColor(data.hatColor))
+        && (!('trimColor' in data) || isValidHexColor(data.trimColor))
+        && (!('isHired' in data) || data.isHired is bool)
+        && data.location is string && isValidLocation(data.location)
+        && data.activePlotId is string && data.activePlotId.size() <= 20 && isValidOptionalPlotId(data.activePlotId)
+        && data.targetAgent is string && data.targetAgent.size() <= 60
+        && data.thought is string && data.thought.size() <= 500
+        && data.dialogue is string && data.dialogue.size() <= 240
+        && data.currentTask is string && data.currentTask.size() <= 240
+        && data.userNote is string && data.userNote.size() <= 200
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTownStructure(data, plotId) {
+      return data.keys().hasAll(['ownerId', 'plotId', 'structureType', 'status', 'progress', 'tier', 'proposedBy', 'lastBuilder', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'plotId', 'structureType', 'status', 'progress', 'tier', 'proposedBy', 'lastBuilder', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && data.plotId is string && data.plotId == plotId && isValidPlotId(data.plotId)
+        && data.structureType is string && data.structureType.size() >= 1 && data.structureType.size() <= 24 && isValidStructureType(data.structureType)
+        && data.status is string && data.status in ['building', 'complete']
+        && data.progress is int && data.progress >= 0 && data.progress <= 100
+        && data.tier is int && data.tier >= 1 && data.tier <= 3
+        && data.proposedBy is string && data.proposedBy.size() >= 1 && data.proposedBy.size() <= 60
+        && data.lastBuilder is string && data.lastBuilder.size() <= 60
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLogEntry(data) {
+      return data.keys().hasAll(['ownerId', 'turnNumber', 'agentId', 'agentName', 'rank', 'location', 'targetAgent', 'thought', 'dialogue', 'newTask', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'turnNumber', 'agentId', 'agentName', 'rank', 'location', 'targetAgent', 'thought', 'dialogue', 'newTask', 'createdAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && data.turnNumber is int && data.turnNumber >= 0 && data.turnNumber <= 1000000
+        && data.agentId is string && data.agentId.size() >= 1 && data.agentId.size() <= 40 && isValidId(data.agentId)
+        && data.agentName is string && data.agentName.size() >= 1 && data.agentName.size() <= 60
+        && data.rank is int && data.rank >= 0 && data.rank <= 3
+        && data.location is string && isValidLogLocation(data.location)
+        && data.targetAgent is string && data.targetAgent.size() <= 60
+        && data.thought is string && data.thought.size() <= 500
+        && data.dialogue is string && data.dialogue.size() <= 300
+        && data.newTask is string && data.newTask.size() <= 240
+        && data.createdAt is timestamp;
+    }
+
+    function isValidRemoteCommand(data) {
+      return data.keys().hasAll(['type', 'status'])
+        && data.keys().hasOnly(['ownerId', 'type', 'value', 'payload', 'source', 'status', 'resultMessage', 'createdAt', 'executedAt'])
+        && (!('ownerId' in data) || (data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)))
+        && data.type is string && data.type.size() >= 1 && data.type.size() <= 24 && isValidRemoteCommandType(data.type)
+        && data.status is string && data.status.size() >= 1 && data.status.size() <= 16 && isValidRemoteCommandStatus(data.status)
+        && (!('value' in data) || (data.value is string && data.value.size() <= 400))
+        && (!('payload' in data) || (data.payload is string && data.payload.size() <= 400) || (data.payload is map && data.payload.keys().size() <= 10))
+        && (!('source' in data) || (data.source is string && data.source.size() <= 60))
+        && (!('resultMessage' in data) || (data.resultMessage is string && data.resultMessage.size() <= 300))
+        && (!('createdAt' in data) || data.createdAt is timestamp)
+        && (!('executedAt' in data) || data.executedAt is timestamp);
+    }
+
+    // Town State Root
+    match /towns/{townId} {
+      allow get: if isValidId(townId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isValidId(townId)
+        && isTownOwner(townId)
+        && isValidTownState(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(townId)
+        && isTownOwner(townId)
+        && existing().ownerId == request.auth.uid
+        && isValidTownState(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['activeDecree', 'turnCount', 'activeAgentIndex', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['timeOfDay', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['weather', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'updatedAt'])
+        );
+      allow delete: if isValidId(townId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+
+      // Hierarchical Agents Subcollection (5 core council + up to 10 hired specialists)
+      match /agents/{agentId} {
+        allow get: if isValidId(townId) && isValidAgentId(agentId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+        allow create: if isValidId(townId)
+          && isValidAgentId(agentId)
+          && isTownOwner(townId)
+          && isValidAgentState(incoming(), agentId)
+          && incoming().updatedAt == request.time
+          && (isParentOwner(townId) || existsAfter(/databases/$(database)/documents/towns/$(townId)));
+        allow update: if isValidId(townId)
+          && isValidAgentId(agentId)
+          && isTownOwner(townId)
+          && existing().ownerId == request.auth.uid
+          && isValidAgentState(incoming(), agentId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().agentId == existing().agentId
+          && incoming().updatedAt == request.time
+          && isParentOwner(townId)
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['location', 'activePlotId', 'targetAgent', 'thought', 'dialogue', 'currentTask', 'userNote', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'activePlotId', 'updatedAt'])
+          );
+        allow delete: if isValidId(townId) && isValidAgentId(agentId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+      }
+
+      // AI-Built Town Structures Subcollection (8 Perimeter Plots)
+      match /structures/{plotId} {
+        allow get: if isValidId(townId) && isValidId(plotId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+        allow create: if isValidId(townId)
+          && isValidId(plotId)
+          && isTownOwner(townId)
+          && isValidTownStructure(incoming(), plotId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isParentOwner(townId);
+        allow update: if isValidId(townId)
+          && isValidId(plotId)
+          && isTownOwner(townId)
+          && existing().ownerId == request.auth.uid
+          && isValidTownStructure(incoming(), plotId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().plotId == existing().plotId
+          && incoming().structureType == existing().structureType
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isParentOwner(townId)
+          && !(existing().status == 'complete' && incoming().status == 'building')
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'progress', 'lastBuilder', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['tier', 'lastBuilder', 'updatedAt'])
+          );
+        allow delete: if isValidId(townId) && isValidId(plotId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+      }
+
+      // Append-Only Town Logs Subcollection
+      match /logs/{logId} {
+        allow get: if isValidId(townId) && isValidId(logId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+        allow create: if isValidId(townId)
+          && isValidId(logId)
+          && isTownOwner(townId)
+          && isValidLogEntry(incoming())
+          && incoming().createdAt == request.time
+          && (isParentOwner(townId) || existsAfter(/databases/$(database)/documents/towns/$(townId)));
+        allow update: if false;
+        allow delete: if isValidId(townId) && isValidId(logId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+      }
+
+      // Real-Time Remote Commands Subcollection (/towns/{townId}/remoteCommands/{commandId})
+      match /remoteCommands/{commandId} {
+        allow get: if isValidId(townId)
+          && isValidId(commandId)
+          && isTownOwner(townId)
+          && (!('ownerId' in existing()) || existing().ownerId == request.auth.uid);
+        allow list: if isTownOwner(townId) && existing().status == 'pending';
+        allow create: if isValidId(townId)
+          && isValidId(commandId)
+          && isTownOwner(townId)
+          && isValidRemoteCommand(incoming())
+          && incoming().ownerId == request.auth.uid
+          && incoming().status == 'pending'
+          && incoming().createdAt == request.time
+          && !('executedAt' in incoming())
+          && isParentOwner(townId);
+        allow update: if isValidId(townId)
+          && isValidId(commandId)
+          && isTownOwner(townId)
+          && (!('ownerId' in existing()) || existing().ownerId == request.auth.uid)
+          && isValidRemoteCommand(incoming())
+          && existing().status == 'pending'
+          && incoming().status in ['executed', 'failed']
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'executedAt', 'resultMessage'])
+          && incoming().executedAt == request.time
+          && isParentOwner(townId);
+        allow delete: if isValidId(townId)
+          && isValidId(commandId)
+          && isTownOwner(townId)
+          && (!('ownerId' in existing()) || existing().ownerId == request.auth.uid);
+      }
+    }
+  }
+}

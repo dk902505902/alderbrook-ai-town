@@ -1,0 +1,6 @@
+{
+  "name": "Alderbrook AI Town",
+  "description": "A mobile-friendly 3D AI Town simulation featuring 5 hierarchical autonomous agents, configurable OpenAI-compatible AI providers, and persistent town state.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,467 @@
+{
+  "entities": {
+    "TownState": {
+      "title": "TownState",
+      "description": "Root state of a user's 3D AI Town simulation.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the town owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "turnCount": {
+          "type": "integer",
+          "description": "Total completed simulation turns."
+        },
+        "activeAgentIndex": {
+          "type": "integer",
+          "description": "Index (0-14) of the next agent to take a turn."
+        },
+        "activeDecree": {
+          "type": "string",
+          "description": "Current active God Decree guiding the Mayor.",
+          "maxLength": 300
+        },
+        "prosperity": {
+          "type": "integer",
+          "description": "Town economic prosperity score (0-100)."
+        },
+        "orderLevel": {
+          "type": "integer",
+          "description": "Town civic order and security score (0-100)."
+        },
+        "morale": {
+          "type": "integer",
+          "description": "Town citizen morale score (0-100)."
+        },
+        "timeOfDay": {
+          "type": "string",
+          "description": "Current 3D lighting time of day.",
+          "enum": ["dawn", "day", "twilight", "night"],
+          "maxLength": 16
+        },
+        "weather": {
+          "type": "string",
+          "description": "Current 3D weather and season state.",
+          "enum": ["summer", "rain", "winter", "clear", "fireflies"],
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the town was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the town was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "turnCount",
+        "activeAgentIndex",
+        "activeDecree",
+        "prosperity",
+        "orderLevel",
+        "morale",
+        "timeOfDay",
+        "weather",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AgentState": {
+      "title": "AgentState",
+      "description": "Persistent state of core council and dynamically hired AI workers (up to 15 active villagers).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the town owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Canonical identifier for the core or hired worker.",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the agent.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "rank": {
+          "type": "integer",
+          "description": "Hierarchy rank (1 = Mayor, 2 = Manager, 3 = Worker)."
+        },
+        "role": {
+          "type": "string",
+          "description": "Town role title.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "department": {
+          "type": "string",
+          "description": "Optional department name for hired specialists.",
+          "maxLength": 60
+        },
+        "supervisor": {
+          "type": "string",
+          "description": "Optional supervising manager name.",
+          "maxLength": 60
+        },
+        "accentColor": {
+          "type": "string",
+          "description": "Accent hex color for badge and coat tint.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7
+        },
+        "personality": {
+          "type": "string",
+          "description": "Short personality trait summary.",
+          "maxLength": 160
+        },
+        "assignedPlotId": {
+          "type": "string",
+          "description": "Optional assigned workplace plot ID or empty string.",
+          "enum": ["", "plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east"],
+          "maxLength": 20
+        },
+        "hatStyle": {
+          "type": "string",
+          "description": "Low-poly 3D headgear variant.",
+          "enum": ["straw", "cap", "helmet", "hood", "beret"],
+          "maxLength": 16
+        },
+        "coatColor": {
+          "type": "string",
+          "description": "3D outfit coat hex color.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7
+        },
+        "pantsColor": {
+          "type": "string",
+          "description": "3D outfit pants hex color.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7
+        },
+        "hatColor": {
+          "type": "string",
+          "description": "3D outfit hat hex color.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7
+        },
+        "trimColor": {
+          "type": "string",
+          "description": "3D outfit trim hex color.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7
+        },
+        "isHired": {
+          "type": "boolean",
+          "description": "Whether this agent was dynamically hired via AI Worker Hiring."
+        },
+        "location": {
+          "type": "string",
+          "description": "Current town landmark location.",
+          "enum": ["town_hall", "workshop", "market", "park"],
+          "maxLength": 20
+        },
+        "activePlotId": {
+          "type": "string",
+          "description": "Optional buildable plot ID the agent is currently visiting, or empty string.",
+          "enum": ["", "plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east"],
+          "maxLength": 20
+        },
+        "targetAgent": {
+          "type": "string",
+          "description": "Name of target agent being addressed, or empty string.",
+          "maxLength": 60
+        },
+        "thought": {
+          "type": "string",
+          "description": "Latest internal reasoning.",
+          "maxLength": 500
+        },
+        "dialogue": {
+          "type": "string",
+          "description": "Latest spoken line.",
+          "maxLength": 240
+        },
+        "currentTask": {
+          "type": "string",
+          "description": "Current action status.",
+          "maxLength": 240
+        },
+        "userNote": {
+          "type": "string",
+          "description": "Optional direct user whisper/note queued for this agent.",
+          "maxLength": 200
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "agentId",
+        "name",
+        "rank",
+        "role",
+        "location",
+        "activePlotId",
+        "targetAgent",
+        "thought",
+        "dialogue",
+        "currentTask",
+        "userNote",
+        "updatedAt"
+      ]
+    },
+    "TownStructure": {
+      "title": "TownStructure",
+      "description": "AI-built structure on one of the 8 perimeter town plots.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the town owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "plotId": {
+          "type": "string",
+          "description": "Buildable plot identifier.",
+          "enum": ["plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east"],
+          "maxLength": 20
+        },
+        "structureType": {
+          "type": "string",
+          "description": "Procedural building prefab type.",
+          "enum": ["bakery", "watchtower", "greenhouse", "windmill", "library", "granary", "pavilion", "clock_tower"],
+          "maxLength": 24
+        },
+        "status": {
+          "type": "string",
+          "description": "Construction status.",
+          "enum": ["building", "complete"],
+          "maxLength": 16
+        },
+        "progress": {
+          "type": "integer",
+          "description": "Construction progress percentage (0-100)."
+        },
+        "tier": {
+          "type": "integer",
+          "description": "Upgrade tier (1-3)."
+        },
+        "proposedBy": {
+          "type": "string",
+          "description": "Agent name who proposed the blueprint.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "lastBuilder": {
+          "type": "string",
+          "description": "Agent name who last constructed or upgraded this plot.",
+          "maxLength": 60
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when proposed."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last progress or upgrade."
+        }
+      },
+      "required": [
+        "ownerId",
+        "plotId",
+        "structureType",
+        "status",
+        "progress",
+        "tier",
+        "proposedBy",
+        "lastBuilder",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TownLogEntry": {
+      "title": "TownLogEntry",
+      "description": "Immutable turn log or God Decree event in the town history.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the town owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "turnNumber": {
+          "type": "integer",
+          "description": "Simulation turn number."
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Agent ID or 'god_decree'.",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "agentName": {
+          "type": "string",
+          "description": "Display name of speaker.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "rank": {
+          "type": "integer",
+          "description": "Rank (0 for decree, 1-3 for agents)."
+        },
+        "location": {
+          "type": "string",
+          "description": "Location where the turn occurred.",
+          "enum": ["town_hall", "workshop", "market", "park", "plaza"],
+          "maxLength": 20
+        },
+        "targetAgent": {
+          "type": "string",
+          "description": "Name of addressed agent or empty string.",
+          "maxLength": 60
+        },
+        "thought": {
+          "type": "string",
+          "description": "Internal reasoning for this turn.",
+          "maxLength": 500
+        },
+        "dialogue": {
+          "type": "string",
+          "description": "Spoken dialogue or decree text.",
+          "maxLength": 300
+        },
+        "newTask": {
+          "type": "string",
+          "description": "Updated action status.",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when logged."
+        }
+      },
+      "required": [
+        "ownerId",
+        "turnNumber",
+        "agentId",
+        "agentName",
+        "rank",
+        "location",
+        "targetAgent",
+        "thought",
+        "dialogue",
+        "newTask",
+        "createdAt"
+      ]
+    },
+    "RemoteCommand": {
+      "title": "RemoteCommand",
+      "description": "Remote automation command queued by Telegram, Hermes, or CLI agents for real-time execution.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the town owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "description": "Remote command action type.",
+          "enum": ["set_weather", "hire_worker", "god_decree", "build_structure", "build_plot"],
+          "maxLength": 24
+        },
+        "value": {
+          "type": "string",
+          "description": "Primary string argument for the remote command.",
+          "maxLength": 400
+        },
+        "payload": {
+          "type": "string",
+          "description": "Optional structured or string payload for the command.",
+          "maxLength": 400
+        },
+        "source": {
+          "type": "string",
+          "description": "Originating bot or client label (e.g., telegram, hermes, cli).",
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "description": "Execution lifecycle state.",
+          "enum": ["pending", "executed", "failed"],
+          "maxLength": 16
+        },
+        "resultMessage": {
+          "type": "string",
+          "description": "Summary of execution outcome.",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the command was queued."
+        },
+        "executedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the command finished executing."
+        }
+      },
+      "required": [
+        "type",
+        "status"
+      ]
+    }
+  },
+  "firestore": {
+    "/towns/{townId}": {
+      "schema": { "$ref": "#/entities/TownState" },
+      "description": "Root town simulation state owned by a verified user."
+    },
+    "/towns/{townId}/agents/{agentId}": {
+      "schema": { "$ref": "#/entities/AgentState" },
+      "description": "Current state of each of the 5 core and up to 10 hired agents in a town."
+    },
+    "/towns/{townId}/structures/{plotId}": {
+      "schema": { "$ref": "#/entities/TownStructure" },
+      "description": "AI-proposed, constructed, and upgraded buildings on the 8 perimeter town plots."
+    },
+    "/towns/{townId}/logs/{logId}": {
+      "schema": { "$ref": "#/entities/TownLogEntry" },
+      "description": "Append-only chronological log of agent turns, God Decrees, and Remote Commands."
+    },
+    "/towns/{townId}/remoteCommands/{commandId}": {
+      "schema": { "$ref": "#/entities/RemoteCommand" },
+      "description": "Real-time queue of remote control commands executed via onSnapshot."
+    }
+  }
+}
