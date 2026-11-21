@@ -13,7 +13,7 @@ jobs:
       - name: Build static site
         run: |
           npm install
-          npm run build
+          npx vite build
           cp README.md dist/README.md
       - name: Push built site to Hugging Face
         env:
