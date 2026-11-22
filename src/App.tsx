@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Camera,
   Cloud,
   Command,
   Compass,
@@ -19,10 +20,12 @@ import {
   Play,
   Plus,
   Radio,
+  Search,
   Save,
   ScrollText,
   Settings,
   Trophy,
+  Wrench,
   Users,
   Video,
   Volume2,
@@ -36,6 +39,7 @@ import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette.tsx';
 import { MayorChatModal, type MayorBuildResult } from './components/MayorChatModal.tsx';
+import { TownToolsModal } from './components/TownToolsModal.tsx';
 import { ProgressModal } from './components/ProgressModal.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
 import { ShortcutsModal } from './components/ShortcutsModal.tsx';
@@ -59,6 +63,8 @@ import {
   formatResourceCost,
   formatResourcesShort,
   getResourceCaps,
+  RESOURCE_IDS,
+  RESOURCE_META,
   getStructureBuildCost,
   getTurnEconomy,
   getUpgradeCost,
@@ -175,6 +181,32 @@ const REMOTE_BRIDGE_STORAGE_KEY = 'alderbrook_remote_bridge_v1';
 const SIGNAL_RELAY_STORAGE_KEY = 'alderbrook_signal_relay_v1';
 const LOCAL_TOWN_ID_STORAGE_KEY = 'alderbrook_local_town_id';
 const GRAPHICS_QUALITY_STORAGE_KEY = 'alderbrook_graphics_quality';
+
+function loadBool(key: string): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.localStorage.getItem(key) === '1';
+}
+
+function saveBool(key: string, value: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    // Ignore storage quota issues
+  }
+}
+
+function loadStringArray(key: string): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 type UndoSnapshot = {
   structures: TownStructure[];
@@ -589,6 +621,14 @@ export default function App() {
   );
   const [objectiveCompleted, setObjectiveCompleted] = useState<string[]>(() =>
     loadObjectiveProgress(activeTownId, todayKey()),
+  );
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [logQuery, setLogQuery] = useState('');
+  const [showFps, setShowFps] = useState(() => loadBool('alderbrook_fps_hud'));
+  const [fps, setFps] = useState(0);
+  const [autoTheme, setAutoTheme] = useState(() => loadBool('alderbrook_auto_theme'));
+  const [favoriteAgents, setFavoriteAgents] = useState<string[]>(() =>
+    loadStringArray(`alderbrook_favorites_v1_${activeTownId}`),
   );
   const [remoteExecutedCount, setRemoteExecutedCount] = useState(0);
   const [signalRelayPulseNonce, setSignalRelayPulseNonce] = useState(0);
@@ -3242,6 +3282,7 @@ export default function App() {
     setObjectiveCompleted(loadObjectiveProgress(activeTownId, todayKey()));
     setUnlockedAchievements(loadUnlockedAchievements(activeTownId));
     setTownHistory(loadHistory(activeTownId));
+    setFavoriteAgents(loadStringArray(`alderbrook_favorites_v1_${activeTownId}`));
     historySampleRef.current = '';
   }, [activeTownId]);
 
@@ -3479,6 +3520,166 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleUndo, handleTogglePlay, paletteOpen, progressOpen, shortcutsOpen]);
 
+  const savedAgoLabel = (() => {
+    if (!lastSavedAt) return 'Not saved';
+    const seconds = Math.max(0, Math.round((nowTick - lastSavedAt) / 1000));
+    if (seconds < 10) return 'Saved just now';
+    if (seconds < 60) return `Saved ${seconds}s ago`;
+    return `Saved ${Math.round(seconds / 60)}m ago`;
+  })();
+
+  useEffect(() => {
+    if (!showFps) return;
+    let frames = 0;
+    let last = performance.now();
+    let rafId = 0;
+    const tick = (now: number) => {
+      frames += 1;
+      if (now - last >= 1000) {
+        setFps(Math.round((frames * 1000) / (now - last)));
+        frames = 0;
+        last = now;
+      }
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [showFps]);
+
+  useEffect(() => {
+    saveBool('alderbrook_fps_hud', showFps);
+  }, [showFps]);
+
+  useEffect(() => {
+    saveBool('alderbrook_auto_theme', autoTheme);
+  }, [autoTheme]);
+
+  useEffect(() => {
+    if (!autoTheme) return;
+    const preferred = timeOfDay === 'night' || timeOfDay === 'twilight' ? 'fantasy_night' : 'meadow';
+    if (preferred !== townTheme) setTownTheme(preferred);
+  }, [autoTheme, timeOfDay, townTheme]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        `alderbrook_favorites_v1_${activeTownId}`,
+        JSON.stringify(favoriteAgents),
+      );
+    } catch {
+      // Ignore storage issues
+    }
+  }, [favoriteAgents, activeTownId]);
+
+  // Auto-pause the simulation when the town starves so the player can react
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (resources.food <= 0) {
+      setIsPlaying(false);
+      pushToast('warn', 'Simulation paused', 'The town has run out of food. Trade or produce more to resume.');
+    }
+  }, [resources.food, isPlaying, pushToast]);
+
+  // Low-stock alerts, once per resource until it recovers
+  const lowStockAlertedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const caps = getResourceCaps(structures);
+    RESOURCE_IDS.forEach((id) => {
+      if (resources[id] <= caps[id] * 0.12) {
+        if (!lowStockAlertedRef.current.has(id)) {
+          lowStockAlertedRef.current.add(id);
+          pushToast(
+            'warn',
+            `${RESOURCE_META[id].label} running low`,
+            `Only ${resources[id]} left — consider trading or building production.`,
+          );
+        }
+      } else if (resources[id] > caps[id] * 0.22) {
+        lowStockAlertedRef.current.delete(id);
+      }
+    });
+  }, [resources, structures, pushToast]);
+
+  const handleExchange = useCallback(
+    (next: TownResources, summary: string) => {
+      setResources(next);
+      if (user) void persistTownResources(user.uid, next, activeTownId).catch(() => {});
+      pushToast('success', 'Trade complete', summary);
+    },
+    [user, activeTownId, pushToast],
+  );
+
+  const handleRenameBuilding = useCallback(() => {
+    if (!selectedPlotId) {
+      pushToast('info', 'No building selected', 'Click a completed building first.');
+      return;
+    }
+    const structure = structures.find((entry) => entry.plotId === selectedPlotId);
+    if (!structure) {
+      pushToast('info', 'No building on that plot', 'Select a completed building first.');
+      return;
+    }
+    const currentLabel = structure.customLabel ?? getStructureDisplayLabel(structure);
+    const next = window.prompt('New name for this building:', currentLabel);
+    if (next === null) return;
+    const trimmed = next.trim().slice(0, 40);
+    if (!trimmed) return;
+    setStructures((prev) =>
+      prev.map((entry) =>
+        entry.plotId === selectedPlotId ? { ...entry, customLabel: trimmed } : entry,
+      ),
+    );
+    if (user) {
+      void persistRemoteStructureAction(
+        user.uid,
+        'upgrade' as never,
+        { ...structure, customLabel: trimmed },
+        activeTownId,
+      ).catch(() => {});
+    }
+    pushToast('success', 'Building renamed', trimmed);
+  }, [selectedPlotId, structures, user, activeTownId, pushToast]);
+
+  const handleScreenshot = useCallback(() => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) {
+      pushToast('error', 'No canvas found', 'Open the town view first.');
+      return;
+    }
+    try {
+      const url = (canvas as HTMLCanvasElement).toDataURL('image/png');
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `alderbrook-${Date.now()}.png`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      pushToast('success', 'Screenshot saved', 'PNG downloaded.');
+    } catch (err) {
+      pushToast('error', 'Screenshot failed', err instanceof Error ? err.message : 'Canvas not readable.');
+    }
+  }, [pushToast]);
+
+  const handleToggleFavorite = useCallback(() => {
+    if (!selectedAgentId) {
+      pushToast('info', 'No villager selected', 'Select a villager first.');
+      return;
+    }
+    setFavoriteAgents((prev) =>
+      prev.includes(selectedAgentId)
+        ? prev.filter((id) => id !== selectedAgentId)
+        : [...prev, selectedAgentId],
+    );
+  }, [selectedAgentId]);
+
+  const visibleLogs = logQuery.trim()
+    ? logs.filter((log) =>
+        `${log.agentName} ${log.thought} ${log.dialogue} ${log.newTask}`
+          .toLowerCase()
+          .includes(logQuery.trim().toLowerCase()),
+      )
+    : logs;
+
   const paletteActions: PaletteAction[] = [
     {
       id: 'toggle-play',
@@ -3652,15 +3853,63 @@ export default function App() {
       group: 'Help',
       run: () => setHelpOpen(true),
     },
+    {
+      id: 'open-tools',
+      label: 'Open town tools',
+      group: 'Town',
+      hint: 'exchange · journal',
+      keywords: 'market trade convert journal notes',
+      run: () => setToolsOpen(true),
+    },
+    {
+      id: 'screenshot',
+      label: 'Take a screenshot',
+      group: 'Town',
+      hint: 'PNG',
+      keywords: 'capture image export',
+      run: handleScreenshot,
+    },
+    {
+      id: 'rename-building',
+      label: 'Rename selected building',
+      group: 'Buildings',
+      keywords: 'label name',
+      run: handleRenameBuilding,
+    },
+    {
+      id: 'toggle-favorite',
+      label: favoriteAgents.includes(selectedAgentId ?? '')
+        ? 'Unpin selected villager'
+        : 'Pin selected villager',
+      group: 'Villagers',
+      keywords: 'favorite star',
+      run: handleToggleFavorite,
+    },
+    {
+      id: 'toggle-fps',
+      label: showFps ? 'Hide FPS counter' : 'Show FPS counter',
+      group: 'View',
+      keywords: 'performance frames',
+      run: () => setShowFps((value) => !value),
+    },
+    {
+      id: 'toggle-auto-theme',
+      label: autoTheme ? 'Disable auto theme' : 'Enable auto theme',
+      group: 'View',
+      keywords: 'day night theme sync',
+      run: () => setAutoTheme((value) => !value),
+    },
+    ...agents
+      .filter((agent) => favoriteAgents.includes(agent.id))
+      .map<PaletteAction>((agent) => ({
+        id: `pinned-${agent.id}`,
+        label: `Pinned: ${agent.name}`,
+        group: 'Pinned',
+        hint: agent.role,
+        keywords: 'favorite pinned',
+        run: () => handleSelectAgent(agent.id, true),
+      })),
   ];
-
-  const savedAgoLabel = (() => {
-    if (!lastSavedAt) return 'Not saved';
-    const seconds = Math.max(0, Math.round((nowTick - lastSavedAt) / 1000));
-    if (seconds < 10) return 'Saved just now';
-    if (seconds < 60) return `Saved ${seconds}s ago`;
-    return `Saved ${Math.round(seconds / 60)}m ago`;
-  })();
 
   const handleMobileTabToggle = (tab: MobileTab) => {
     setMobileTab((prev) => (prev === tab ? null : tab));
@@ -4083,6 +4332,16 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setToolsOpen(true)}
+            title="Town tools: market exchange and journal"
+            aria-label="Open town tools"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Wrench className="h-4 w-4 text-violet-300" />
+            <span className="hidden md:inline">Tools</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setPaletteOpen(true)}
             title="Search actions, villagers and buildings (⌘K)"
             aria-label="Open command palette"
@@ -4213,8 +4472,28 @@ export default function App() {
               </button>
             </div>
 
+            <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-2">
+              <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden="true" />
+              <input
+                value={logQuery}
+                onChange={(event) => setLogQuery(event.target.value)}
+                placeholder="Filter the town log…"
+                aria-label="Filter town log"
+                className="min-w-0 flex-1 bg-transparent text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none"
+              />
+              {logQuery && (
+                <button
+                  type="button"
+                  onClick={() => setLogQuery('')}
+                  aria-label="Clear log filter"
+                  className="text-[10px] text-slate-400 hover:text-white"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
             <div className="min-h-0 flex-1">
-              <TownLogPanel logs={logs} />
+              <TownLogPanel logs={visibleLogs} />
             </div>
 
             <div className="hud-scroll max-h-[48%] shrink-0 overflow-y-auto border-t border-white/10 bg-slate-950/95">
@@ -4261,6 +4540,17 @@ export default function App() {
                     : 'God Decree & Atmosphere'}
               </span>
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileTab(null);
+                    setToolsOpen(true);
+                  }}
+                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-slate-300 hover:text-white"
+                >
+                  <Wrench className="h-4 w-4 text-violet-300" />
+                  <span>Tools</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -4329,7 +4619,21 @@ export default function App() {
                 />
                 </>
               )}
-              {mobileTab === 'log' && <TownLogPanel logs={logs} />}
+              {mobileTab === 'log' && (
+                <>
+                  <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
+                    <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden="true" />
+                    <input
+                      value={logQuery}
+                      onChange={(event) => setLogQuery(event.target.value)}
+                      placeholder="Filter the town log…"
+                      aria-label="Filter town log"
+                      className="min-w-0 flex-1 bg-transparent text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none"
+                    />
+                  </div>
+                  <TownLogPanel logs={visibleLogs} />
+                </>
+              )}
               {mobileTab === 'decree' && (
                 <DecreePanel
                   activeDecree={activeDecree}
@@ -4536,6 +4840,22 @@ export default function App() {
       />
 
       <ShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+
+      <TownToolsModal
+        isOpen={toolsOpen}
+        townId={activeTownId}
+        townName={townName}
+        resources={resources}
+        caps={townEconomy.caps}
+        onClose={() => setToolsOpen(false)}
+        onExchange={handleExchange}
+      />
+
+      {showFps && (
+        <div className="pointer-events-none fixed left-3 top-20 z-20 rounded-lg border border-white/10 bg-slate-950/80 px-2 py-1 font-mono text-[11px] text-emerald-300 shadow-lg">
+          {fps} fps
+        </div>
+      )}
 
       {/* Help & AI Integration Guide Modal */}
       <HelpGuideModal
