@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Cloud,
+  Command,
   Compass,
   Crown,
   FastForward,
@@ -18,8 +19,10 @@ import {
   Play,
   Plus,
   Radio,
+  Save,
   ScrollText,
   Settings,
+  Trophy,
   Users,
   Video,
   Volume2,
@@ -31,8 +34,12 @@ import { AIProvidersModal } from './components/AIProvidersModal.tsx';
 import { DecreePanel } from './components/DecreePanel.tsx';
 import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette.tsx';
 import { MayorChatModal, type MayorBuildResult } from './components/MayorChatModal.tsx';
+import { ProgressModal } from './components/ProgressModal.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
+import { ShortcutsModal } from './components/ShortcutsModal.tsx';
+import { ToastCenter, type ToastItem, type ToastKind } from './components/ToastCenter.tsx';
 import { ResourceBar } from './components/ResourceBar.tsx';
 import { SignalRelayModal } from './components/SignalRelayModal.tsx';
 import { TownLogPanel } from './components/TownLogPanel.tsx';
@@ -92,6 +99,24 @@ import {
   type LoadedTownState,
 } from './lib/townStore.ts';
 import {
+  clearHistory,
+  loadHistory,
+  recordHistory,
+  type HistorySample,
+} from './lib/townHistory.ts';
+import {
+  ACHIEVEMENTS,
+  evaluateObjectives,
+  loadObjectiveProgress,
+  loadUnlockedAchievements,
+  pickDailyObjectives,
+  saveObjectiveProgress,
+  saveUnlockedAchievements,
+  todayKey,
+  type TownStats,
+} from './lib/progression.ts';
+import { downloadTownExport, parseTownExport } from './lib/townTransfer.ts';
+import {
   loadWebSearchConfig,
   saveWebSearchConfig,
   type WebSearchConfig,
@@ -150,6 +175,17 @@ const REMOTE_BRIDGE_STORAGE_KEY = 'alderbrook_remote_bridge_v1';
 const SIGNAL_RELAY_STORAGE_KEY = 'alderbrook_signal_relay_v1';
 const LOCAL_TOWN_ID_STORAGE_KEY = 'alderbrook_local_town_id';
 const GRAPHICS_QUALITY_STORAGE_KEY = 'alderbrook_graphics_quality';
+
+type UndoSnapshot = {
+  structures: TownStructure[];
+  agents: AgentRecord[];
+  resources: TownResources;
+  metrics: TownMetrics;
+  logs: TownLogItem[];
+  turnCount: number;
+  timeOfDay: TimeOfDay;
+  weather: WeatherMode;
+};
 
 const QUALITY_CYCLE: GraphicsQuality[] = ['low', 'medium', 'high'];
 
@@ -538,6 +574,22 @@ export default function App() {
   const [mayorChatOpen, setMayorChatOpen] = useState(false);
   const [townHallPromptOpen, setTownHallPromptOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [undoCount, setUndoCount] = useState(0);
+  const [townHistory, setTownHistory] = useState<HistorySample[]>(() => loadHistory(activeTownId));
+  const [unlockedAchievements, setUnlockedAchievements] = useState<string[]>(() =>
+    loadUnlockedAchievements(activeTownId),
+  );
+  const [objectiveCompleted, setObjectiveCompleted] = useState<string[]>(() =>
+    loadObjectiveProgress(activeTownId, todayKey()),
+  );
   const [remoteExecutedCount, setRemoteExecutedCount] = useState(0);
   const [signalRelayPulseNonce, setSignalRelayPulseNonce] = useState(0);
   const [triggerTrainNonce, setTriggerTrainNonce] = useState(0);
@@ -563,6 +615,13 @@ export default function App() {
   const activeAgentId = activeAgent?.id ?? 'mayor_sterling';
   const inFlightRef = useRef(false);
   const processingCommandIdsRef = useRef<Set<string>>(new Set());
+  const undoStackRef = useRef<UndoSnapshot[]>([]);
+  const pendingUndoRef = useRef<UndoSnapshot | null>(null);
+  const undoTimerRef = useRef<number | null>(null);
+  const undoApplyingRef = useRef(false);
+  const trackedUndoRef = useRef<UndoSnapshot | null>(null);
+  const toastTimersRef = useRef<number[]>([]);
+  const historySampleRef = useRef('');
 
   const applyLoadedTownState = useCallback((loaded: LoadedTownState) => {
     setActiveTownId(loaded.townId);
@@ -649,6 +708,7 @@ export default function App() {
       logs: logs.slice(0, 40),
     };
     saveLocalTown(snapshot);
+    setLastSavedAt(Date.now());
     if (!user) {
       setSavedTowns(listLocalTowns());
     } else {
@@ -3054,6 +3114,554 @@ export default function App() {
     setSelectedPlotId(null);
   };
 
+  const pushToast = useCallback((kind: ToastKind, title: string, message?: string) => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setToasts((prev) => [...prev.slice(-3), { id, kind, title, message }]);
+    const timer = window.setTimeout(
+      () => setToasts((prev) => prev.filter((toast) => toast.id !== id)),
+      kind === 'error' ? 9000 : 5200,
+    );
+    toastTimersRef.current.push(timer);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((toast) => toast.id !== id));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      toastTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const handleTogglePlay = useCallback(() => {
+    setSecondsLeft(turnIntervalSeconds);
+    setIsPlaying((prev) => !prev);
+  }, [turnIntervalSeconds]);
+
+  const townStats: TownStats = {
+    turnCount,
+    buildingsComplete: structures.filter((structure) => structure.status === 'complete').length,
+    tier3Buildings: structures.filter(
+      (structure) => structure.status === 'complete' && structure.tier >= 3,
+    ).length,
+    population: agents.length,
+    prosperity: metrics.prosperity,
+    orderLevel: metrics.orderLevel,
+    morale: metrics.morale,
+    gold: resources.gold,
+    biomes: unlockedBiomes.length,
+    roads: roads.length,
+    railSpurBuilt,
+    decrees: logs.filter((log) => log.rank === 0).length,
+    relayExecuted: remoteExecutedCount,
+  };
+
+  const townStatsKey = [
+    townStats.turnCount,
+    townStats.buildingsComplete,
+    townStats.tier3Buildings,
+    townStats.population,
+    townStats.prosperity,
+    townStats.orderLevel,
+    townStats.morale,
+    townStats.gold,
+    townStats.biomes,
+    townStats.roads,
+    townStats.railSpurBuilt ? 1 : 0,
+    townStats.decrees,
+    townStats.relayExecuted,
+  ].join(':');
+
+  const dailyObjectives = pickDailyObjectives(activeTownId, todayKey());
+  const objectiveRows = evaluateObjectives(dailyObjectives, townStats, objectiveCompleted);
+  const completedToday = objectiveRows.filter((row) => row.complete).length;
+  const objectiveSignature = objectiveRows
+    .map((row) => `${row.id}:${row.progress}:${row.complete ? 1 : 0}`)
+    .join('|');
+  const achievementRows = ACHIEVEMENTS.map((def) => ({
+    def,
+    unlocked: unlockedAchievements.includes(def.id),
+  }));
+
+  // Award objectives exactly once per local day, reading storage as the source of truth
+  useEffect(() => {
+    const storedCompleted = loadObjectiveProgress(activeTownId, todayKey());
+    const alreadyDone = new Set([...storedCompleted, ...objectiveCompleted]);
+    const freshlyDone = objectiveRows.filter((row) => row.complete && !alreadyDone.has(row.id));
+    if (freshlyDone.length === 0) return;
+
+    setObjectiveCompleted((prev) => {
+      const next = Array.from(new Set([...prev, ...freshlyDone.map((row) => row.id)]));
+      saveObjectiveProgress(activeTownId, todayKey(), next);
+      return next;
+    });
+
+    const caps = getResourceCaps(structures);
+    setResources((prev) => {
+      let next = { ...prev };
+      for (const row of freshlyDone) {
+        next = {
+          timber: Math.min(caps.timber, next.timber + row.reward.timber),
+          stone: Math.min(caps.stone, next.stone + row.reward.stone),
+          food: Math.min(caps.food, next.food + row.reward.food),
+          gold: Math.min(caps.gold, next.gold + row.reward.gold),
+        };
+      }
+      return next;
+    });
+
+    freshlyDone.forEach((row) => {
+      pushToast(
+        'success',
+        `Objective complete: ${row.title}`,
+        `Reward ${formatResourcesShort(row.reward)} added to stores.`,
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objectiveSignature, activeTownId, pushToast]);
+
+  // Unlocks are compared against stored ids so town switches can never replay a toast
+  useEffect(() => {
+    const stored = loadUnlockedAchievements(activeTownId);
+    const fresh = ACHIEVEMENTS.filter((def) => !stored.includes(def.id) && def.check(townStats));
+    if (fresh.length === 0) return;
+    const next = Array.from(new Set([...stored, ...fresh.map((def) => def.id)]));
+    saveUnlockedAchievements(activeTownId, next);
+    setUnlockedAchievements(next);
+    fresh.forEach((def) => pushToast('success', `Achievement: ${def.title}`, def.detail));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [townStatsKey, activeTownId, pushToast]);
+
+  useEffect(() => {
+    setObjectiveCompleted(loadObjectiveProgress(activeTownId, todayKey()));
+    setUnlockedAchievements(loadUnlockedAchievements(activeTownId));
+    setTownHistory(loadHistory(activeTownId));
+    historySampleRef.current = '';
+  }, [activeTownId]);
+
+  const historySampleKey = [
+    activeTownId,
+    turnCount,
+    resources.timber,
+    resources.stone,
+    resources.food,
+    resources.gold,
+    metrics.prosperity,
+    agents.length,
+    townStats.buildingsComplete,
+  ].join(':');
+
+  useEffect(() => {
+    if (historySampleRef.current === historySampleKey) return;
+    historySampleRef.current = historySampleKey;
+    setTownHistory(
+      recordHistory(activeTownId, {
+        turn: turnCount,
+        ts: Date.now(),
+        timber: resources.timber,
+        stone: resources.stone,
+        food: resources.food,
+        gold: resources.gold,
+        prosperity: metrics.prosperity,
+        population: agents.length,
+        buildings: townStats.buildingsComplete,
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historySampleKey]);
+
+  // Coalesce a burst of state writes (one turn or one build) into a single undo step
+  useEffect(() => {
+    const snapshot: UndoSnapshot = {
+      structures,
+      agents,
+      resources,
+      metrics,
+      logs,
+      turnCount,
+      timeOfDay,
+      weather,
+    };
+    const previous = trackedUndoRef.current;
+    trackedUndoRef.current = snapshot;
+    if (!previous || undoApplyingRef.current) return;
+    const changed =
+      previous.structures !== structures ||
+      previous.resources !== resources ||
+      previous.turnCount !== turnCount;
+    if (!changed) return;
+    if (!pendingUndoRef.current) pendingUndoRef.current = previous;
+    if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = window.setTimeout(() => {
+      const pending = pendingUndoRef.current;
+      pendingUndoRef.current = null;
+      if (!pending) return;
+      undoStackRef.current.push(pending);
+      if (undoStackRef.current.length > 20) undoStackRef.current.shift();
+      setUndoCount(undoStackRef.current.length);
+    }, 700);
+  }, [structures, resources, turnCount, timeOfDay, weather]);
+
+  const handleUndo = useCallback(() => {
+    if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current);
+    pendingUndoRef.current = null;
+    const snapshot = undoStackRef.current.pop();
+    setUndoCount(undoStackRef.current.length);
+    if (!snapshot) {
+      pushToast('info', 'Nothing to undo', 'Build, upgrade or advance a turn first.');
+      return;
+    }
+    undoApplyingRef.current = true;
+    setStructures(snapshot.structures);
+    setAgents(snapshot.agents);
+    setResources(snapshot.resources);
+    setMetrics(snapshot.metrics);
+    setLogs(snapshot.logs);
+    setTurnCount(snapshot.turnCount);
+    setTimeOfDay(snapshot.timeOfDay);
+    setWeather(snapshot.weather);
+    window.setTimeout(() => {
+      undoApplyingRef.current = false;
+    }, 900);
+    pushToast(
+      'info',
+      'Undid last change',
+      `Restored turn ${snapshot.turnCount} · ${snapshot.structures.length} sites.`,
+    );
+  }, [pushToast]);
+
+  const buildTownSnapshot = useCallback(
+    (): LoadedTownState => ({
+      townId: activeTownId || LOCAL_MAIN_TOWN_ID,
+      townName,
+      turnCount,
+      activeAgentIndex,
+      activeDecree,
+      metrics,
+      resources,
+      timeOfDay,
+      weather,
+      theme: townTheme,
+      unlockedBiomes,
+      roads,
+      railSpurBuilt,
+      autoMode,
+      agents,
+      structures,
+      logs: logs.slice(0, 40),
+    }),
+    [
+      activeTownId,
+      townName,
+      turnCount,
+      activeAgentIndex,
+      activeDecree,
+      metrics,
+      resources,
+      timeOfDay,
+      weather,
+      townTheme,
+      unlockedBiomes,
+      roads,
+      railSpurBuilt,
+      autoMode,
+      agents,
+      structures,
+      logs,
+    ],
+  );
+
+  const handleSaveNow = useCallback(() => {
+    const snapshot = buildTownSnapshot();
+    saveLocalTown(snapshot);
+    setLastSavedAt(Date.now());
+    setSavedTowns(listLocalTowns());
+    pushToast(
+      'success',
+      'Town saved locally',
+      `${snapshot.townName} · ${snapshot.structures.length} sites · ${snapshot.agents.length} villagers.`,
+    );
+  }, [buildTownSnapshot, pushToast]);
+
+  const handleExportTown = useCallback(() => {
+    try {
+      const filename = downloadTownExport(buildTownSnapshot());
+      pushToast('success', 'Save exported', filename);
+    } catch (err) {
+      pushToast('error', 'Export failed', err instanceof Error ? err.message : 'Unknown error.');
+    }
+  }, [buildTownSnapshot, pushToast]);
+
+  const handleImportTown = useCallback(
+    async (file: File) => {
+      setImportBusy(true);
+      setImportError(null);
+      try {
+        const imported = parseTownExport(await file.text());
+        const next: LoadedTownState = {
+          ...imported,
+          townId: activeTownId || LOCAL_MAIN_TOWN_ID,
+        };
+        applyLoadedTownState(next);
+        saveLocalTown(next);
+        setLastSavedAt(Date.now());
+        setSavedTowns(listLocalTowns());
+        historySampleRef.current = '';
+        setTownHistory(loadHistory(next.townId));
+        pushToast(
+          'success',
+          'Town imported',
+          `${next.townName} · ${next.structures.length} sites · ${next.agents.length} villagers.`,
+        );
+        setProgressOpen(false);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Could not read that save file.';
+        setImportError(message);
+        pushToast('error', 'Import failed', message);
+      } finally {
+        setImportBusy(false);
+      }
+    },
+    [activeTownId, applyLoadedTownState, pushToast],
+  );
+
+  const handleClearTownHistory = useCallback(() => {
+    clearHistory(activeTownId);
+    historySampleRef.current = '';
+    setTownHistory([]);
+    pushToast('info', 'Analytics cleared', 'History for this town was removed.');
+  }, [activeTownId, pushToast]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target !== null &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setPaletteOpen((prev) => !prev);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z' && !isTyping) {
+        event.preventDefault();
+        handleUndo();
+        return;
+      }
+      if (event.key === 'Escape') {
+        setPaletteOpen(false);
+        setShortcutsOpen(false);
+        return;
+      }
+      if (isTyping) return;
+      if (paletteOpen || progressOpen || shortcutsOpen) return;
+      if (event.key === '?') {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      } else if (event.code === 'Space') {
+        event.preventDefault();
+        handleTogglePlay();
+      } else if (event.key.toLowerCase() === 'm') {
+        setShowMinimap((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleUndo, handleTogglePlay, paletteOpen, progressOpen, shortcutsOpen]);
+
+  const paletteActions: PaletteAction[] = [
+    {
+      id: 'toggle-play',
+      label: isPlaying ? 'Pause the simulation' : 'Play the simulation',
+      group: 'Town',
+      hint: 'Space',
+      keywords: 'run stop timer turns',
+      run: handleTogglePlay,
+    },
+    {
+      id: 'open-desk',
+      label: 'Open the Mayor’s Desk',
+      group: 'Town',
+      hint: `${completedToday}/${objectiveRows.length} objectives`,
+      keywords: 'goals achievements analytics save data',
+      run: () => setProgressOpen(true),
+    },
+    {
+      id: 'open-analytics',
+      label: 'Review town analytics',
+      group: 'Town',
+      keywords: 'charts history trends prosperity',
+      run: () => setProgressOpen(true),
+    },
+    {
+      id: 'undo',
+      label: undoCount > 0 ? `Undo last change (${undoCount})` : 'Undo last change',
+      group: 'Town',
+      hint: '⌘Z',
+      keywords: 'revert back',
+      run: handleUndo,
+    },
+    {
+      id: 'save-now',
+      label: 'Save the town now',
+      group: 'Save',
+      keywords: 'persist local',
+      run: handleSaveNow,
+    },
+    {
+      id: 'export-save',
+      label: 'Export save as JSON',
+      group: 'Save',
+      keywords: 'download backup',
+      run: handleExportTown,
+    },
+    {
+      id: 'import-save',
+      label: 'Import a save file',
+      group: 'Save',
+      keywords: 'restore upload backup',
+      run: () => setProgressOpen(true),
+    },
+    {
+      id: 'quality-low',
+      label: 'Graphics: Low',
+      group: 'View',
+      hint: 'battery',
+      keywords: 'quality performance',
+      run: () => handleChangeGraphicsQuality('low'),
+    },
+    {
+      id: 'quality-medium',
+      label: 'Graphics: Medium',
+      group: 'View',
+      hint: 'balanced',
+      run: () => handleChangeGraphicsQuality('medium'),
+    },
+    {
+      id: 'quality-high',
+      label: 'Graphics: High',
+      group: 'View',
+      hint: 'cinematic',
+      run: () => handleChangeGraphicsQuality('high'),
+    },
+    {
+      id: 'cycle-theme',
+      label: `Switch world theme (${TOWN_THEME_META[townTheme].shortLabel})`,
+      group: 'View',
+      keywords: 'theme palette colours look',
+      run: handleCycleTownTheme,
+    },
+    {
+      id: 'weather-rain',
+      label: 'Weather: Rain',
+      group: 'View',
+      run: () => handleChangeWeather('rain'),
+    },
+    {
+      id: 'weather-winter',
+      label: 'Weather: Winter',
+      group: 'View',
+      run: () => handleChangeWeather('winter'),
+    },
+    {
+      id: 'weather-summer',
+      label: 'Weather: Summer',
+      group: 'View',
+      run: () => handleChangeWeather('summer'),
+    },
+    {
+      id: 'time-night',
+      label: 'Time: Night',
+      group: 'View',
+      run: () => handleChangeTimeOfDay('night'),
+    },
+    {
+      id: 'toggle-radar',
+      label: 'Toggle the town radar',
+      group: 'View',
+      hint: 'M',
+      keywords: 'minimap map',
+      run: () => setShowMinimap((prev) => !prev),
+    },
+    {
+      id: 'reset-camera',
+      label: 'Reset the camera',
+      group: 'View',
+      run: () => {
+        setFollowActive(false);
+        setFocusRequest({ type: 'reset', nonce: Date.now() });
+      },
+    },
+    ...agents.slice(0, 15).map<PaletteAction>((agent) => ({
+      id: `agent-${agent.id}`,
+      label: `First-person: ${agent.name}`,
+      group: 'Villagers',
+      hint: agent.role,
+      keywords: `${agent.name} ${agent.role} focus follow`,
+      run: () => handleSelectAgent(agent.id, true),
+    })),
+    ...structures.slice(0, 20).map<PaletteAction>((structure) => ({
+      id: `structure-${structure.plotId}`,
+      label: `Focus ${getStructureDisplayLabel(structure)}`,
+      group: 'Buildings',
+      hint: PLOT_META[structure.plotId].label,
+      keywords: `${structure.structureType} ${structure.customLabel ?? ''} plot`,
+      run: () => handleSelectPlot(structure.plotId),
+    })),
+    {
+      id: 'shortcuts',
+      label: 'Show keyboard shortcuts',
+      group: 'Help',
+      hint: '?',
+      run: () => setShortcutsOpen(true),
+    },
+    {
+      id: 'open-mayor',
+      label: 'Chat with Mayor Sterling',
+      group: 'Help',
+      keywords: 'mayor chat decree build request',
+      run: () => setMayorChatOpen(true),
+    },
+    {
+      id: 'open-relay',
+      label: 'Open The Signal Relay',
+      group: 'Help',
+      keywords: 'cli agents tokens',
+      run: () => setSignalRelayOpen(true),
+    },
+    {
+      id: 'open-settings',
+      label: 'Open AI provider settings',
+      group: 'Help',
+      keywords: 'keys models config',
+      run: () => setSettingsOpen(true),
+    },
+    {
+      id: 'open-help',
+      label: 'Open the help guide',
+      group: 'Help',
+      run: () => setHelpOpen(true),
+    },
+  ];
+
+  const savedAgoLabel = (() => {
+    if (!lastSavedAt) return 'Not saved';
+    const seconds = Math.max(0, Math.round((nowTick - lastSavedAt) / 1000));
+    if (seconds < 10) return 'Saved just now';
+    if (seconds < 60) return `Saved ${seconds}s ago`;
+    return `Saved ${Math.round(seconds / 60)}m ago`;
+  })();
+
   const handleMobileTabToggle = (tab: MobileTab) => {
     setMobileTab((prev) => (prev === tab ? null : tab));
   };
@@ -3098,7 +3706,14 @@ export default function App() {
         onWhisperBuildPlot={handleWhisperBuildPlot}
         onMinimapUpdate={setMinimapCoords}
         onUserOrbitStart={() => setFollowActive(false)}
-        onGraphicsDowngrade={handleChangeGraphicsQuality}
+        onGraphicsDowngrade={(quality) => {
+          handleChangeGraphicsQuality(quality);
+          pushToast(
+            'warn',
+            'Graphics reduced to Medium',
+            'High was averaging under 45 fps on this device.',
+          );
+        }}
       />
 
       {/* Town Hall Quick Action Banner ("Talk to Mayor") */}
@@ -3468,6 +4083,36 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setPaletteOpen(true)}
+            title="Search actions, villagers and buildings (⌘K)"
+            aria-label="Open command palette"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Command className="h-4 w-4 text-sky-300" />
+            <span className="hidden md:inline">Search</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressOpen(true)}
+            title={`Mayor's Desk · ${completedToday}/${objectiveRows.length} objectives today`}
+            aria-label="Open Mayor's Desk"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Trophy className="h-4 w-4 text-amber-300" />
+            <span className="hidden md:inline">Desk</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveNow}
+            title={`Autosave status: ${savedAgoLabel}`}
+            aria-label="Save town now"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium whitespace-nowrap text-slate-400 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Save className="h-3.5 w-3.5 text-emerald-300" />
+            <span className="hidden md:inline">{savedAgoLabel}</span>
+          </button>
+          <button
+            type="button"
             onClick={() => {
               setFollowActive(false);
               setFocusRequest({ type: 'reset', nonce: Date.now() });
@@ -3616,6 +4261,20 @@ export default function App() {
                     : 'God Decree & Atmosphere'}
               </span>
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileTab(null);
+                    setProgressOpen(true);
+                  }}
+                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium text-slate-300 hover:text-white"
+                >
+                  <Trophy className="h-4 w-4 text-amber-300" />
+                  <span>Desk</span>
+                  <span className="font-mono-tabular text-[10px] text-slate-500">
+                    {completedToday}/{objectiveRows.length}
+                  </span>
+                </button>
                 <button
                   type="button"
                   onClick={handleAuthToggle}
@@ -3851,6 +4510,32 @@ export default function App() {
           setSettingsOpen(true);
         }}
       />
+
+      <ToastCenter toasts={toasts} onDismiss={dismissToast} />
+
+      <CommandPalette
+        isOpen={paletteOpen}
+        actions={paletteActions}
+        onClose={() => setPaletteOpen(false)}
+      />
+
+      <ProgressModal
+        isOpen={progressOpen}
+        townName={townName}
+        objectives={objectiveRows}
+        achievements={achievementRows}
+        history={townHistory}
+        lastSavedAt={lastSavedAt}
+        importBusy={importBusy}
+        importError={importError}
+        onClose={() => setProgressOpen(false)}
+        onSaveNow={handleSaveNow}
+        onExport={handleExportTown}
+        onImportFile={handleImportTown}
+        onClearHistory={handleClearTownHistory}
+      />
+
+      <ShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
       {/* Help & AI Integration Guide Modal */}
       <HelpGuideModal
