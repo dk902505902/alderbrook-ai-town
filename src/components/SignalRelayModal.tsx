@@ -132,11 +132,12 @@ Connect directly to **Alderbrook AI Town** to read live town state and issue com
 - **Base URL**: \`${cleanBaseUrl}\`
 - **Town ID**: \`${cleanTownId}\`
 - **Auth**: ${secretNote}
+- **Hosting**: Requires the full-stack Node server (\`server.ts\`). The static Hugging Face build has no \`/api/*\` routes.
 
 ## 1. Read Compact Town State
 \`GET ${cleanBaseUrl}/api/town/${cleanTownId}/state\`
 
-Returns compact JSON: \`weather\`, \`season\`, \`theme\`, \`timeOfDay\`, \`pulse\`, \`resources\`, \`buildings\`, \`villagers\`, and \`lastLogs\` (last 5 events).
+Returns compact JSON: \`weather\`, \`season\`, \`theme\`, \`timeOfDay\`, \`pulse\`, \`stores\` (timber/stone/food/gold), \`economy\` (production, upkeep, net, caps), \`resources\` (population, buildings, plots), \`buildings\`, \`villagers\`, and \`lastLogs\` (last 5 events).
 
 \`\`\`bash
 curl -s "${cleanBaseUrl}/api/town/${cleanTownId}/state"${secret ? ` \\\n  -H "x-town-secret: ${secret}"` : ''}
