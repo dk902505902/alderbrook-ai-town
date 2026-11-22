@@ -398,7 +398,7 @@ function parseNewTownName(text: string): string | null {
   return null;
 }
 
-function parseLocalIntent(
+export function parseLocalIntent(
   text: string,
   unlockedBiomes: BiomeId[],
 ): { reply: string; action: MayorActionPlan } | null {
@@ -481,7 +481,7 @@ function parseLocalIntent(
   if (
     /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
     !/\b(worker|villager|staff)\b/.test(lower) &&
-    /\b(lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|clinic|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
+    /\b(labs?|laborator(?:y|ies)|research|observator(?:y|ies)|cafes?|coffee|shops?|baker(?:y|ies)|watchtowers?|towers?|greenhouses?|farms?|windmills?|mills?|librar(?:y|ies)|granar(?:y|ies)|pavilions?|clocks?|taverns?|inns?|forges?|smith(?:y|ies)?|guilds?|clinics?|museums?|studios?|cabins?|outposts?|buildings?|plots?|stores?|houses?|schools?|markets?|fountains?|wells?|statues?|bridges?|monuments?|theat(?:er|re)s?|plazas?|gardens?|orchards?|banks?|docks?|piers?|temples?|shrin(?:e|es)|arenas?|lighthouses?|spires?|citadels?|barracks?)\b/.test(
       lower,
     )
   ) {
@@ -510,6 +510,25 @@ function parseLocalIntent(
     return {
       reply: `By order of Town Hall, I'll proclaim this across town immediately!`,
       action: { type: 'decree', decree: cleanedDecree },
+    };
+  }
+
+  // 9) Generic build request in plain English ("build me a fountain") → procedural custom building
+  if (
+    /\b(build|construct|erect|create|add|place|put up|open|make)\b/.test(lower) &&
+    !/\b(worker|villager|staff|plan|sure|it|this|that|things?|money|gold|timber|stone|food|better|worse|happy|sad)\b/.test(
+      lower,
+    ) &&
+    extractBuildingName(text).length >= 3
+  ) {
+    const mapped = mapBuildingRequest(text);
+    return {
+      reply: `On it! Architect Lyra is drafting plans for the ${mapped.displayLabel} right now.`,
+      action: {
+        type: 'build',
+        target: mapped.displayLabel,
+        biome: mapped.preferredBiome,
+      },
     };
   }
 
