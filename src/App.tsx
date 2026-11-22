@@ -59,6 +59,11 @@ import {
   resetTownInFirestore,
   subscribePendingRemoteCommands,
 } from './lib/townStore.ts';
+import {
+  loadWebSearchConfig,
+  saveWebSearchConfig,
+  type WebSearchConfig,
+} from './lib/webSearch.ts';
 import type { AgentWorldCoord } from './three/townScene.ts';
 import {
   ALL_PLOT_IDS,
@@ -469,8 +474,12 @@ export default function App() {
   const [signalRelayConfig, setSignalRelayConfig] = useState<SignalRelayConfig>(() =>
     loadSignalRelayConfig(),
   );
+  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig>(() =>
+    loadWebSearchConfig(),
+  );
   const [localTownId] = useState<string>(() => loadOrCreateLocalTownId());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'llm' | 'search'>('llm');
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [signalRelayOpen, setSignalRelayOpen] = useState(false);
   const [mayorChatOpen, setMayorChatOpen] = useState(false);
@@ -2068,6 +2077,54 @@ export default function App() {
     );
   }, []);
 
+  const handleSaveWebSearchConfig = useCallback((nextConfig: WebSearchConfig) => {
+    const saved = saveWebSearchConfig(nextConfig);
+    setWebSearchConfig(saved);
+  }, []);
+
+  const handleDispatchResearcher = useCallback(
+    async (topic: string): Promise<{ scoutName: string; hiredNew: boolean }> => {
+      const snap = stateRef.current;
+      const now = Date.now();
+      const existingScout = snap.agents.find((a) =>
+        /scout|archivist|research|news|reporter|scribe/i.test(`${a.name} ${a.role}`),
+      );
+
+      let scoutName = existingScout?.name ?? 'Architect Lyra';
+      let hiredNew = false;
+
+      if (!existingScout && snap.agents.length < MAX_TOWN_AGENTS) {
+        const hired = await handleHireWorker(
+          'News Scout to gather live world news and research dispatches for Town Hall',
+        );
+        if (hired) {
+          scoutName = hired;
+          hiredNew = true;
+        }
+      }
+
+      const taskSummary = `Live Web Research: "${topic.slice(0, 90)}"`;
+      const researchLog: TownLogItem = {
+        id: `web-research-${now}`,
+        turnNumber: snap.turnCount,
+        agentId: existingScout?.id ?? 'mayor_sterling',
+        agentName: scoutName.slice(0, 60),
+        rank: existingScout?.rank ?? 2,
+        location: 'town_hall',
+        targetAgent: 'Mayor Sterling',
+        thought: `Dispatched by Mayor Sterling to look up live web information on "${topic.slice(0, 100)}".`,
+        dialogue: `Checking live dispatches on "${topic.slice(0, 68)}" for Town Hall!`,
+        newTask: taskSummary,
+        providerLabel: 'Web Search',
+        timestampMs: now,
+      };
+      setLogs((prev) => [researchLog, ...prev].slice(0, 50));
+      soundscape.playAgentChime(2);
+      return { scoutName, hiredNew };
+    },
+    [handleHireWorker],
+  );
+
   const handleSelectPlot = (plotId: PlotId) => {
     setSelectedPlotId(plotId);
     setFollowActive(false);
@@ -2674,15 +2731,21 @@ export default function App() {
         </nav>
       </div>
 
-      {/* AI Providers Settings Modal */}
+      {/* AI Providers & Web Search Settings Modal */}
       <AIProvidersModal
         isOpen={settingsOpen}
         config={providerConfig}
+        webSearchConfig={webSearchConfig}
+        initialTab={settingsInitialTab}
         agents={agents}
         webhookUrl={remoteBridgeConfig.webhookUrl}
         hasServerDefaultKey={hasServerDefaultKey}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          setSettingsOpen(false);
+          setSettingsInitialTab('llm');
+        }}
         onSave={handleSaveProvider}
+        onSaveWebSearchConfig={handleSaveWebSearchConfig}
         onOpenRemoteBridge={() => setBridgeOpen(true)}
         onOpenHelp={() => setHelpOpen(true)}
       />
@@ -2713,7 +2776,10 @@ export default function App() {
         onClose={() => setSignalRelayOpen(false)}
         onUpdateConfig={handleUpdateSignalRelayConfig}
         onTestSignal={handleTestSignalRelay}
-        onOpenAIProviders={() => setSettingsOpen(true)}
+        onOpenAIProviders={() => {
+          setSettingsInitialTab('llm');
+          setSettingsOpen(true);
+        }}
       />
 
       {/* Interactive Mayor Mode Chat Modal */}
@@ -2728,6 +2794,7 @@ export default function App() {
         timeOfDay={timeOfDay}
         activeDecree={activeDecree}
         providerConfig={providerConfig}
+        webSearchConfig={webSearchConfig}
         hasServerDefaultKey={hasServerDefaultKey}
         onClose={() => setMayorChatOpen(false)}
         onTogglePlay={() => {
@@ -2737,7 +2804,12 @@ export default function App() {
         onBuildStructure={handleMayorBuildStructure}
         onHireWorker={handleHireWorker}
         onIssueDecree={handleIssueDecree}
+        onDispatchResearcher={handleDispatchResearcher}
         onMayorSpeak={handleMayorSpeak}
+        onOpenWebSearchSettings={() => {
+          setSettingsInitialTab('search');
+          setSettingsOpen(true);
+        }}
       />
 
       {/* Help & AI Integration Guide Modal */}

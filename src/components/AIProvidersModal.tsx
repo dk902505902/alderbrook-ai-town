@@ -6,11 +6,13 @@ import {
   Cpu,
   Eye,
   EyeOff,
+  Globe,
   HelpCircle,
   KeyRound,
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Star,
   Trash2,
   Wifi,
@@ -30,6 +32,15 @@ import {
   type ProviderTemplate,
 } from '../lib/aiRouting.ts';
 import {
+  cleanSearchApiKeys,
+  createCustomSearchProvider,
+  DEFAULT_WEB_SEARCH_CONFIG,
+  executeWebSearch,
+  sanitizeWebSearchConfig,
+  type SearchProviderEntry,
+  type WebSearchConfig,
+} from '../lib/webSearch.ts';
+import {
   DEFAULT_PROVIDER_CONFIG,
   EXTERNAL_CLI_PROVIDER_ID,
   type AgentRecord,
@@ -40,11 +51,14 @@ import {
 interface AIProvidersModalProps {
   isOpen: boolean;
   config: AIProviderConfig;
+  webSearchConfig: WebSearchConfig;
+  initialTab?: 'llm' | 'search';
   agents: AgentRecord[];
   webhookUrl: string;
   hasServerDefaultKey: boolean;
   onClose: () => void;
   onSave: (nextConfig: AIProviderConfig, nextWebhookUrl: string) => void;
+  onSaveWebSearchConfig: (nextSearchConfig: WebSearchConfig) => void;
   onOpenRemoteBridge: () => void;
   onOpenHelp: () => void;
 }
@@ -66,18 +80,34 @@ const EXTERNAL_CLI_OPTION = encodeChoice(EXTERNAL_CLI_PROVIDER_ID, 'external-cli
 export function AIProvidersModal({
   isOpen,
   config,
+  webSearchConfig,
+  initialTab = 'llm',
   agents,
   webhookUrl,
   hasServerDefaultKey,
   onClose,
   onSave,
+  onSaveWebSearchConfig,
   onOpenRemoteBridge,
   onOpenHelp,
 }: AIProvidersModalProps) {
+  const [modalTab, setModalTab] = useState<'llm' | 'search'>(initialTab);
   const [draft, setDraft] = useState<AIProviderConfig>(() => sanitizeProviderConfig(config));
   const [editingProviderId, setEditingProviderId] = useState<string>(
     () => sanitizeProviderConfig(config).defaultProviderId || 'gemini',
   );
+  const [searchDraft, setSearchDraft] = useState<WebSearchConfig>(() =>
+    sanitizeWebSearchConfig(webSearchConfig),
+  );
+  const [editingSearchId, setEditingSearchId] = useState<string>(
+    () => sanitizeWebSearchConfig(webSearchConfig).defaultProviderId || 'tavily',
+  );
+  const [showSearchKeys, setShowSearchKeys] = useState(false);
+  const [testingSearch, setTestingSearch] = useState(false);
+  const [searchTestResult, setSearchTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
   const [showAddProviderMenu, setShowAddProviderMenu] = useState(false);
   const [draftWebhookUrl, setDraftWebhookUrl] = useState(webhookUrl);
   const [showKeys, setShowKeys] = useState(false);
@@ -92,8 +122,14 @@ export function AIProvidersModal({
   useEffect(() => {
     if (isOpen) {
       const clean = sanitizeProviderConfig(config);
+      const cleanSearch = sanitizeWebSearchConfig(webSearchConfig);
+      setModalTab(initialTab);
       setDraft(clean);
       setEditingProviderId(clean.defaultProviderId || clean.providers?.[0]?.id || 'gemini');
+      setSearchDraft(cleanSearch);
+      setEditingSearchId(cleanSearch.defaultProviderId || 'tavily');
+      setShowSearchKeys(false);
+      setSearchTestResult(null);
       setShowAddProviderMenu(false);
       setDraftWebhookUrl(webhookUrl);
       setTestResult(null);
@@ -101,7 +137,7 @@ export function AIProvidersModal({
       setCustomRowIds({});
       setPerCharOpen(countCharacterOverrides(clean) > 0);
     }
-  }, [isOpen, config, webhookUrl]);
+  }, [isOpen, config, webSearchConfig, initialTab, webhookUrl]);
 
   const providers = useMemo(() => getConfiguredProviders(draft), [draft]);
 
@@ -433,8 +469,128 @@ export function AIProvidersModal({
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     const cleaned = sanitizeProviderConfig(draft);
+    const cleanedSearch = sanitizeWebSearchConfig(searchDraft);
     onSave(cleaned, draftWebhookUrl.trim());
+    onSaveWebSearchConfig(cleanedSearch);
     onClose();
+  };
+
+  const searchProviders = searchDraft.providers;
+  const activeSearchProvider: SearchProviderEntry =
+    searchProviders.find((p) => p.id === editingSearchId) ??
+    searchProviders.find((p) => p.id === searchDraft.defaultProviderId) ??
+    searchProviders[0];
+  const defaultSearchProvider: SearchProviderEntry =
+    searchProviders.find((p) => p.id === searchDraft.defaultProviderId) ?? searchProviders[0];
+  const searchKeyRows =
+    activeSearchProvider.apiKeys.length > 0 ? activeSearchProvider.apiKeys : [''];
+  const activeSearchValidKeys = cleanSearchApiKeys(activeSearchProvider.apiKeys).length;
+  const totalSearchProvidersWithKeys = searchProviders.filter(
+    (p) => cleanSearchApiKeys(p.apiKeys).length > 0,
+  ).length;
+
+  const updateSearchProvider = (
+    providerId: string,
+    updater: (entry: SearchProviderEntry) => SearchProviderEntry,
+  ) => {
+    setSearchDraft((prev) => ({
+      ...prev,
+      providers: prev.providers.map((p) => (p.id === providerId ? updater(p) : p)),
+    }));
+  };
+
+  const handleAddCustomSearchProvider = () => {
+    const existingIds = new Set(searchProviders.map((p) => p.id));
+    const created = createCustomSearchProvider(existingIds);
+    setSearchDraft((prev) => ({
+      ...prev,
+      providers: [...prev.providers, created],
+    }));
+    setEditingSearchId(created.id);
+    setSearchTestResult(null);
+  };
+
+  const handleDeleteSearchProvider = (providerId: string) => {
+    const target = searchProviders.find((p) => p.id === providerId);
+    if (!target || target.builtIn) return;
+    const remaining = searchProviders.filter((p) => p.id !== providerId);
+    const nextDefaultId =
+      searchDraft.defaultProviderId === providerId
+        ? remaining[0]?.id ?? 'tavily'
+        : searchDraft.defaultProviderId;
+    setSearchDraft({ defaultProviderId: nextDefaultId, providers: remaining });
+    setEditingSearchId(nextDefaultId);
+    setSearchTestResult(null);
+  };
+
+  const handleSearchKeyChange = (index: number, rawValue: string) => {
+    const parts = rawValue.includes('\n')
+      ? rawValue
+          .split(/[\r\n]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : null;
+
+    updateSearchProvider(activeSearchProvider.id, (entry) => {
+      const nextKeys = entry.apiKeys.length > 0 ? [...entry.apiKeys] : [''];
+      if (parts && parts.length > 1) {
+        nextKeys.splice(index, 1, ...parts);
+      } else {
+        nextKeys[index] = rawValue;
+      }
+      return { ...entry, apiKeys: nextKeys.slice(0, 20) };
+    });
+  };
+
+  const handleAddSearchKeyRow = () => {
+    updateSearchProvider(activeSearchProvider.id, (entry) => {
+      const next = entry.apiKeys.length > 0 ? [...entry.apiKeys, ''] : ['', ''];
+      return { ...entry, apiKeys: next.slice(0, 20) };
+    });
+  };
+
+  const handleRemoveSearchKeyRow = (index: number) => {
+    updateSearchProvider(activeSearchProvider.id, (entry) => {
+      const next = entry.apiKeys.filter((_, i) => i !== index);
+      return { ...entry, apiKeys: next.length > 0 ? next : [''] };
+    });
+  };
+
+  const handleTestSearch = async () => {
+    setTestingSearch(true);
+    setSearchTestResult(null);
+    const started = performance.now();
+    try {
+      const result = await executeWebSearch(
+        sanitizeWebSearchConfig(searchDraft),
+        'world news today',
+        3,
+        activeSearchProvider,
+      );
+      const elapsedMs = Math.round(performance.now() - started);
+      if (result.ok) {
+        const sampleTitle = result.results[0]?.title
+          ? ` · Top: "${result.results[0].title.slice(0, 52)}"`
+          : '';
+        const keyNote = result.keySlotUsed ? ` via Key #${result.keySlotUsed}` : '';
+        setSearchTestResult({
+          ok: true,
+          message: `${activeSearchProvider.name} OK (${result.results.length} results${keyNote}, ${result.mode}, ${elapsedMs}ms)${sampleTitle}`,
+        });
+      } else {
+        setSearchTestResult({
+          ok: false,
+          message: result.error || 'Web search test failed.',
+        });
+      }
+    } catch (err) {
+      setSearchTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Search test failed.',
+      });
+    } finally {
+      setTestingSearch(false);
+    }
   };
 
   const isEditingDefault = activeProvider.id === defaultProvider.id;
@@ -457,7 +613,7 @@ export function AIProvidersModal({
               AI Providers &amp; Key Pools
             </h2>
             <p className="text-xs text-slate-400">
-              Multiple providers, multi-key rotation &amp; per-character models (local only)
+              LLM models, multi-key rotation &amp; live Web Search providers (local only)
             </p>
           </div>
           <button
@@ -470,9 +626,294 @@ export function AIProvidersModal({
           </button>
         </div>
 
+        {/* Sub-Navigation Tabs: LLM Providers vs Web Search Providers */}
+        <div className="flex shrink-0 gap-1.5 border-b border-white/10 bg-slate-950/70 px-5 py-2">
+          <button
+            type="button"
+            onClick={() => setModalTab('llm')}
+            className={`inline-flex min-h-[38px] flex-1 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition-colors ${
+              modalTab === 'llm'
+                ? 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/45'
+                : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+            }`}
+          >
+            <Cpu className="h-3.5 w-3.5" />
+            <span>LLM Providers</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setModalTab('search')}
+            className={`inline-flex min-h-[38px] flex-1 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition-colors ${
+              modalTab === 'search'
+                ? 'bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-400/45'
+                : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+            }`}
+          >
+            <Globe className="h-3.5 w-3.5" />
+            <span>Web Search Providers</span>
+            {totalSearchProvidersWithKeys > 0 && (
+              <span className="rounded bg-cyan-500/25 px-1.5 py-0.5 font-mono text-[10px] text-cyan-200">
+                {totalSearchProvidersWithKeys}
+              </span>
+            )}
+          </button>
+        </div>
+
         {/* Scrollable Body */}
         <div className="hud-scroll flex-1 space-y-4 overflow-y-auto px-5 py-4">
-          {/* 1. Multi-Provider Selector Strip + Add Provider */}
+          {modalTab === 'search' ? (
+            <>
+              {/* Web Search Provider Strip + Add Custom Search Provider */}
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-slate-300">
+                    Web Search Providers ({searchProviders.length})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleAddCustomSearchProvider}
+                    className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-cyan-400/40 bg-cyan-500/15 px-2.5 text-xs font-medium text-cyan-200 transition-colors hover:bg-cyan-500/25"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add Search Provider</span>
+                  </button>
+                </div>
+
+                <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                  {searchProviders.map((sp) => {
+                    const isSelected = sp.id === activeSearchProvider.id;
+                    const isDef = sp.id === defaultSearchProvider.id;
+                    const kCnt = cleanSearchApiKeys(sp.apiKeys).length;
+                    return (
+                      <button
+                        key={sp.id}
+                        type="button"
+                        onClick={() => {
+                          setEditingSearchId(sp.id);
+                          setSearchTestResult(null);
+                        }}
+                        className={`flex min-h-[50px] flex-col items-start justify-center rounded-xl border px-2.5 py-1.5 text-left transition-colors ${
+                          isSelected
+                            ? 'border-cyan-400 bg-cyan-500/15 text-white'
+                            : 'border-white/10 bg-slate-950/70 text-slate-300 hover:border-white/25 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex w-full items-center justify-between gap-1">
+                          <span className="truncate text-xs font-semibold">{sp.name}</span>
+                          {isDef && <Star className="h-3 w-3 shrink-0 fill-cyan-400 text-cyan-400" />}
+                        </div>
+                        <span className="mt-0.5 font-mono text-[10px] text-slate-400">
+                          {kCnt > 0 ? `${kCnt} ${kCnt === 1 ? 'key' : 'keys'}` : 'No key yet'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Active Web Search Provider Editor */}
+              <div className="space-y-3 rounded-xl border border-white/10 bg-slate-950/60 p-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Globe className="h-4 w-4 text-cyan-300" />
+                    <span className="text-sm font-semibold text-white">
+                      {activeSearchProvider.name}
+                    </span>
+                    {activeSearchProvider.id === defaultSearchProvider.id && (
+                      <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">
+                        Active Default
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {activeSearchProvider.id !== defaultSearchProvider.id && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSearchDraft((prev) => ({
+                            ...prev,
+                            defaultProviderId: activeSearchProvider.id,
+                          }))
+                        }
+                        className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-cyan-400/40 bg-cyan-500/15 px-2.5 text-[11px] font-medium text-cyan-200 hover:bg-cyan-500/25"
+                      >
+                        <Star className="h-3 w-3" />
+                        <span>Set Default</span>
+                      </button>
+                    )}
+                    {!activeSearchProvider.builtIn && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSearchProvider(activeSearchProvider.id)}
+                        aria-label={`Remove ${activeSearchProvider.name}`}
+                        className="flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Custom Provider Name + Endpoint URL */}
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  <div>
+                    <label
+                      htmlFor="search-provider-name"
+                      className="mb-1 block text-xs font-medium text-slate-300"
+                    >
+                      Provider Name
+                    </label>
+                    <input
+                      id="search-provider-name"
+                      type="text"
+                      value={activeSearchProvider.name}
+                      onChange={(e) =>
+                        updateSearchProvider(activeSearchProvider.id, (p) => ({
+                          ...p,
+                          name: e.target.value,
+                        }))
+                      }
+                      className="min-h-[40px] w-full rounded-xl border border-white/10 bg-slate-950 px-3 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="search-endpoint-url"
+                      className="mb-1 block text-xs font-medium text-slate-300"
+                    >
+                      Search API URL
+                    </label>
+                    <input
+                      id="search-endpoint-url"
+                      type="url"
+                      value={activeSearchProvider.endpointUrl}
+                      onChange={(e) =>
+                        updateSearchProvider(activeSearchProvider.id, (p) => ({
+                          ...p,
+                          endpointUrl: e.target.value,
+                        }))
+                      }
+                      placeholder="https://api.tavily.com/search"
+                      className="min-h-[40px] w-full rounded-xl border border-white/10 bg-slate-950 px-3 font-mono text-xs text-white placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Multi-Key Pool for Active Search Provider */}
+                <div className="space-y-2 border-t border-white/10 pt-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+                      <KeyRound className="h-3.5 w-3.5 text-cyan-300" />
+                      <span>
+                        API Key Pool ({activeSearchValidKeys}{' '}
+                        {activeSearchValidKeys === 1 ? 'key' : 'keys'})
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowSearchKeys((s) => !s)}
+                        className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-white/10 bg-slate-900 px-2 text-[11px] text-slate-300 hover:text-white"
+                      >
+                        {showSearchKeys ? (
+                          <EyeOff className="h-3 w-3" />
+                        ) : (
+                          <Eye className="h-3 w-3" />
+                        )}
+                        <span>{showSearchKeys ? 'Hide' : 'Show'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAddSearchKeyRow}
+                        className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-cyan-400/40 bg-cyan-500/15 px-2 text-[11px] font-medium text-cyan-200 hover:bg-cyan-500/25"
+                      >
+                        <Plus className="h-3 w-3" />
+                        <span>Add Another Key</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] leading-snug text-slate-400">
+                    Paste one key per row (or paste multiple lines at once). Keys automatically rotate and fall back if one hits quota or 429 rate limits. Stored locally in your browser only.
+                  </p>
+
+                  <div className="space-y-1.5">
+                    {searchKeyRows.map((keyVal, idx) => (
+                      <div key={`${activeSearchProvider.id}-skey-${idx}`} className="flex gap-1.5">
+                        <input
+                          type={showSearchKeys ? 'text' : 'password'}
+                          value={keyVal}
+                          onChange={(e) => handleSearchKeyChange(idx, e.target.value)}
+                          placeholder={`${activeSearchProvider.name} API Key #${idx + 1}...`}
+                          className="min-h-[40px] min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-950 px-3 font-mono text-xs text-white placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                        />
+                        {searchKeyRows.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSearchKeyRow(idx)}
+                            aria-label={`Remove search key ${idx + 1}`}
+                            className="flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded-xl border border-white/10 bg-slate-900 text-slate-400 hover:border-rose-500/40 hover:text-rose-300"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Key Rotation Strategy */}
+                  {activeSearchValidKeys > 1 && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
+                      <span className="inline-flex items-center gap-1 text-slate-400">
+                        <RefreshCw className="h-3 w-3 text-cyan-300" />
+                        <span>Multi-Key Mode</span>
+                      </span>
+                      <div className="flex gap-1">
+                        {(['round_robin', 'failover'] as const).map((mode) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() =>
+                              updateSearchProvider(activeSearchProvider.id, (p) => ({
+                                ...p,
+                                keyStrategy: mode,
+                              }))
+                            }
+                            className={`min-h-[30px] rounded-lg px-2.5 text-[11px] font-medium transition-colors ${
+                              activeSearchProvider.keyStrategy === mode
+                                ? 'bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-400/50'
+                                : 'bg-slate-900 text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {mode === 'round_robin' ? 'Round-Robin' : 'Failover Only'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Note on Static Hosting vs Render Proxy */}
+                <p className="rounded-lg border border-white/5 bg-slate-900/80 px-2.5 py-2 text-[11px] text-slate-400">
+                  Uses the built-in backend proxy (<code className="text-cyan-300">/api/search/proxy</code>) on full-stack hosts so Brave &amp; Serper work without CORS errors, and falls back to direct browser fetch for Tavily/Exa on static hosts.
+                </p>
+
+                {searchTestResult && (
+                  <div
+                    className={`rounded-xl border px-3 py-2 text-xs ${
+                      searchTestResult.ok
+                        ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
+                        : 'border-rose-500/35 bg-rose-500/10 text-rose-200'
+                    }`}
+                  >
+                    {searchTestResult.message}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              {/* 1. Multi-Provider Selector Strip + Add Provider */}
           <div>
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-slate-300">
@@ -989,28 +1430,49 @@ export function AIProvidersModal({
               {testResult.message}
             </div>
           )}
+            </>
+          )}
         </div>
 
         {/* Footer Actions */}
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-white/10 px-5 py-3.5">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleTestConnection}
-              disabled={testing}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-white/15 bg-slate-800 px-3.5 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700 disabled:opacity-50"
-            >
-              <Wifi className="h-4 w-4" />
-              <span>{testing ? 'Testing...' : `Test ${activeProvider.name.split(' ')[0]}`}</span>
-            </button>
+            {modalTab === 'search' ? (
+              <button
+                type="button"
+                onClick={handleTestSearch}
+                disabled={testingSearch}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-3.5 text-sm font-medium text-cyan-200 transition-colors hover:bg-cyan-500/25 disabled:opacity-50"
+              >
+                <Search className="h-4 w-4" />
+                <span>{testingSearch ? 'Searching...' : 'Test Search'}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testing}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-white/15 bg-slate-800 px-3.5 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700 disabled:opacity-50"
+              >
+                <Wifi className="h-4 w-4" />
+                <span>{testing ? 'Testing...' : `Test ${activeProvider.name.split(' ')[0]}`}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
-                setCustomRowIds({});
-                const fresh = sanitizeProviderConfig(DEFAULT_PROVIDER_CONFIG);
-                setDraft(fresh);
-                setEditingProviderId(fresh.defaultProviderId || 'gemini');
-                setTestResult(null);
+                if (modalTab === 'search') {
+                  const freshSearch = sanitizeWebSearchConfig(DEFAULT_WEB_SEARCH_CONFIG);
+                  setSearchDraft(freshSearch);
+                  setEditingSearchId(freshSearch.defaultProviderId);
+                  setSearchTestResult(null);
+                } else {
+                  setCustomRowIds({});
+                  const fresh = sanitizeProviderConfig(DEFAULT_PROVIDER_CONFIG);
+                  setDraft(fresh);
+                  setEditingProviderId(fresh.defaultProviderId || 'gemini');
+                  setTestResult(null);
+                }
               }}
               className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-white/10 px-3 text-sm font-medium text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
             >

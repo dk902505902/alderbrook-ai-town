@@ -1200,6 +1200,7 @@ async function createServer() {
       agents?: Array<{ name?: string; role?: string; currentTask?: string; location?: string }>;
       structures?: Array<{ plotId?: string; structureType?: string; status?: string; tier?: number }>;
       recentLogs?: Array<{ agentName?: string; dialogue?: string }>;
+      webResults?: Array<{ title?: string; url?: string; snippet?: string; source?: string }>;
     };
 
     const userMessage = String(body.message ?? '').trim().slice(0, 300);
@@ -1213,17 +1214,37 @@ async function createServer() {
     const structsList = Array.isArray(body.structures) ? body.structures.slice(0, 8) : [];
     const logsList = Array.isArray(body.recentLogs) ? body.recentLogs.slice(0, 4) : [];
     const historyList = Array.isArray(body.history) ? body.history.slice(-4) : [];
+    const webResultsList = Array.isArray(body.webResults) ? body.webResults.slice(0, 5) : [];
 
-    const systemPrompt = [
-      'You are Mayor Sterling, the warm, decisive Rank 1 leader of Alderbrook AI Town.',
-      'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-      'Valid action.type values: "none", "build", "hire", "decree".',
-      '- Use "build" if the player asks to build/construct/open/upgrade a building (e.g. Cafe Shop, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name.',
-      '- Use "hire" if the player asks to hire/recruit workers (e.g. barista, baker, farmer, guard). Set action.workerPrompt to a crisp hiring request.',
-      '- Use "decree" if the player issues a town-wide announcement, festival, or civic order. Set action.decree to the decree text.',
-      '- Otherwise set action.type to "none".',
-      'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree","target":"optional","workerPrompt":"optional","decree":"optional"}}',
-    ].join('\n');
+    const systemPrompt =
+      webResultsList.length > 0
+        ? [
+            'You are Mayor Sterling, the warm, sharp Rank 1 leader of Alderbrook AI Town.',
+            'Your News Scout just delivered live internet search results below.',
+            'Summarize the top findings clearly in character as a crisp numbered list (up to 5 concise bullet/numbered items, 1 short sentence each) while staying accurate to the search snippets.',
+            'Return ONLY raw JSON matching: {"reply":"string (concise summary with numbered items)","action":{"type":"none"}}',
+          ].join('\n')
+        : [
+            'You are Mayor Sterling, the warm, decisive Rank 1 leader of Alderbrook AI Town.',
+            'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
+            'Valid action.type values: "none", "build", "hire", "decree".',
+            '- Use "build" if the player asks to build/construct/open/upgrade a building (e.g. Cafe Shop, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name.',
+            '- Use "hire" if the player asks to hire/recruit workers (e.g. barista, baker, farmer, guard). Set action.workerPrompt to a crisp hiring request.',
+            '- Use "decree" if the player issues a town-wide announcement, festival, or civic order. Set action.decree to the decree text.',
+            '- Otherwise set action.type to "none".',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree","target":"optional","workerPrompt":"optional","decree":"optional"}}',
+          ].join('\n');
+
+    const webResultsBlock =
+      webResultsList.length > 0
+        ? [
+            'Live Web Search Results:',
+            ...webResultsList.map(
+              (r, idx) =>
+                `${idx + 1}. ${String(r.title ?? '').slice(0, 110)} (${String(r.source ?? 'web')}) — ${String(r.snippet ?? '').slice(0, 160)}`,
+            ),
+          ].join('\n')
+        : '';
 
     const contextSummary = [
       `Weather: ${weather}, Time: ${String(body.timeOfDay ?? 'day')}, Villagers: ${agentsList.length}/${MAX_TOWN_AGENTS}`,
@@ -1241,6 +1262,7 @@ async function createServer() {
       logsList.length > 0
         ? `Recent Log: ${logsList.map((l) => `${l.agentName}: ${String(l.dialogue ?? '').slice(0, 55)}`).join(' | ')}`
         : '',
+      webResultsBlock,
     ]
       .filter(Boolean)
       .join('\n');
@@ -1265,7 +1287,7 @@ async function createServer() {
           model: modelName,
           messages,
           temperature: 0.65,
-          max_tokens: 260,
+          max_tokens: webResultsList.length > 0 ? 480 : 260,
           response_format: { type: 'json_object' },
         },
         true,
@@ -1286,7 +1308,7 @@ async function createServer() {
       }
 
       const parsed = extractJsonObject(content);
-      const reply = String(parsed.reply ?? '').trim().slice(0, 320);
+      const reply = String(parsed.reply ?? '').trim().slice(0, webResultsList.length > 0 ? 1100 : 320);
       const rawAction =
         parsed.action && typeof parsed.action === 'object'
           ? (parsed.action as Record<string, unknown>)
@@ -1317,6 +1339,219 @@ async function createServer() {
         error: error instanceof Error ? error.message : 'Failed to reach Mayor AI.',
       });
     }
+  });
+
+  // ============================================================================
+  // Web Search Proxy (Tavily, Exa, Serper, Brave, Custom) with Multi-Key Fallback
+  // ============================================================================
+  app.post('/api/search/proxy', async (req: Request, res: Response) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+      preset?: unknown;
+      providerName?: unknown;
+      endpointUrl?: unknown;
+      apiKeys?: unknown;
+      query?: unknown;
+      maxResults?: unknown;
+    };
+
+    const query = String(body.query ?? '').trim().slice(0, 260);
+    if (!query) {
+      res.status(400).json({ ok: false, error: 'Search query cannot be empty.' });
+      return;
+    }
+
+    const preset = String(body.preset ?? 'custom').trim().toLowerCase();
+    const providerName = String(body.providerName ?? preset).trim().slice(0, 48) || 'Web Search';
+    const maxResults = Math.max(1, Math.min(8, Number(body.maxResults) || 5));
+    const apiKeys = Array.isArray(body.apiKeys)
+      ? body.apiKeys.map((k) => String(k ?? '').trim()).filter(Boolean).slice(0, 12)
+      : [];
+
+    if (apiKeys.length === 0) {
+      res.status(400).json({ ok: false, error: `No API keys provided for ${providerName}.` });
+      return;
+    }
+
+    const defaultEndpoints: Record<string, string> = {
+      tavily: 'https://api.tavily.com/search',
+      exa: 'https://api.exa.ai/search',
+      serper: 'https://google.serper.dev/search',
+      brave: 'https://api.search.brave.com/res/v1/web/search',
+    };
+    const rawEndpoint = String(body.endpointUrl ?? '').trim() || defaultEndpoints[preset] || '';
+    if (!rawEndpoint) {
+      res.status(400).json({ ok: false, error: 'Search endpoint URL is required.' });
+      return;
+    }
+
+    let safeUrl: URL;
+    try {
+      safeUrl = await validatePublicWebhookUrl(rawEndpoint);
+    } catch (err) {
+      res.status(400).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Invalid search endpoint URL.',
+      });
+      return;
+    }
+
+    const extractHost = (rawUrl: string): string => {
+      try {
+        return new URL(rawUrl).hostname.replace(/^www\./, '');
+      } catch {
+        return 'web';
+      }
+    };
+
+    const normalizeItems = (data: unknown): Array<{ title: string; url: string; snippet: string; source: string }> => {
+      const obj = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+      let items: unknown[] = [];
+      if (preset === 'tavily' || preset === 'exa') {
+        items = Array.isArray(obj.results) ? obj.results : [];
+      } else if (preset === 'serper') {
+        items = Array.isArray(obj.organic) ? obj.organic : Array.isArray(obj.news) ? obj.news : [];
+      } else if (preset === 'brave') {
+        const web = obj.web as { results?: unknown[] } | undefined;
+        items = Array.isArray(web?.results) ? web.results : Array.isArray(obj.results) ? obj.results : [];
+      } else {
+        items = Array.isArray(obj.results)
+          ? obj.results
+          : Array.isArray(obj.organic)
+            ? obj.organic
+            : Array.isArray(obj.items)
+              ? obj.items
+              : Array.isArray(obj.data)
+                ? obj.data
+                : [];
+      }
+
+      const normalized: Array<{ title: string; url: string; snippet: string; source: string }> = [];
+      for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const rec = item as Record<string, unknown>;
+        const url = String(rec.url ?? rec.link ?? '').trim();
+        const title = String(rec.title ?? rec.name ?? url).trim().slice(0, 140);
+        const rawSnippet =
+          rec.content ??
+          rec.snippet ??
+          rec.description ??
+          rec.text ??
+          (Array.isArray(rec.highlights) ? rec.highlights[0] : '') ??
+          '';
+        const snippet = String(rawSnippet).replace(/\s+/g, ' ').trim().slice(0, 220);
+        if (!title && !url) continue;
+        normalized.push({
+          title: title || 'Web Result',
+          url: url || '#',
+          snippet: snippet || title,
+          source: extractHost(url),
+        });
+        if (normalized.length >= maxResults) break;
+      }
+      return normalized;
+    };
+
+    let lastStatus = 502;
+    let lastError = `Search request to ${providerName} failed.`;
+
+    for (let i = 0; i < apiKeys.length; i++) {
+      const key = apiKeys[i];
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        let upstream: globalThis.Response;
+        if (preset === 'tavily') {
+          upstream = await fetch(safeUrl.toString(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              api_key: key,
+              query,
+              max_results: maxResults,
+              search_depth: 'basic',
+            }),
+            signal: controller.signal,
+          });
+        } else if (preset === 'exa') {
+          upstream = await fetch(safeUrl.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': key,
+            },
+            body: JSON.stringify({
+              query,
+              numResults: maxResults,
+              contents: { highlights: { numSentences: 2 } },
+            }),
+            signal: controller.signal,
+          });
+        } else if (preset === 'serper') {
+          upstream = await fetch(safeUrl.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-KEY': key,
+            },
+            body: JSON.stringify({ q: query, num: maxResults }),
+            signal: controller.signal,
+          });
+        } else if (preset === 'brave') {
+          const braveUrl = new URL(safeUrl.toString());
+          braveUrl.searchParams.set('q', query);
+          braveUrl.searchParams.set('count', String(maxResults));
+          upstream = await fetch(braveUrl.toString(), {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              'X-Subscription-Token': key,
+            },
+            signal: controller.signal,
+          });
+        } else {
+          upstream = await fetch(safeUrl.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${key}`,
+              'x-api-key': key,
+            },
+            body: JSON.stringify({ query, q: query, max_results: maxResults, num: maxResults }),
+            signal: controller.signal,
+          });
+        }
+
+        if (upstream.ok) {
+          const data = (await upstream.json()) as unknown;
+          const results = normalizeItems(data);
+          res.json({
+            ok: true,
+            results,
+            providerName,
+            keyAttemptIndex: i,
+            totalKeys: apiKeys.length,
+          });
+          return;
+        }
+
+        lastStatus = upstream.status;
+        const errText = await upstream.text().catch(() => '');
+        lastError = `${providerName} HTTP ${upstream.status}${errText ? `: ${errText.slice(0, 140)}` : ''}`;
+        if (![401, 402, 403, 429, 500, 502, 503, 504].includes(upstream.status)) {
+          break;
+        }
+      } catch (err) {
+        lastStatus = 502;
+        lastError = err instanceof Error ? err.message : 'Upstream search request timed out.';
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    res.status(lastStatus >= 400 ? lastStatus : 502).json({
+      ok: false,
+      error: lastError,
+    });
   });
 
   app.post('/api/town/turn', async (req: Request, res: Response) => {

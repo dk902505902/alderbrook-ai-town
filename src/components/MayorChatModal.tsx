@@ -2,11 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cpu,
   Crown,
+  ExternalLink,
+  Globe,
   Mic,
   MicOff,
   Pause,
   Play,
   Send,
+  Settings,
   Volume2,
   VolumeX,
   X,
@@ -17,6 +20,13 @@ import {
   formatCompactModelName,
   resolveInferenceConfig,
 } from '../lib/aiRouting.ts';
+import {
+  executeWebSearch,
+  hasAnySearchApiKey,
+  MAYOR_WEB_SEARCH_TOGGLE_KEY,
+  type WebSearchConfig,
+  type WebSearchResult,
+} from '../lib/webSearch.ts';
 import {
   getWeatherSeasonEffect,
   MAX_TOWN_AGENTS,
@@ -37,6 +47,11 @@ export interface MayorBuildResult {
   detail: string;
 }
 
+export interface ResearchDispatchResult {
+  scoutName: string;
+  hiredNew: boolean;
+}
+
 interface MayorChatModalProps {
   isOpen: boolean;
   isPlaying: boolean;
@@ -48,13 +63,16 @@ interface MayorChatModalProps {
   timeOfDay: TimeOfDay;
   activeDecree: string;
   providerConfig: AIProviderConfig;
+  webSearchConfig: WebSearchConfig;
   hasServerDefaultKey: boolean;
   onClose: () => void;
   onTogglePlay: () => void;
   onBuildStructure: (structureType: StructureType, displayLabel?: string) => Promise<MayorBuildResult>;
   onHireWorker: (prompt: string) => Promise<string | null>;
   onIssueDecree: (decree: string) => Promise<void>;
+  onDispatchResearcher: (topic: string) => Promise<ResearchDispatchResult>;
   onMayorSpeak: (dialogue: string) => void;
+  onOpenWebSearchSettings: () => void;
 }
 
 interface ChatMessage {
@@ -63,6 +81,8 @@ interface ChatMessage {
   text: string;
   badge?: string;
   modelTag?: string;
+  sources?: WebSearchResult[];
+  needsSearchSetup?: boolean;
   timestampMs: number;
 }
 
@@ -84,7 +104,7 @@ interface BrowserSpeechRecognition {
   stop: () => void;
 }
 
-const STARTER_CHIPS = [
+const BASE_STARTER_CHIPS = [
   "What's happening in town?",
   'Build a Cafe Shop',
   'Hire a worker',
@@ -92,6 +112,17 @@ const STARTER_CHIPS = [
 ];
 
 const MAX_CHAT_MESSAGES = 30;
+
+function loadWebSearchEnabled(config: WebSearchConfig): boolean {
+  try {
+    const saved = window.localStorage.getItem(MAYOR_WEB_SEARCH_TOGGLE_KEY);
+    if (saved === 'true') return true;
+    if (saved === 'false') return false;
+  } catch {
+    // Ignore storage issues
+  }
+  return hasAnySearchApiKey(config);
+}
 
 function mapBuildingRequest(rawText: string): {
   structureType: StructureType;
@@ -168,21 +199,50 @@ function isSimpleGreeting(text: string): boolean {
 
 function isSimpleStatusCheck(text: string): boolean {
   const lower = text.toLowerCase();
-  const hasActionVerb = /\b(build|construct|make|open|hire|recruit|employ|decree|announce|festival)\b/.test(
+  const hasActionVerb = /\b(build|construct|make|open|hire|recruit|employ|decree|announce|festival|news|search|weather in)\b/.test(
     lower,
   );
   if (hasActionVerb) return false;
-  return /\b(what'?s happening|what is happening|status|report|how is (the )?town|how are things|whats up|what's up|town update|brief me|news)\b/.test(
+  return /\b(what'?s happening|what is happening|status|report|how is (the )?town|how are things|whats up|what's up|town update|brief me)\b/.test(
     lower,
   );
+}
+
+function isLiveWebResearchQuery(text: string): boolean {
+  const lower = text.toLowerCase();
+  // Avoid triggering web search for purely local Alderbrook build/hire commands
+  if (
+    /\b(build|construct|hire|recruit|upgrade)\b/.test(lower) &&
+    !/\b(news|search|look up|internet|web|headlines|latest)\b/.test(lower)
+  ) {
+    return false;
+  }
+  return /\b(world news|5 world news|news|headlines|search|look up|lookup|google|latest|breaking|weather in|forecast in|price of|stock|bitcoin|crypto|score|who won|what happened in|today'?s|live info|internet|online|research)\b/.test(
+    lower,
+  );
+}
+
+function cleanSearchQueryFromMessage(text: string): string {
+  const stripped = text
+    .replace(/^🌐\s*/u, '')
+    .replace(/^(mayor\s*,?\s*)/i, '')
+    .replace(/^(give me|tell me|can you|please|search for|search|look up|find)\s+/i, '')
+    .trim();
+  if (/^5\s+world\s+news$/i.test(stripped) || /^world\s+news$/i.test(stripped)) {
+    return 'top 5 world news headlines today';
+  }
+  return stripped.slice(0, 180) || 'top 5 world news headlines today';
 }
 
 function parseLocalIntent(text: string): { reply: string; action: MayorActionPlan } | null {
   const lower = text.toLowerCase();
 
-  // Build intent
-  if (/\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
-      /\b(cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|building|plot|store)\b/.test(lower)) {
+  if (
+    /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
+    /\b(cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|building|plot|store)\b/.test(
+      lower,
+    )
+  ) {
     const mapped = mapBuildingRequest(text);
     return {
       reply: `Splendid idea! I'm rallying Architect Lyra and our builders to get the ${mapped.displayLabel} underway right away.`,
@@ -190,7 +250,6 @@ function parseLocalIntent(text: string): { reply: string; action: MayorActionPla
     };
   }
 
-  // Hire intent
   if (/\b(hire|recruit|employ|bring in|add a worker|need a|get a)\b/.test(lower)) {
     const cleanedPrompt = text
       .replace(/^(mayor\s*,?\s*)/i, '')
@@ -202,7 +261,6 @@ function parseLocalIntent(text: string): { reply: string; action: MayorActionPla
     };
   }
 
-  // Decree intent
   if (/\b(decree|proclaim|announce|festival|celebrate|declare)\b/.test(lower)) {
     const cleanedDecree = text.replace(/^(mayor\s*,?\s*)/i, '').trim().slice(0, 220);
     return {
@@ -234,25 +292,32 @@ export function MayorChatModal({
   timeOfDay,
   activeDecree,
   providerConfig,
+  webSearchConfig,
   hasServerDefaultKey,
   onClose,
   onTogglePlay,
   onBuildStructure,
   onHireWorker,
   onIssueDecree,
+  onDispatchResearcher,
   onMayorSpeak,
+  onOpenWebSearchSettings,
 }: MayorChatModalProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     {
       id: 'mayor-welcome',
       sender: 'mayor',
-      text: "Welcome to Town Hall! Ask what's happening in Alderbrook, tell me what to build (like a Cafe Shop), or have me hire new workers.",
+      text: "Welcome to Town Hall! Ask what's happening in Alderbrook, tell me what to build (like a Cafe Shop), hire workers, or enable Web Search for live world news.",
       modelTag: 'Instant · 0 tokens',
       timestampMs: Date.now(),
     },
   ]);
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [statusNotice, setStatusNotice] = useState('Mayor Sterling is checking the town ledger…');
+  const [webSearchEnabled, setWebSearchEnabled] = useState<boolean>(() =>
+    loadWebSearchEnabled(webSearchConfig),
+  );
   const [voiceReadout, setVoiceReadout] = useState(false);
   const [isListening, setIsListening] = useState(false);
 
@@ -281,6 +346,11 @@ export function MayorChatModal({
       ? formatCompactModelName(resolvedMayorModel.modelName)
       : 'Fast Local Mode · 0 tokens';
 
+  const starterChips = useMemo(
+    () => (webSearchEnabled ? ['🌐 5 World News', ...BASE_STARTER_CHIPS] : BASE_STARTER_CHIPS),
+    [webSearchEnabled],
+  );
+
   useEffect(() => {
     if (isOpen) {
       feedEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -298,6 +368,18 @@ export function MayorChatModal({
   }, [isOpen, speechOutputSupported]);
 
   if (!isOpen) return null;
+
+  const handleToggleWebSearch = () => {
+    setWebSearchEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(MAYOR_WEB_SEARCH_TOGGLE_KEY, String(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  };
 
   const speakMayorReply = (text: string) => {
     if (!voiceReadout || !speechOutputSupported) return;
@@ -372,9 +454,123 @@ export function MayorChatModal({
     });
 
     setIsSending(true);
+    setStatusNotice('Mayor Sterling is checking the town ledger…');
 
     try {
-      // 1) Zero-Token Fast Path: simple greetings & status reports
+      // 1) Live Web Research Path (when Web Search is ON and user asks for live info)
+      if (webSearchEnabled && isLiveWebResearchQuery(trimmed)) {
+        if (!hasAnySearchApiKey(webSearchConfig)) {
+          const setupReply =
+            'Web Search is turned ON, but I need a Search API key (Tavily, Exa, Serper, or Brave Search) before my scouts can check the outside world.';
+          onMayorSpeak(setupReply);
+          appendMessage({
+            id: `mayor-${Date.now()}`,
+            sender: 'mayor',
+            text: setupReply,
+            badge: '🌐 Add a Web Search API Key',
+            modelTag: 'Web Search Setup · 0 tokens',
+            needsSearchSetup: true,
+            timestampMs: Date.now(),
+          });
+          return;
+        }
+
+        const searchQuery = cleanSearchQueryFromMessage(trimmed);
+        setStatusNotice(`Dispatching News Scout to research "${searchQuery.slice(0, 40)}"…`);
+
+        // Dispatch existing News Scout / Archivist or recruit one (respecting 15-villager cap) & query search in parallel
+        const [dispatchRes, searchRes] = await Promise.all([
+          onDispatchResearcher(searchQuery),
+          executeWebSearch(webSearchConfig, searchQuery, 5),
+        ]);
+
+        if (!searchRes.ok || searchRes.results.length === 0) {
+          const failReply = `My scout ${dispatchRes.scoutName} tried searching via ${searchRes.providerName}, but hit a snag: ${
+            searchRes.error || 'no results returned'
+          }.`;
+          onMayorSpeak(failReply.slice(0, 180));
+          appendMessage({
+            id: `mayor-${Date.now()}`,
+            sender: 'mayor',
+            text: failReply,
+            badge: `⚠️ Search failed (${searchRes.providerName})`,
+            modelTag: searchRes.providerName,
+            needsSearchSetup: true,
+            timestampMs: Date.now(),
+          });
+          return;
+        }
+
+        const topResults = searchRes.results.slice(0, 5);
+        let summaryReply = '';
+        let usedTag = `${searchRes.providerName} · 0 LLM tokens`;
+
+        // Summarize with Mayor Sterling's configured LLM if available (1 compact call)
+        if (hasUsableMayorLlm) {
+          setStatusNotice(`Mayor Sterling is summarizing ${topResults.length} reports from ${dispatchRes.scoutName}…`);
+          try {
+            advanceProviderKeyCursor(resolvedMayorModel);
+            const res = await fetch('/api/town/mayor-chat', {
+              method: 'POST',
+              headers: buildInferenceHeaders(resolvedMayorModel),
+              body: JSON.stringify({
+                message: trimmed,
+                weather,
+                timeOfDay,
+                activeDecree,
+                metrics,
+                agents: agents.slice(0, 6).map((a) => ({
+                  name: a.name,
+                  role: a.role,
+                  currentTask: a.currentTask,
+                  location: a.location,
+                })),
+                structures: structures.map((s) => ({
+                  plotId: s.plotId,
+                  structureType: s.structureType,
+                  status: s.status,
+                  tier: s.tier,
+                })),
+                webResults: topResults,
+              }),
+            });
+            if (res.ok) {
+              const data = (await res.json()) as { reply?: string; modelUsed?: string };
+              if (data.reply) {
+                summaryReply = data.reply;
+                usedTag = `${formatCompactModelName(data.modelUsed || resolvedMayorModel.modelName)} + ${searchRes.providerName}`;
+              }
+            }
+          } catch {
+            // Fall back to direct zero-token formatted summary below
+          }
+        }
+
+        if (!summaryReply) {
+          summaryReply = `${dispatchRes.scoutName} just returned from the wire with ${topResults.length} fresh dispatches:\n${topResults
+            .map((r, i) => `${i + 1}. ${r.title} (${r.source}) — ${r.snippet}`)
+            .join('\n')}`;
+        }
+
+        const scoutBadge = dispatchRes.hiredNew
+          ? `🌐 Hired & Dispatched ${dispatchRes.scoutName} · ${topResults.length} sources (${searchRes.providerName})`
+          : `🌐 Researched by ${dispatchRes.scoutName} · ${topResults.length} sources (${searchRes.providerName})`;
+
+        onMayorSpeak(`${dispatchRes.scoutName} brought back ${topResults.length} fresh reports on "${searchQuery.slice(0, 48)}"!`);
+        speakMayorReply(summaryReply.slice(0, 320));
+        appendMessage({
+          id: `mayor-${Date.now()}`,
+          sender: 'mayor',
+          text: summaryReply,
+          badge: scoutBadge,
+          modelTag: usedTag,
+          sources: topResults,
+          timestampMs: Date.now(),
+        });
+        return;
+      }
+
+      // 2) Zero-Token Fast Path: simple greetings & status reports
       if (isSimpleGreeting(trimmed)) {
         const eff = getWeatherSeasonEffect(weather, structures);
         const reply = `Good day, friend! Alderbrook is in ${eff.label} (${timeOfDay}) with ${agents.length} villagers active. Ask for a status report, tell me what to build, or have me hire new hands!`;
@@ -404,7 +600,7 @@ export function MayorChatModal({
         return;
       }
 
-      // 2) Single-Call LLM Path (when Mayor Sterling has an active AI provider key)
+      // 3) Single-Call LLM Path (when Mayor Sterling has an active AI provider key)
       let replyText = '';
       let actionPlan: MayorActionPlan = { type: 'none' };
       let modelTag = 'Local Intent · 0 tokens';
@@ -458,7 +654,7 @@ export function MayorChatModal({
         }
       }
 
-      // 3) Local Intent Fallback (guaranteed action execution even offline / zero-token mode)
+      // 4) Local Intent Fallback (guaranteed action execution even offline / zero-token mode)
       if (!replyText) {
         const localIntent = parseLocalIntent(trimmed);
         if (localIntent) {
@@ -475,7 +671,6 @@ export function MayorChatModal({
           )} Say "Build a Cafe Shop" or "Hire a barista" anytime to put me to work.`;
         }
       } else if (actionPlan.type === 'none') {
-        // Safety net: if LLM replied conversationally but missed an obvious build/hire order, catch it
         const fallbackIntent = parseLocalIntent(trimmed);
         if (fallbackIntent) {
           actionPlan = fallbackIntent.action;
@@ -541,21 +736,21 @@ export function MayorChatModal({
       aria-modal="true"
       aria-labelledby="mayor-chat-title"
     >
-      <div className="flex h-[84dvh] max-h-[680px] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-amber-400/30 bg-slate-900 shadow-2xl">
-        {/* Header Bar with Pause / Play Toggle */}
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-slate-950/90 px-3.5 py-3">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-amber-400/40 bg-amber-500/15 text-amber-300">
-              <Crown className="h-5 w-5" />
+      <div className="flex h-[86dvh] max-h-[700px] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-amber-400/30 bg-slate-900 shadow-2xl">
+        {/* Header Bar with Pause/Play + Web Search Toggle */}
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/90 px-3.5 py-2.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-amber-400/40 bg-amber-500/15 text-amber-300">
+              <Crown className="h-4 w-4" />
             </div>
             <div className="min-w-0">
               <h2
                 id="mayor-chat-title"
-                className="truncate font-display text-sm font-semibold text-white sm:text-base"
+                className="truncate font-display text-sm font-semibold text-white"
               >
                 Mayor Sterling
               </h2>
-              <div className="flex items-center gap-1 text-[11px] text-slate-400">
+              <div className="flex items-center gap-1 text-[10px] text-slate-400">
                 <Cpu className="h-3 w-3 shrink-0 text-amber-300/80" />
                 <span className="truncate font-mono">{modelBadgeLabel}</span>
               </div>
@@ -563,11 +758,32 @@ export function MayorChatModal({
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* Web Search ON/OFF Toggle */}
+            <button
+              type="button"
+              onClick={handleToggleWebSearch}
+              aria-pressed={webSearchEnabled}
+              title={
+                webSearchEnabled
+                  ? 'Web Search is ON — Mayor can look up live internet news'
+                  : 'Web Search is OFF — tap to enable live internet search'
+              }
+              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2.5 text-[11px] font-semibold transition-colors ${
+                webSearchEnabled
+                  ? 'border-cyan-400/50 bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30'
+                  : 'border-white/10 bg-slate-900 text-slate-400 hover:border-white/25 hover:text-slate-200'
+              }`}
+            >
+              <Globe className="h-3.5 w-3.5 shrink-0" />
+              <span>Web: {webSearchEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+
+            {/* Pause / Play Town Toggle */}
             <button
               type="button"
               onClick={onTogglePlay}
               aria-label={isPlaying ? 'Pause town simulation' : 'Play town simulation'}
-              className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition-colors ${
+              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl px-2.5 text-[11px] font-semibold transition-colors ${
                 isPlaying
                   ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
                   : 'border border-emerald-400/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
@@ -587,7 +803,7 @@ export function MayorChatModal({
                 }}
                 title={voiceReadout ? 'Mute Mayor voice readout' : 'Read Mayor replies aloud'}
                 aria-label={voiceReadout ? 'Mute Mayor voice' : 'Enable Mayor voice'}
-                className={`flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl border transition-colors ${
+                className={`flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl border transition-colors ${
                   voiceReadout
                     ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
                     : 'border-white/10 bg-slate-900 text-slate-400 hover:text-white'
@@ -601,7 +817,7 @@ export function MayorChatModal({
               type="button"
               onClick={onClose}
               aria-label="Close Mayor chat"
-              className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
+              className="flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
             >
               <X className="h-5 w-5" />
             </button>
@@ -618,17 +834,57 @@ export function MayorChatModal({
                 className={`flex flex-col ${isPlayer ? 'items-end' : 'items-start'}`}
               >
                 <div
-                  className={`max-w-[86%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
+                  className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
                     isPlayer
                       ? 'rounded-br-sm bg-amber-500 font-medium text-slate-950'
                       : 'rounded-bl-sm border border-white/10 bg-slate-950/90 text-slate-100'
                   }`}
                 >
-                  <p>{msg.text}</p>
+                  <p className="whitespace-pre-line">{msg.text}</p>
+
                   {msg.badge && (
                     <div className="mt-2 inline-flex items-center rounded-lg border border-emerald-400/35 bg-emerald-500/12 px-2 py-1 text-[11px] font-semibold text-emerald-200">
                       {msg.badge}
                     </div>
+                  )}
+
+                  {msg.sources && msg.sources.length > 0 && (
+                    <div className="mt-2.5 space-y-1 border-t border-white/10 pt-2">
+                      <div className="text-[10px] font-semibold tracking-wide text-cyan-300 uppercase">
+                        Verified Web Sources
+                      </div>
+                      {msg.sources.map((src, idx) => (
+                        <a
+                          key={`${msg.id}-src-${idx}`}
+                          href={src.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-between gap-2 rounded-lg border border-white/5 bg-slate-900/90 px-2.5 py-1.5 text-xs text-slate-200 transition-colors hover:border-cyan-400/40 hover:text-cyan-200"
+                        >
+                          <span className="truncate">
+                            {idx + 1}. {src.title}
+                          </span>
+                          <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-slate-400">
+                            <span>{src.source}</span>
+                            <ExternalLink className="h-3 w-3" />
+                          </span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+
+                  {msg.needsSearchSetup && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onOpenWebSearchSettings();
+                      }}
+                      className="mt-2 inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-cyan-400/45 bg-cyan-500/15 px-3 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25"
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                      <span>Open Web Search Providers →</span>
+                    </button>
                   )}
                 </div>
                 {!isPlayer && msg.modelTag && (
@@ -643,7 +899,7 @@ export function MayorChatModal({
           {isSending && (
             <div className="flex items-start">
               <div className="rounded-2xl rounded-bl-sm border border-white/10 bg-slate-950/80 px-3.5 py-2 text-xs text-amber-200">
-                Mayor Sterling is checking the town ledger…
+                {statusNotice}
               </div>
             </div>
           )}
@@ -653,17 +909,24 @@ export function MayorChatModal({
         {/* Starter Chips + Input Bar */}
         <div className="shrink-0 space-y-2 border-t border-white/10 bg-slate-950/95 px-3.5 py-3">
           <div className="flex flex-wrap gap-1.5">
-            {STARTER_CHIPS.map((chip) => (
-              <button
-                key={chip}
-                type="button"
-                disabled={isSending}
-                onClick={() => void handleSend(chip)}
-                className="min-h-[32px] rounded-lg border border-white/10 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-200 transition-colors hover:border-amber-400/50 hover:text-amber-200 disabled:opacity-40"
-              >
-                {chip}
-              </button>
-            ))}
+            {starterChips.map((chip) => {
+              const isWebChip = chip.startsWith('🌐');
+              return (
+                <button
+                  key={chip}
+                  type="button"
+                  disabled={isSending}
+                  onClick={() => void handleSend(chip)}
+                  className={`min-h-[32px] rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                    isWebChip
+                      ? 'border-cyan-400/45 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25'
+                      : 'border-white/10 bg-slate-900 text-slate-200 hover:border-amber-400/50 hover:text-amber-200'
+                  }`}
+                >
+                  {chip}
+                </button>
+              );
+            })}
           </div>
 
           <form
@@ -698,7 +961,9 @@ export function MayorChatModal({
               placeholder={
                 isListening
                   ? 'Listening… speak to Mayor Sterling'
-                  : 'Ask Mayor Sterling or give an order…'
+                  : webSearchEnabled
+                    ? 'Ask Mayor Sterling or search live world news…'
+                    : 'Ask Mayor Sterling or give an order…'
               }
               className="min-h-[44px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-900 px-3 text-base text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none disabled:opacity-50"
             />
