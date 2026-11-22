@@ -1180,6 +1180,145 @@ async function createServer() {
     }
   });
 
+  app.post('/api/town/mayor-chat', async (req: Request, res: Response) => {
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
+      res.status(400).json({
+        error: 'No AI API key configured for Mayor Sterling.',
+        code: 'MISSING_API_KEY',
+      });
+      return;
+    }
+
+    const body = (req.body ?? {}) as {
+      message?: unknown;
+      history?: Array<{ role?: string; text?: string }>;
+      weather?: unknown;
+      timeOfDay?: unknown;
+      activeDecree?: unknown;
+      metrics?: { prosperity?: number; orderLevel?: number; morale?: number };
+      agents?: Array<{ name?: string; role?: string; currentTask?: string; location?: string }>;
+      structures?: Array<{ plotId?: string; structureType?: string; status?: string; tier?: number }>;
+      recentLogs?: Array<{ agentName?: string; dialogue?: string }>;
+    };
+
+    const userMessage = String(body.message ?? '').trim().slice(0, 300);
+    if (!userMessage) {
+      res.status(400).json({ error: 'Message cannot be empty.' });
+      return;
+    }
+
+    const weather = normalizeWeatherMode(body.weather);
+    const agentsList = Array.isArray(body.agents) ? body.agents.slice(0, MAX_TOWN_AGENTS) : [];
+    const structsList = Array.isArray(body.structures) ? body.structures.slice(0, 8) : [];
+    const logsList = Array.isArray(body.recentLogs) ? body.recentLogs.slice(0, 4) : [];
+    const historyList = Array.isArray(body.history) ? body.history.slice(-4) : [];
+
+    const systemPrompt = [
+      'You are Mayor Sterling, the warm, decisive Rank 1 leader of Alderbrook AI Town.',
+      'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
+      'Valid action.type values: "none", "build", "hire", "decree".',
+      '- Use "build" if the player asks to build/construct/open/upgrade a building (e.g. Cafe Shop, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name.',
+      '- Use "hire" if the player asks to hire/recruit workers (e.g. barista, baker, farmer, guard). Set action.workerPrompt to a crisp hiring request.',
+      '- Use "decree" if the player issues a town-wide announcement, festival, or civic order. Set action.decree to the decree text.',
+      '- Otherwise set action.type to "none".',
+      'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree","target":"optional","workerPrompt":"optional","decree":"optional"}}',
+    ].join('\n');
+
+    const contextSummary = [
+      `Weather: ${weather}, Time: ${String(body.timeOfDay ?? 'day')}, Villagers: ${agentsList.length}/${MAX_TOWN_AGENTS}`,
+      `Pulse: Prosperity ${body.metrics?.prosperity ?? 68}, Order ${body.metrics?.orderLevel ?? 74}, Morale ${body.metrics?.morale ?? 72}`,
+      body.activeDecree ? `Active Decree: ${String(body.activeDecree).slice(0, 140)}` : 'Active Decree: None',
+      `Buildings (${structsList.length}/8): ${
+        structsList.length > 0
+          ? structsList.map((s) => `${s.structureType}(${s.status},T${s.tier ?? 1})`).join(', ')
+          : 'None yet'
+      }`,
+      `Active Tasks: ${agentsList
+        .slice(0, 6)
+        .map((a) => `${a.name}: ${String(a.currentTask ?? '').slice(0, 45)}`)
+        .join(' | ')}`,
+      logsList.length > 0
+        ? `Recent Log: ${logsList.map((l) => `${l.agentName}: ${String(l.dialogue ?? '').slice(0, 55)}`).join(' | ')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: `${systemPrompt}\n\nLive Town Snapshot:\n${contextSummary}` },
+    ];
+    for (const h of historyList) {
+      if (!h.text) continue;
+      messages.push({
+        role: h.role === 'mayor' ? 'assistant' : 'user',
+        content: String(h.text).slice(0, 220),
+      });
+    }
+    messages.push({ role: 'user', content: userMessage });
+
+    try {
+      const result = await callChatCompletionsWithKeyPool(
+        baseUrl,
+        apiKeys,
+        {
+          model: modelName,
+          messages,
+          temperature: 0.65,
+          max_tokens: 260,
+          response_format: { type: 'json_object' },
+        },
+        true,
+      );
+
+      if ('errorText' in result && result.errorText) {
+        res.status(result.status >= 400 ? result.status : 502).json({
+          error: `AI provider error (${result.status}): ${result.errorText}`,
+        });
+        return;
+      }
+
+      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
+      const content = choices?.[0]?.message?.content;
+      if (!content) {
+        res.status(502).json({ error: 'Mayor AI returned an empty response.' });
+        return;
+      }
+
+      const parsed = extractJsonObject(content);
+      const reply = String(parsed.reply ?? '').trim().slice(0, 320);
+      const rawAction =
+        parsed.action && typeof parsed.action === 'object'
+          ? (parsed.action as Record<string, unknown>)
+          : {};
+      const rawType = String(rawAction.type ?? 'none').trim().toLowerCase();
+      const actionType =
+        rawType === 'build' || rawType === 'hire' || rawType === 'decree' ? rawType : 'none';
+
+      res.json({
+        reply: reply || 'Consider it done — Alderbrook is already moving on your word.',
+        action: {
+          type: actionType,
+          target: typeof rawAction.target === 'string' ? rawAction.target.trim().slice(0, 80) : undefined,
+          workerPrompt:
+            typeof rawAction.workerPrompt === 'string'
+              ? rawAction.workerPrompt.trim().slice(0, 180)
+              : undefined,
+          decree:
+            typeof rawAction.decree === 'string'
+              ? rawAction.decree.trim().slice(0, 220)
+              : undefined,
+        },
+        modelUsed: result.modelUsed || modelName,
+        keyAttemptIndex: result.keyAttemptIndex,
+      });
+    } catch (error) {
+      res.status(502).json({
+        error: error instanceof Error ? error.message : 'Failed to reach Mayor AI.',
+      });
+    }
+  });
+
   app.post('/api/town/turn', async (req: Request, res: Response) => {
     const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
     if (apiKeys.length === 0) {

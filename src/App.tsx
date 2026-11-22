@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Cloud,
   Compass,
+  Crown,
   FastForward,
   Gauge,
   HelpCircle,
@@ -27,6 +28,7 @@ import { AIProvidersModal } from './components/AIProvidersModal.tsx';
 import { DecreePanel } from './components/DecreePanel.tsx';
 import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
+import { MayorChatModal, type MayorBuildResult } from './components/MayorChatModal.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
 import { SignalRelayModal } from './components/SignalRelayModal.tsx';
 import { TownLogPanel } from './components/TownLogPanel.tsx';
@@ -471,6 +473,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [signalRelayOpen, setSignalRelayOpen] = useState(false);
+  const [mayorChatOpen, setMayorChatOpen] = useState(false);
+  const [townHallPromptOpen, setTownHallPromptOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [remoteExecutedCount, setRemoteExecutedCount] = useState(0);
   const [signalRelayPulseNonce, setSignalRelayPulseNonce] = useState(0);
@@ -1951,15 +1955,118 @@ export default function App() {
   const handleSelectAgent = (id: AgentId) => {
     setSelectedAgentId(id);
     setSelectedPlotId(null);
+    setTownHallPromptOpen(false);
     setFollowActive(false);
     setFocusRequest({ type: 'agent', id, nonce: Date.now() });
   };
 
   const handleFocusLocation = (id: LocationId) => {
     setSelectedPlotId(null);
+    setTownHallPromptOpen(id === 'town_hall');
     setFollowActive(false);
     setFocusRequest({ type: 'location', id, nonce: Date.now() });
   };
+
+  const handleMayorBuildStructure = useCallback(
+    async (structureType: StructureType, displayLabel?: string): Promise<MayorBuildResult> => {
+      const snap = stateRef.current;
+      const now = Date.now();
+      const label = displayLabel || STRUCTURE_META[structureType].label;
+      const target = parseRemoteBuildTarget(
+        { id: `mayor_${now}`, type: 'build_structure', value: structureType, status: 'pending' },
+        snap.structures,
+      );
+      if (!target) {
+        return {
+          ok: false,
+          badge: 'All 8 plots at Tier 3',
+          detail: 'Every plot in Alderbrook is already built and upgraded to Tier 3.',
+        };
+      }
+      const existing = snap.structures.find((s) => s.plotId === target.plotId);
+      const plotLabel = PLOT_META[target.plotId].shortLabel;
+      let nextStruct: TownStructure;
+      let actionKind: 'create' | 'progress' | 'upgrade';
+      let badge: string;
+
+      if (!existing) {
+        nextStruct = {
+          plotId: target.plotId,
+          structureType,
+          status: 'building',
+          progress: 25,
+          tier: 1,
+          proposedBy: 'Mayor Sterling',
+          lastBuilder: 'Mayor Sterling',
+          updatedAtMs: now,
+        };
+        actionKind = 'create';
+        badge = `Queued: ${label} (${plotLabel})`;
+        setStructures((prev) => [...prev, nextStruct]);
+        soundscape.playAgentChime(1);
+      } else if (existing.status === 'building') {
+        const nextProgress = Math.min(100, existing.progress + 50);
+        const done = nextProgress >= 100;
+        nextStruct = {
+          ...existing,
+          progress: nextProgress,
+          status: done ? 'complete' : 'building',
+          lastBuilder: 'Mayor Sterling',
+          updatedAtMs: now,
+        };
+        actionKind = 'progress';
+        badge = done ? `Completed: ${label} (${plotLabel})` : `Built: ${label} ${nextProgress}%`;
+        setStructures((prev) => prev.map((s) => (s.plotId === nextStruct.plotId ? nextStruct : s)));
+        if (done) soundscape.playBuildCompleteChime();
+        else soundscape.playAgentChime(2);
+      } else {
+        nextStruct = {
+          ...existing,
+          tier: Math.min(3, existing.tier + 1),
+          lastBuilder: 'Mayor Sterling',
+          updatedAtMs: now,
+        };
+        actionKind = 'upgrade';
+        badge = `Upgraded: ${label} to Tier ${nextStruct.tier}`;
+        setStructures((prev) => prev.map((s) => (s.plotId === nextStruct.plotId ? nextStruct : s)));
+        soundscape.playBuildCompleteChime();
+      }
+
+      const logItem: TownLogItem = {
+        id: `mayor-build-${now}`,
+        turnNumber: snap.turnCount,
+        agentId: 'mayor_sterling',
+        agentName: 'Mayor Sterling',
+        rank: 1,
+        location: 'town_hall',
+        targetAgent: 'Architect Lyra',
+        thought: `Player requested ${label} in Mayor Chat.`,
+        dialogue: `${badge} — builders are mobilized!`,
+        newTask: badge,
+        timestampMs: now,
+      };
+      setLogs((prev) => [logItem, ...prev].slice(0, 50));
+      setSelectedPlotId(target.plotId);
+      setFocusRequest({ type: 'plot', id: target.plotId, nonce: now });
+      if (snap.user) {
+        try {
+          await persistRemoteStructureAction(snap.user.uid, actionKind, nextStruct);
+        } catch {
+          // Non-fatal in chat
+        }
+      }
+      return { ok: true, badge, detail: `${badge} on ${PLOT_META[target.plotId].label}.` };
+    },
+    [],
+  );
+
+  const handleMayorSpeak = useCallback((dialogue: string) => {
+    const clean = dialogue.trim().slice(0, 200);
+    if (!clean) return;
+    setAgents((prev) =>
+      prev.map((a) => (a.id === 'mayor_sterling' ? { ...a, dialogue: clean } : a)),
+    );
+  }, []);
 
   const handleSelectPlot = (plotId: PlotId) => {
     setSelectedPlotId(plotId);
@@ -2013,6 +2120,32 @@ export default function App() {
         onMinimapUpdate={setMinimapCoords}
         onUserOrbitStart={() => setFollowActive(false)}
       />
+
+      {/* Town Hall Quick Action Banner ("Talk to Mayor") */}
+      {townHallPromptOpen && !mayorChatOpen && (
+        <div className="fixed top-18 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-2xl border border-amber-400/40 bg-slate-950/95 px-3.5 py-2 shadow-2xl md:top-20">
+          <span className="text-xs font-semibold text-white">Town Hall</span>
+          <button
+            type="button"
+            onClick={() => {
+              setTownHallPromptOpen(false);
+              setMayorChatOpen(true);
+            }}
+            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400"
+          >
+            <Crown className="h-3.5 w-3.5" />
+            <span>Talk to Mayor</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTownHallPromptOpen(false)}
+            aria-label="Dismiss Town Hall prompt"
+            className="rounded-lg px-1.5 py-1 text-xs text-slate-400 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Compact Floating Top Bar */}
       <header className="pointer-events-none fixed top-2.5 right-2.5 left-2.5 z-30 flex items-center justify-between gap-2 md:top-4 md:right-4 md:left-4">
@@ -2068,6 +2201,19 @@ export default function App() {
               <span className="hidden sm:inline">
                 {isThinking ? 'Thinking...' : 'Next Turn'}
               </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setTownHallPromptOpen(false);
+                setMayorChatOpen(true);
+              }}
+              aria-label="Talk to Mayor Sterling"
+              className="hidden min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-amber-400/45 bg-amber-500/15 px-3 text-xs font-semibold whitespace-nowrap text-amber-200 transition-colors hover:bg-amber-500/25 md:inline-flex"
+            >
+              <Crown className="h-4 w-4" />
+              <span>Talk to Mayor</span>
             </button>
 
             <button
@@ -2471,43 +2617,59 @@ export default function App() {
         {/* Mobile Bottom Tab Bar */}
         <nav
           aria-label="Town panels"
-          className="grid grid-cols-3 border-t border-white/10 bg-slate-950/95 px-2 py-1"
+          className="grid grid-cols-4 border-t border-white/10 bg-slate-950/95 px-1.5 py-1"
         >
           <button
             type="button"
+            onClick={() => {
+              setMobileTab(null);
+              setTownHallPromptOpen(false);
+              setMayorChatOpen(true);
+            }}
+            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
+              mayorChatOpen
+                ? 'bg-amber-500 text-slate-950'
+                : 'text-amber-300 hover:bg-amber-500/15'
+            }`}
+          >
+            <Crown className="h-4 w-4" />
+            <span>Mayor</span>
+          </button>
+          <button
+            type="button"
             onClick={() => handleMobileTabToggle('hierarchy')}
-            className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
               mobileTab === 'hierarchy'
                 ? 'bg-amber-500/15 text-amber-300'
                 : 'text-slate-300 hover:text-white'
             }`}
           >
             <Users className="h-4 w-4" />
-            <span>Hierarchy</span>
+            <span>Town</span>
           </button>
           <button
             type="button"
             onClick={() => handleMobileTabToggle('log')}
-            className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
               mobileTab === 'log'
                 ? 'bg-amber-500/15 text-amber-300'
                 : 'text-slate-300 hover:text-white'
             }`}
           >
             <ScrollText className="h-4 w-4" />
-            <span>Town Log</span>
+            <span>Log</span>
           </button>
           <button
             type="button"
             onClick={() => handleMobileTabToggle('decree')}
-            className={`flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
               mobileTab === 'decree'
                 ? 'bg-amber-500/15 text-amber-300'
                 : 'text-slate-300 hover:text-white'
             }`}
           >
             <MessageSquareText className="h-4 w-4" />
-            <span>God Decree</span>
+            <span>Decree</span>
           </button>
         </nav>
       </div>
@@ -2552,6 +2714,30 @@ export default function App() {
         onUpdateConfig={handleUpdateSignalRelayConfig}
         onTestSignal={handleTestSignalRelay}
         onOpenAIProviders={() => setSettingsOpen(true)}
+      />
+
+      {/* Interactive Mayor Mode Chat Modal */}
+      <MayorChatModal
+        isOpen={mayorChatOpen}
+        isPlaying={isPlaying}
+        agents={agents}
+        structures={structures}
+        logs={logs}
+        metrics={metrics}
+        weather={weather}
+        timeOfDay={timeOfDay}
+        activeDecree={activeDecree}
+        providerConfig={providerConfig}
+        hasServerDefaultKey={hasServerDefaultKey}
+        onClose={() => setMayorChatOpen(false)}
+        onTogglePlay={() => {
+          setSecondsLeft(turnIntervalSeconds);
+          setIsPlaying((p) => !p);
+        }}
+        onBuildStructure={handleMayorBuildStructure}
+        onHireWorker={handleHireWorker}
+        onIssueDecree={handleIssueDecree}
+        onMayorSpeak={handleMayorSpeak}
       />
 
       {/* Help & AI Integration Guide Modal */}
