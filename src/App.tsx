@@ -33,6 +33,7 @@ import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
 import { MayorChatModal, type MayorBuildResult } from './components/MayorChatModal.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
+import { ResourceBar } from './components/ResourceBar.tsx';
 import { SignalRelayModal } from './components/SignalRelayModal.tsx';
 import { TownLogPanel } from './components/TownLogPanel.tsx';
 import { TownMinimap } from './components/TownMinimap.tsx';
@@ -45,6 +46,23 @@ import {
   resolveInferenceConfig,
   sanitizeProviderConfig,
 } from './lib/aiRouting.ts';
+import {
+  applyTurnEconomy,
+  canAfford,
+  formatResourceCost,
+  formatResourcesShort,
+  getResourceCaps,
+  getStructureBuildCost,
+  getTurnEconomy,
+  getUpgradeCost,
+  spendResources,
+  BIOME_UNLOCK_COST,
+  DEFAULT_TOWN_RESOURCES,
+  RAIL_SPUR_BUILD_COST,
+  ROAD_BUILD_COST,
+  type TownResourceFlow,
+  type TownResources,
+} from './lib/economy.ts';
 import { auth, googleAuthProvider } from './lib/firebase.ts';
 import { soundscape } from './lib/soundscape.ts';
 import {
@@ -66,6 +84,7 @@ import {
   persistHiredWorkers,
   persistRemoteStructureAction,
   persistTownExpansion,
+  persistTownResources,
   persistWeatherShift,
   resetTownInFirestore,
   saveLocalTown,
@@ -437,6 +456,9 @@ export default function App() {
   const [roads, setRoads] = useState<string[]>(initialLocal.current.roads);
   const [railSpurBuilt, setRailSpurBuilt] = useState<boolean>(initialLocal.current.railSpurBuilt);
   const [autoMode, setAutoMode] = useState<boolean>(initialLocal.current.autoMode);
+  const [resources, setResources] = useState<TownResources>(
+    initialLocal.current.resources ?? DEFAULT_TOWN_RESOURCES,
+  );
 
   const [agents, setAgents] = useState<AgentRecord[]>(initialLocal.current.agents);
   const [structures, setStructures] = useState<TownStructure[]>(initialLocal.current.structures);
@@ -553,6 +575,7 @@ export default function App() {
     setRoads(loaded.roads);
     setRailSpurBuilt(loaded.railSpurBuilt);
     setAutoMode(loaded.autoMode);
+    setResources(loaded.resources ?? DEFAULT_TOWN_RESOURCES);
     setAgents(loaded.agents);
     setStructures(loaded.structures);
     setLogs(loaded.logs);
@@ -610,6 +633,7 @@ export default function App() {
       activeAgentIndex,
       activeDecree,
       metrics,
+      resources,
       timeOfDay,
       weather,
       theme: townTheme,
@@ -637,6 +661,7 @@ export default function App() {
     activeAgentIndex,
     activeDecree,
     metrics,
+    resources,
     timeOfDay,
     weather,
     townTheme,
@@ -703,6 +728,7 @@ export default function App() {
     activeAgentIndex,
     activeDecree,
     metrics,
+    resources,
     timeOfDay,
     weather,
     townTheme,
@@ -726,6 +752,7 @@ export default function App() {
     activeAgentIndex,
     activeDecree,
     metrics,
+    resources,
     timeOfDay,
     weather,
     townTheme,
@@ -1013,6 +1040,24 @@ export default function App() {
         }
       }
 
+      // Harvest, villager upkeep and starvation pressure from the living economy
+      const incomingVillagers =
+        result.hired_worker &&
+        currentAgent.id === 'mayor_sterling' &&
+        snap.agents.length < MAX_TOWN_AGENTS
+          ? 1
+          : 0;
+      const economy = applyTurnEconomy(
+        snap.resources ?? DEFAULT_TOWN_RESOURCES,
+        nextStructures,
+        snap.agents.length + incomingVillagers,
+        snap.weather,
+      );
+      if (economy.flow.starvation) {
+        moraleDelta -= 2;
+        orderDelta -= 1;
+      }
+
       const nextMetrics: TownMetrics = {
         prosperity: clampMetric(snap.metrics.prosperity + prosperityDelta),
         orderLevel: clampMetric(snap.metrics.orderLevel + orderDelta),
@@ -1112,6 +1157,7 @@ export default function App() {
       setTurnCount(nextTurnNumber);
       setActiveAgentIndex(nextAgentIndex);
       setMetrics(nextMetrics);
+      setResources(economy.resources);
       if (nextTimeOfDay !== snap.timeOfDay) {
         setTimeOfDay(nextTimeOfDay);
       }
@@ -1157,6 +1203,9 @@ export default function App() {
       }
 
       if (snap.user) {
+        void persistTownResources(snap.user.uid, economy.resources, snap.activeTownId).catch(
+          () => {},
+        );
         await persistAgentTurn(
           snap.user.uid,
           nextTurnNumber,
@@ -1634,7 +1683,18 @@ export default function App() {
             const label = STRUCTURE_META[existing?.structureType || target.structureType].label;
             const plotLabel = PLOT_META[target.plotId].label;
 
-            if (!existing) {
+            const remoteCost: TownResources = existing
+              ? existing.status === 'building'
+                ? { timber: 0, stone: 0, food: 0, gold: 0 }
+                : existing.tier < 3
+                  ? getUpgradeCost(existing.structureType, existing.tier, existing.customStyle)
+                  : { timber: 0, stone: 0, food: 0, gold: 0 }
+              : getStructureBuildCost(target.structureType);
+
+            if (!canAfford(snap.resources, remoteCost)) {
+              execStatus = 'failed';
+              resultMessage = `${label} needs ${formatResourceCost(remoteCost)}, but the town holds ${formatResourcesShort(snap.resources)}.`;
+            } else if (!existing) {
               const created: TownStructure = {
                 plotId: target.plotId,
                 structureType: target.structureType,
@@ -1710,6 +1770,24 @@ export default function App() {
               resultMessage = `Upgraded ${label} on ${plotLabel} to Tier ${upgraded.tier}.`;
             } else {
               resultMessage = `${label} on ${plotLabel} is already Tier 3.`;
+            }
+
+            if (execStatus === 'executed') {
+              const remotePaid = spendResources(
+                snap.resources,
+                remoteCost,
+                getResourceCaps(snap.structures),
+              );
+              if (remoteCost.timber + remoteCost.stone + remoteCost.food + remoteCost.gold > 0) {
+                setResources(remotePaid);
+                if (snap.user) {
+                  void persistTownResources(
+                    snap.user.uid,
+                    remotePaid,
+                    snap.activeTownId,
+                  ).catch(() => {});
+                }
+              }
             }
           }
         }
@@ -1824,6 +1902,11 @@ export default function App() {
           order: metrics.orderLevel,
           morale: metrics.morale,
         },
+        stores: resources,
+        economy: (() => {
+          const flow = getTurnEconomy(structures, agents.length, weather);
+          return { production: flow.production, upkeep: flow.upkeep, net: flow.net, caps: flow.caps };
+        })(),
         resources: {
           population: agents.length,
           maxPopulation: MAX_TOWN_AGENTS,
@@ -1882,6 +1965,7 @@ export default function App() {
     turnCount,
     activeDecree,
     metrics,
+    resources,
     agents,
     structures,
     logs,
@@ -2105,6 +2189,7 @@ export default function App() {
           activeAgentIndex: snap.activeAgentIndex,
           activeDecree: snap.activeDecree,
           metrics: snap.metrics,
+          resources: snap.resources,
           timeOfDay: snap.timeOfDay,
           weather: snap.weather,
           theme: snap.townTheme,
@@ -2162,6 +2247,7 @@ export default function App() {
           activeAgentIndex: snap.activeAgentIndex,
           activeDecree: snap.activeDecree,
           metrics: snap.metrics,
+          resources: snap.resources,
           timeOfDay: snap.timeOfDay,
           weather: snap.weather,
           theme: snap.townTheme,
@@ -2228,6 +2314,21 @@ export default function App() {
         badge: `${meta.shortLabel} Already Open`,
         detail: `${meta.label} is already unlocked with 2 build plots ready.`,
       };
+    }
+
+    if (!canAfford(snap.resources, BIOME_UNLOCK_COST)) {
+      const detail = `Opening the ${meta.label} needs ${formatResourceCost(BIOME_UNLOCK_COST)}, but the town holds ${formatResourcesShort(snap.resources)}.`;
+      setErrorBanner(detail);
+      return { ok: false, badge: 'Insufficient Stores', detail };
+    }
+    const biomeStores = spendResources(
+      snap.resources,
+      BIOME_UNLOCK_COST,
+      getResourceCaps(snap.structures),
+    );
+    setResources(biomeStores);
+    if (snap.user) {
+      void persistTownResources(snap.user.uid, biomeStores, snap.activeTownId).catch(() => {});
     }
 
     const nextBiomes: BiomeId[] = [...snap.unlockedBiomes, biome];
@@ -2346,6 +2447,21 @@ export default function App() {
       };
     }
 
+    if (!canAfford(snap.resources, ROAD_BUILD_COST)) {
+      const detail = `${roadLabel} needs ${formatResourceCost(ROAD_BUILD_COST)}, but the town holds ${formatResourcesShort(snap.resources)}.`;
+      setErrorBanner(detail);
+      return { ok: false, badge: 'Insufficient Stores', detail };
+    }
+    const roadStores = spendResources(
+      snap.resources,
+      ROAD_BUILD_COST,
+      getResourceCaps(snap.structures),
+    );
+    setResources(roadStores);
+    if (snap.user) {
+      void persistTownResources(snap.user.uid, roadStores, snap.activeTownId).catch(() => {});
+    }
+
     const nextRoads = [...snap.roads, roadId].slice(0, 24);
     setRoads(nextRoads);
     soundscape.playAgentChime(2);
@@ -2392,6 +2508,21 @@ export default function App() {
         badge: 'Frontier Rail Spur Active',
         detail: 'The East Frontier Rail Spur & Depot are already operational — summoning the steam express!',
       };
+    }
+
+    if (!canAfford(snap.resources, RAIL_SPUR_BUILD_COST)) {
+      const detail = `The Frontier Rail Spur & Depot needs ${formatResourceCost(RAIL_SPUR_BUILD_COST)}, but the town holds ${formatResourcesShort(snap.resources)}.`;
+      setErrorBanner(detail);
+      return { ok: false, badge: 'Insufficient Stores', detail };
+    }
+    const railStores = spendResources(
+      snap.resources,
+      RAIL_SPUR_BUILD_COST,
+      getResourceCaps(snap.structures),
+    );
+    setResources(railStores);
+    if (snap.user) {
+      void persistTownResources(snap.user.uid, railStores, snap.activeTownId).catch(() => {});
     }
 
     const nextRoads = snap.roads.includes('plaza_to_spur')
@@ -2590,6 +2721,21 @@ export default function App() {
 
       const existing = occupiedMap.get(chosenPlot);
       const plotLabel = PLOT_META[chosenPlot].shortLabel;
+
+      // Stores gate: brand-new buildings and Tier upgrades are paid up front
+      const isUpgradeAction = Boolean(
+        existing && existing.status === 'complete' && existing.tier < 3,
+      );
+      const buildCost: TownResources = existing
+        ? isUpgradeAction
+          ? getUpgradeCost(existing.structureType, existing.tier, existing.customStyle)
+          : { timber: 0, stone: 0, food: 0, gold: 0 }
+        : getStructureBuildCost(structureType, resolvedStyle);
+      if (!canAfford(snap.resources, buildCost)) {
+        const detail = `${label} needs ${formatResourceCost(buildCost)}, but the town holds ${formatResourcesShort(snap.resources)}.`;
+        if (!snap.autoMode) setErrorBanner(detail);
+        return { ok: false, badge: 'Insufficient Stores', detail };
+      }
       let nextStruct: TownStructure;
       let actionKind: 'create' | 'progress' | 'upgrade';
       let badge: string;
@@ -2641,6 +2787,21 @@ export default function App() {
         badge = `Upgraded: ${existingLabel} to Tier ${nextStruct.tier}`;
         setStructures((prev) => prev.map((s) => (s.plotId === nextStruct.plotId ? nextStruct : s)));
         soundscape.playBuildCompleteChime();
+      }
+
+      // Pay for this project from the town stores
+      const totalBuildCost =
+        buildCost.timber + buildCost.stone + buildCost.food + buildCost.gold;
+      if (totalBuildCost > 0) {
+        const paidStores = spendResources(
+          snap.resources,
+          buildCost,
+          getResourceCaps(snap.structures),
+        );
+        setResources(paidStores);
+        if (snap.user) {
+          void persistTownResources(snap.user.uid, paidStores, snap.activeTownId).catch(() => {});
+        }
       }
 
       // If creating a custom building (e.g. Research Lab) and under 15-villager cap, staff a matching specialist!
@@ -2873,6 +3034,7 @@ export default function App() {
 
   const activeSpeaker = agents.find((a) => a.id === activeAgentId);
   const isMainTown = user ? activeTownId === user.uid : activeTownId === LOCAL_MAIN_TOWN_ID;
+  const townEconomy: TownResourceFlow = getTurnEconomy(structures, agents.length, weather);
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -3313,6 +3475,7 @@ export default function App() {
                 <ChevronLeft className="h-4 w-4" />
               </button>
             </div>
+            <ResourceBar resources={resources} flow={townEconomy} />
             <div className="min-h-0 flex-1">
               <HierarchyPanel
                 agents={agents}
@@ -3447,7 +3610,9 @@ export default function App() {
 
             <div className="min-h-0 flex-1 overflow-y-auto">
               {mobileTab === 'hierarchy' && (
-                <HierarchyPanel
+                <>
+                  <ResourceBar resources={resources} flow={townEconomy} />
+                  <HierarchyPanel
                   agents={agents}
                   structures={structures}
                   metrics={metrics}
@@ -3475,6 +3640,7 @@ export default function App() {
                     setMobileTab(null);
                   }}
                 />
+                </>
               )}
               {mobileTab === 'log' && <TownLogPanel logs={logs} />}
               {mobileTab === 'decree' && (

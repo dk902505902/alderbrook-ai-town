@@ -100,6 +100,22 @@ service cloud.firestore {
       return st in ['pending', 'executed', 'failed'];
     }
 
+    function isValidResourceAmount(val) {
+      return val is int && val >= 0 && val <= 100000;
+    }
+
+    function isValidTownStores(data) {
+      return data.keys().hasAll(['ownerId', 'timber', 'stone', 'food', 'gold', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'timber', 'stone', 'food', 'gold', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
+        && isValidResourceAmount(data.timber)
+        && isValidResourceAmount(data.stone)
+        && isValidResourceAmount(data.food)
+        && isValidResourceAmount(data.gold)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidTownState(data) {
       return data.keys().hasAll(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'createdAt', 'updatedAt'])
@@ -291,6 +307,38 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['tier', 'lastBuilder', 'updatedAt'])
           );
         allow delete: if isValidId(townId) && isValidId(plotId) && isSignedIn() && existing().ownerId == request.auth.uid;
+      }
+
+      // Town Resource Stores (/towns/{townId}/economy/stores)
+      match /economy/{docId} {
+        allow get: if isValidId(townId)
+          && docId == 'stores'
+          && isSignedIn()
+          && isParentOwner(townId)
+          && existing().ownerId == request.auth.uid;
+        allow list: if false;
+        allow create: if isValidId(townId)
+          && docId == 'stores'
+          && isSignedIn()
+          && isParentOwner(townId)
+          && isValidTownStores(incoming())
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(townId)
+          && docId == 'stores'
+          && isSignedIn()
+          && isParentOwner(townId)
+          && existing().ownerId == request.auth.uid
+          && isValidTownStores(incoming())
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['timber', 'stone', 'food', 'gold', 'updatedAt']);
+        allow delete: if isValidId(townId)
+          && docId == 'stores'
+          && isSignedIn()
+          && isParentOwner(townId)
+          && existing().ownerId == request.auth.uid;
       }
 
       // Append-Only Town Logs Subcollection

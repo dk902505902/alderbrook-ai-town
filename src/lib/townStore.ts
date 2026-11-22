@@ -45,6 +45,11 @@ import {
   type TownTheme,
   type WeatherMode,
 } from '../types/town.ts';
+import {
+  DEFAULT_TOWN_RESOURCES,
+  sanitizeResources,
+  type TownResources,
+} from './economy.ts';
 
 export interface LoadedTownState {
   townId: string;
@@ -53,6 +58,7 @@ export interface LoadedTownState {
   activeAgentIndex: number;
   activeDecree: string;
   metrics: TownMetrics;
+  resources: TownResources;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
   theme: TownTheme;
@@ -290,6 +296,7 @@ export function createFreshTownState(
     activeAgentIndex: 0,
     activeDecree: '',
     metrics: { ...DEFAULT_TOWN_METRICS },
+    resources: { ...DEFAULT_TOWN_RESOURCES },
     timeOfDay: 'day',
     weather: 'summer',
     theme: 'meadow',
@@ -417,6 +424,7 @@ export function loadLocalTown(townId: string): LoadedTownState | null {
       roads: sanitizeRoads(d.roads),
       railSpurBuilt: Boolean(d.railSpurBuilt),
       autoMode: Boolean(d.autoMode),
+      resources: sanitizeResources(d.resources),
       agents,
       structures,
       logs,
@@ -538,6 +546,13 @@ export async function createNewTownInFirestore(
     batch.set(doc(db, 'towns', townId, 'agents', agent.id), buildAgentDocPayload(uid, agent));
   }
 
+  batch.set(doc(db, 'towns', townId, 'economy', 'stores'), {
+    ownerId: uid,
+    ...fresh.resources,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
   const seedLog = fresh.logs[0];
   batch.set(doc(db, 'towns', townId, 'logs', seedLog.id), {
     ownerId: uid,
@@ -604,6 +619,13 @@ export async function loadOrInitializeTown(
       updatedAt: serverTimestamp(),
     });
 
+    batch.set(doc(db, 'towns', townId, 'economy', 'stores'), {
+      ownerId: uid,
+      ...fresh.resources,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
     for (const agent of initialAgents) {
       const agentRef = doc(db, 'towns', townId, 'agents', agent.id);
       batch.set(agentRef, buildAgentDocPayload(uid, agent));
@@ -660,6 +682,24 @@ export async function loadOrInitializeTown(
     );
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, logsPath);
+  }
+
+  let economySnap;
+  try {
+    economySnap = await getDoc(doc(db, 'towns', townId, 'economy', 'stores'));
+  } catch {
+    economySnap = null;
+  }
+  const storedResources = economySnap?.exists()
+    ? sanitizeResources(economySnap.data())
+    : null;
+  if (!storedResources) {
+    void setDoc(doc(db, 'towns', townId, 'economy', 'stores'), {
+      ownerId: uid,
+      ...DEFAULT_TOWN_RESOURCES,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
   }
 
   const defaults = createInitialAgents();
@@ -835,10 +875,38 @@ export async function loadOrInitializeTown(
     roads: sanitizeRoads(townData.roads),
     railSpurBuilt: Boolean(townData.railSpurBuilt),
     autoMode: Boolean(townData.autoMode),
+    resources: storedResources ?? { ...DEFAULT_TOWN_RESOURCES },
     agents: orderedAgents,
     structures,
     logs: logs.length > 0 ? logs : createInitialLogs(),
   };
+}
+
+export async function persistTownResources(
+  uid: string,
+  resources: TownResources,
+  townId: string = uid,
+): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
+  const ref = doc(db, 'towns', townId, 'economy', 'stores');
+  const path = `towns/${townId}/economy/stores`;
+  const clean = sanitizeResources(resources);
+  try {
+    await updateDoc(ref, { ...clean, updatedAt: serverTimestamp() });
+    return;
+  } catch {
+    // Older towns created before the economy existed have no stores doc yet
+  }
+  try {
+    await setDoc(ref, {
+      ownerId: uid,
+      ...clean,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
 }
 
 export async function persistTownExpansion(
@@ -1415,6 +1483,8 @@ export async function resetTownInFirestore(
   pendingCommands?.forEach((d) => {
     batch.delete(d.ref);
   });
+
+  batch.delete(doc(db, 'towns', townId, 'economy', 'stores'));
 
   batch.update(townRef, {
     townName: clampStr(townName, 60) || 'Alderbrook',

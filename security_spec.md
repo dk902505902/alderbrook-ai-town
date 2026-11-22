@@ -9,6 +9,7 @@
 6. Town structures (`/structures/{plotId}`) enforce bounded integers (`progress` 0..100, `tier` 1..3), immutable `plotId` and `structureType`, and cannot revert `status` from `'complete'` back to `'building'`.
 7. Town logs (`/logs/{logId}`, including `agentId: "weather_shift"` and `agentId: "remote_command"`) are append-only (no `update` allowed; `delete` allowed only by town owner for town reset).
 8. Remote commands (`/remoteCommands/{commandId}`) restrict `type` to `['set_weather', 'hire_worker', 'god_decree', 'build_structure', 'build_plot']`, require `status: 'pending'` on client create, enforce terminal state locking once `'executed'` or `'failed'`, and restrict updates to `['status', 'executedAt', 'resultMessage']` with server `request.time`.
+9. Town stores (`/economy/stores`) are a single fixed document (`docId == 'stores'`) writable only by the parent-town owner. All four amounts (`timber`, `stone`, `food`, `gold`) are bounded integers (`0..100000`), `ownerId` and `createdAt` are immutable, updates may only touch the four amounts plus `updatedAt`, and the collection is not listable.
 
 ## 2. Dirty Dozen Adversarial Payloads (Must All Return PERMISSION_DENIED)
 1. Unauthenticated read of `/towns/user123`.
