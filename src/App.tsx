@@ -488,6 +488,7 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>('mayor_sterling');
   const [selectedPlotId, setSelectedPlotId] = useState<PlotId | null>(null);
   const [followActive, setFollowActive] = useState(false);
+  const [firstPersonAgentId, setFirstPersonAgentId] = useState<AgentId | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [showMinimap, setShowMinimap] = useState(false);
   const [minimapCoords, setMinimapCoords] = useState<Partial<Record<AgentId, AgentWorldCoord>>>({});
@@ -505,6 +506,8 @@ export default function App() {
     | { type: 'biome'; id: BiomeId; nonce: number }
     | { type: 'rail_spur'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
+    | { type: 'first_person'; id: AgentId; nonce: number }
+    | { type: 'exit_first_person'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null
   >(null);
@@ -2624,13 +2627,36 @@ export default function App() {
     soundscape.setEnabled(next);
   };
 
-  const handleSelectAgent = (id: AgentId) => {
+  const handleSelectAgent = (id: AgentId, enterFirstPerson = false) => {
     setSelectedAgentId(id);
     setSelectedPlotId(null);
     setTownHallPromptOpen(false);
     setFollowActive(false);
+
+    if (enterFirstPerson) {
+      if (firstPersonAgentId === id) {
+        setFirstPersonAgentId(null);
+        setFocusRequest({ type: 'exit_first_person', nonce: Date.now() });
+      } else {
+        setFirstPersonAgentId(id);
+        setFocusRequest({ type: 'first_person', id, nonce: Date.now() });
+      }
+      return;
+    }
+
     setFocusRequest({ type: 'agent', id, nonce: Date.now() });
   };
+
+  // Any other camera move (plot, location, reset, panel pick) leaves first-person view
+  useEffect(() => {
+    if (
+      focusRequest &&
+      focusRequest.type !== 'first_person' &&
+      focusRequest.type !== 'exit_first_person'
+    ) {
+      setFirstPersonAgentId(null);
+    }
+  }, [focusRequest]);
 
   const handleFocusLocation = (id: LocationId) => {
     setSelectedPlotId(null);
@@ -3058,9 +3084,10 @@ export default function App() {
         followActive={followActive}
         communicationEvent={communicationEvent}
         focusRequest={focusRequest}
+        firstPersonAgentId={firstPersonAgentId}
         signalRelayPulseNonce={signalRelayPulseNonce}
         triggerTrainNonce={triggerTrainNonce}
-        onSelectAgent={handleSelectAgent}
+        onSelectAgent={(id) => handleSelectAgent(id, true)}
         onSelectLocation={(loc) => {
           handleFocusLocation(loc);
           setErrorBanner(null);

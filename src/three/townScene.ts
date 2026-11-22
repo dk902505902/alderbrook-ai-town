@@ -1646,6 +1646,13 @@ export class TownSceneController {
   private selectedAgentId: AgentId | null = null;
   private activeAgentId: AgentId | null = null;
   private followActive = false;
+  private firstPersonAgentId: AgentId | null = null;
+  private firstPersonPrevView: {
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    followActive: boolean;
+  } | null = null;
+  private firstPersonLook = new THREE.Vector3();
   private cameraTargetGoal: THREE.Vector3 | null = null;
   private lastMinimapEmit = 0;
   private frameId = 0;
@@ -2707,6 +2714,7 @@ export class TownSceneController {
     // Remove departed / reset agents cleanly without disposing shared geometries
     this.rigs.forEach((rig, id) => {
       if (!activeIds.has(id)) {
+        if (this.firstPersonAgentId === id) this.exitFirstPerson();
         this.scene.remove(rig.root);
         const clickIdx = this.clickableObjects.indexOf(rig.root);
         if (clickIdx !== -1) {
@@ -2765,6 +2773,61 @@ export class TownSceneController {
       } else {
         this.focusedCutawayId = null;
       }
+    }
+  }
+
+  /** Look through the tapped villager's eyes; tapping them again restores the previous camera. */
+  public enterFirstPerson(agentId: AgentId): boolean {
+    const rig = this.rigs.get(agentId);
+    if (!rig) return false;
+    if (this.firstPersonAgentId === agentId) return true;
+
+    if (!this.firstPersonAgentId) {
+      this.firstPersonPrevView = {
+        position: this.camera.position.clone(),
+        target: this.controls.target.clone(),
+        followActive: this.followActive,
+      };
+    } else {
+      const previousRig = this.rigs.get(this.firstPersonAgentId);
+      if (previousRig) this.setRigVisualsVisible(previousRig, true);
+    }
+
+    this.firstPersonAgentId = agentId;
+    this.followActive = false;
+    this.cameraTargetGoal = null;
+    this.focusedCutawayId = null;
+    this.setRigVisualsVisible(rig, false);
+    this.controls.enabled = false;
+    return true;
+  }
+
+  public exitFirstPerson(): void {
+    const activeId = this.firstPersonAgentId;
+    if (!activeId) return;
+    const rig = this.rigs.get(activeId);
+    if (rig) this.setRigVisualsVisible(rig, true);
+    this.firstPersonAgentId = null;
+    this.controls.enabled = true;
+
+    const prev = this.firstPersonPrevView;
+    this.firstPersonPrevView = null;
+    if (prev) {
+      this.camera.position.copy(prev.position);
+      this.controls.target.copy(prev.target);
+      this.followActive = prev.followActive;
+      this.controls.update();
+    }
+  }
+
+  public isFirstPersonActive(): boolean {
+    return this.firstPersonAgentId !== null;
+  }
+
+  private setRigVisualsVisible(rig: CharacterRig, visible: boolean): void {
+    for (const child of rig.root.children) {
+      if (child === rig.selectionRing || child === rig.activeRing) continue;
+      child.visible = visible;
     }
   }
 
@@ -3064,8 +3127,20 @@ export class TownSceneController {
         this.waterJetMat.color.lerp(_targetColor, atmoLerp);
       }
 
-      // 2. Smooth camera tracking (Follow Mode or Focus Goal)
-      if (this.followActive && this.activeAgentId) {
+      // 2. Camera: first-person villager eyes, follow cam, or a damped focus goal
+      if (this.firstPersonAgentId) {
+        const fpRig = this.rigs.get(this.firstPersonAgentId);
+        if (fpRig) {
+          const eyeY = fpRig.root.position.y + 1.6;
+          this.camera.position.set(fpRig.root.position.x, eyeY, fpRig.root.position.z);
+          this.firstPersonLook.set(
+            this.camera.position.x + Math.sin(fpRig.facingAngle) * 3,
+            eyeY - 0.12,
+            this.camera.position.z + Math.cos(fpRig.facingAngle) * 3,
+          );
+          this.camera.lookAt(this.firstPersonLook);
+        }
+      } else if (this.followActive && this.activeAgentId) {
         const followRig = this.rigs.get(this.activeAgentId);
         if (followRig) {
           this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, followRig.root.position.x, 4.5, delta);
@@ -3081,7 +3156,9 @@ export class TownSceneController {
         }
       }
 
-      this.controls.update();
+      if (!this.firstPersonAgentId) {
+        this.controls.update();
+      }
 
       // 3. Park Fountain Shimmering Ripples, Water Jet, Windmill Sails & 1-Minute Scenic Railway
       if (this.waterMesh) {

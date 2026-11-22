@@ -38,6 +38,7 @@ interface TownViewportProps {
   townTheme: TownTheme;
   graphicsQuality: GraphicsQuality;
   followActive: boolean;
+  firstPersonAgentId?: AgentId | null;
   communicationEvent: {
     speakerId: AgentId;
     targetAgentName: string | null;
@@ -51,6 +52,8 @@ interface TownViewportProps {
     | { type: 'biome'; id: BiomeId; nonce: number }
     | { type: 'rail_spur'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
+    | { type: 'first_person'; id: AgentId; nonce: number }
+    | { type: 'exit_first_person'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null;
   signalRelayPulseNonce?: number;
@@ -82,6 +85,7 @@ export function TownViewport({
   townTheme,
   graphicsQuality,
   followActive,
+  firstPersonAgentId = null,
   communicationEvent,
   focusRequest,
   signalRelayPulseNonce = 0,
@@ -288,6 +292,12 @@ export function TownViewport({
 
   useEffect(() => {
     if (!focusRequest || !controllerRef.current) return;
+    if (focusRequest.type === 'first_person') {
+      controllerRef.current.enterFirstPerson(focusRequest.id);
+      return;
+    }
+    // Every other camera request leaves first-person view first
+    controllerRef.current.exitFirstPerson();
     if (focusRequest.type === 'agent') {
       controllerRef.current.focusAgent(focusRequest.id);
     } else if (focusRequest.type === 'location') {
@@ -300,6 +310,8 @@ export function TownViewport({
       controllerRef.current.focusRailSpur();
     } else if (focusRequest.type === 'signal_relay') {
       controllerRef.current.focusSignalRelay();
+    } else if (focusRequest.type === 'exit_first_person') {
+      // exitFirstPerson() above already restored the previous camera
     } else {
       controllerRef.current.resetCamera();
     }
@@ -316,6 +328,12 @@ export function TownViewport({
         className="h-full w-full touch-none select-none"
         aria-label="Interactive 3D Alderbrook Town viewport"
       />
+
+      {firstPersonAgentId && (
+        <div className="pointer-events-none absolute top-18 left-1/2 z-20 -translate-x-1/2 rounded-full border border-amber-400/40 bg-slate-950/90 px-3 py-1 text-[11px] font-medium whitespace-nowrap text-amber-200 shadow-lg md:top-20">
+          First person · {agents.find((a) => a.id === firstPersonAgentId)?.name ?? 'Villager'} — tap them again to return
+        </div>
+      )}
 
       {/* Projected Semantic DOM Nameplates & Active Speech Bubbles */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
