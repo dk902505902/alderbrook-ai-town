@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import {
   ALL_PLOT_IDS,
   BIOME_META,
@@ -69,6 +74,7 @@ export interface TownSceneCallbacks {
   onLabelUpdate?: (positions: Record<AgentId, ProjectedLabel>) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
   onUserOrbitStart?: () => void;
+  onGraphicsDowngrade?: (quality: GraphicsQuality) => void;
 }
 
 interface LandmarkConfig {
@@ -1653,6 +1659,12 @@ export class TownSceneController {
     followActive: boolean;
   } | null = null;
   private firstPersonLook = new THREE.Vector3();
+  private composer: EffectComposer | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private vignettePass: ShaderPass | null = null;
+  private fpsSampleStart = 0;
+  private fpsSampleFrames = 0;
+  private fpsWatchdogDone = false;
   private cameraTargetGoal: THREE.Vector3 | null = null;
   private lastMinimapEmit = 0;
   private frameId = 0;
@@ -2264,7 +2276,7 @@ export class TownSceneController {
         ? 1
         : quality === 'medium'
           ? Math.min(nativeDpr, 1.35)
-          : Math.min(nativeDpr, 1.75);
+          : Math.min(nativeDpr, 2.0);
 
     this.renderer.setPixelRatio(targetDpr);
     this.renderer.setSize(width, height);
@@ -2272,6 +2284,14 @@ export class TownSceneController {
     const enableShadows = !this.isSoftwareGl && quality === 'high';
     this.renderer.shadowMap.enabled = enableShadows;
     this.sunLight.castShadow = enableShadows;
+
+    // Cinematic tier: 2048² shadow map on High, 1024² everywhere else
+    const shadowSize = enableShadows ? 2048 : 1024;
+    if (this.sunLight.shadow.mapSize.width !== shadowSize) {
+      this.sunLight.shadow.mapSize.set(shadowSize, shadowSize);
+      this.sunLight.shadow.map?.dispose();
+      this.sunLight.shadow.map = null;
+    }
     this.renderer.shadowMap.needsUpdate = true;
 
     this.detailsHandle?.setDensityFactor(quality === 'low' ? 0.5 : 1.0);
@@ -2281,6 +2301,68 @@ export class TownSceneController {
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
     this.updateFireflyState();
+
+    this.configureCinematicPostProcessing(enableShadows, width, height);
+    this.fpsSampleStart = 0;
+    this.fpsSampleFrames = 0;
+    this.fpsWatchdogDone = false;
+  }
+
+  /**
+   * High-only cinematic stack: bloom on lanterns/windows, soft vignette, MSAA targets and
+   * tone-mapped output. Medium and Low keep rendering straight to the canvas.
+   */
+  private configureCinematicPostProcessing(
+    enabled: boolean,
+    width: number,
+    height: number,
+  ): void {
+    if (!enabled) {
+      this.composer?.dispose();
+      this.composer = null;
+      this.bloomPass = null;
+      this.vignettePass = null;
+      return;
+    }
+
+    if (this.composer) {
+      this.composer.setSize(width, height);
+      this.bloomPass?.setSize(width, height);
+      return;
+    }
+
+    const composer = new EffectComposer(this.renderer);
+    composer.addPass(new RenderPass(this.scene, this.camera));
+
+    const bloom = new UnrealBloomPass(new THREE.Vector2(width, height), 0.42, 0.62, 0.82);
+    composer.addPass(bloom);
+    this.bloomPass = bloom;
+
+    const vignette = new ShaderPass({
+      uniforms: { tDiffuse: { value: null }, uStrength: { value: 0.28 } },
+      vertexShader:
+        'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: [
+        'uniform sampler2D tDiffuse;',
+        'uniform float uStrength;',
+        'varying vec2 vUv;',
+        'void main() {',
+        '  vec4 tex = texture2D(tDiffuse, vUv);',
+        '  float vig = smoothstep(0.82, 0.18, length(vUv - 0.5));',
+        '  tex.rgb *= mix(1.0 - uStrength, 1.0, vig);',
+        '  gl_FragColor = tex;',
+        '}',
+      ].join('\n'),
+    });
+    composer.addPass(vignette);
+    this.vignettePass = vignette;
+
+    composer.addPass(new OutputPass());
+    composer.setSize(width, height);
+    // MSAA on WebGL2 render targets keeps edges clean through the composer
+    composer.renderTarget1.samples = 4;
+    composer.renderTarget2.samples = 4;
+    this.composer = composer;
   }
 
   public setTheme(theme: TownTheme): void {
@@ -2895,6 +2977,10 @@ export class TownSceneController {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
+      if (this.composer) {
+        this.composer.setSize(w, h);
+        this.bloomPass?.setSize(w, h);
+      }
     };
 
     const onPointerDown = (e: PointerEvent) => {
@@ -3472,7 +3558,29 @@ export class TownSceneController {
         this.callbacks.onMinimapUpdate?.(worldCoords);
       }
 
-      this.renderer.render(this.scene, this.camera);
+      if (this.composer) {
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
+
+      // High-tier watchdog: if the cinematic stack cannot hold ~45 fps, fall back to Medium
+      if (this.graphicsQuality === 'high' && !this.fpsWatchdogDone) {
+        if (this.fpsSampleStart === 0) this.fpsSampleStart = elapsed;
+        this.fpsSampleFrames += 1;
+        const sampleSeconds = elapsed - this.fpsSampleStart;
+        if (sampleSeconds >= 5) {
+          this.fpsWatchdogDone = true;
+          const fps = this.fpsSampleFrames / sampleSeconds;
+          if (fps < 45) {
+            console.info(
+              `[Alderbrook] High graphics averaged ${fps.toFixed(1)} fps — switching to Medium.`,
+            );
+            this.setGraphicsQuality('medium');
+            this.callbacks.onGraphicsDowngrade?.('medium');
+          }
+        }
+      }
 
       if (this.isSoftwareGl) {
         this.afterDraw(tick);
@@ -3488,6 +3596,8 @@ export class TownSceneController {
     this.disposed = true;
     window.cancelAnimationFrame(this.frameId);
     window.clearTimeout(this.frameId);
+    this.composer?.dispose();
+    this.composer = null;
     this.controls.dispose();
     this.townHallSignTex?.dispose();
     this.townHallSignTex = null;

@@ -66,6 +66,7 @@ interface TownViewportProps {
   onWhisperBuildPlot: (plotId: PlotId, isUpgrade: boolean) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
   onUserOrbitStart?: () => void;
+  onGraphicsDowngrade?: (quality: GraphicsQuality) => void;
 }
 
 export function TownViewport({
@@ -98,6 +99,7 @@ export function TownViewport({
   onWhisperBuildPlot,
   onMinimapUpdate,
   onUserOrbitStart,
+  onGraphicsDowngrade,
 }: TownViewportProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<TownSceneController | null>(null);
@@ -142,6 +144,7 @@ export function TownViewport({
     onSelectSignalRelay,
     onMinimapUpdate,
     onUserOrbitStart,
+    onGraphicsDowngrade,
   });
   callbacksRef.current = {
     onSelectAgent,
@@ -150,6 +153,7 @@ export function TownViewport({
     onSelectSignalRelay,
     onMinimapUpdate,
     onUserOrbitStart,
+    onGraphicsDowngrade,
   };
 
   const [contextLost, setContextLost] = useState(false);
@@ -167,6 +171,7 @@ export function TownViewport({
       onContextRestored: () => setContextLost(false),
       onMinimapUpdate: (coords) => callbacksRef.current.onMinimapUpdate?.(coords),
       onUserOrbitStart: () => callbacksRef.current.onUserOrbitStart?.(),
+      onGraphicsDowngrade: (quality) => callbacksRef.current.onGraphicsDowngrade?.(quality),
       onLabelUpdate: (positions: Record<AgentId, ProjectedLabel>) => {
         for (const [id, pos] of Object.entries(positions)) {
           const el = labelRefs.current[id];

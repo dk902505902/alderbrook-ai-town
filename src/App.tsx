@@ -3098,6 +3098,7 @@ export default function App() {
         onWhisperBuildPlot={handleWhisperBuildPlot}
         onMinimapUpdate={setMinimapCoords}
         onUserOrbitStart={() => setFollowActive(false)}
+        onGraphicsDowngrade={handleChangeGraphicsQuality}
       />
 
       {/* Town Hall Quick Action Banner ("Talk to Mayor") */}

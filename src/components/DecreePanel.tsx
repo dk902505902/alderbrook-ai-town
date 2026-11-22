@@ -49,7 +49,11 @@ const SPEED_OPTIONS = [4, 8, 15];
 const QUALITY_OPTIONS: Array<{ id: GraphicsQuality; label: string; summary: string }> = [
   { id: 'low', label: 'Low', summary: 'Battery saver · Crisp 1x DPR, lights & fog only' },
   { id: 'medium', label: 'Medium', summary: 'Mobile balanced · Shadows off, glowing lights & fog' },
-  { id: 'high', label: 'High', summary: 'Desktop crisp · Real-time shadows, full detail' },
+  {
+    id: 'high',
+    label: 'High',
+    summary: 'Cinematic · Bloom, vignette, 2048² shadows, 2× DPR (auto-falls back under 45 fps)',
+  },
 ];
 
 export function DecreePanel({
