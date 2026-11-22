@@ -424,7 +424,8 @@ export default function App() {
   const initialLocal = useRef<LoadedTownState | null>(null);
   if (!initialLocal.current) {
     initialLocal.current =
-      loadLocalTown(LOCAL_MAIN_TOWN_ID) ?? createFreshTownState(LOCAL_MAIN_TOWN_ID, 'Alderbrook');
+      loadLocalTown(LOCAL_MAIN_TOWN_ID) ??
+      createFreshTownState(LOCAL_MAIN_TOWN_ID, 'Alderbrook', true);
   }
 
   const [activeTownId, setActiveTownId] = useState<string>(initialLocal.current.townId);
@@ -580,11 +581,30 @@ export default function App() {
     };
   }, []);
 
-  // Non-destructive local multi-town auto-save (guest mode)
+  const mergeCloudAndLocalTowns = useCallback((cloudTowns: TownSummary[]): TownSummary[] => {
+    const map = new Map<string, TownSummary>();
+    for (const t of cloudTowns) {
+      map.set(t.id, t);
+    }
+    // Include any locally stored non-main towns (e.g. offline/fallback created cities)
+    for (const local of listLocalTowns()) {
+      if (!local.isMain && !map.has(local.id)) {
+        map.set(local.id, local);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+      return b.updatedAtMs - a.updatedAtMs;
+    });
+  }, []);
+
+  // Non-destructive local multi-town auto-save (guest mode + local fallback towns)
   useEffect(() => {
-    if (user) return;
+    const isLocalSlot = !user || activeTownId.startsWith('local_');
+    if (!isLocalSlot) return;
+    const targetId = activeTownId || LOCAL_MAIN_TOWN_ID;
     const snapshot: LoadedTownState = {
-      townId: activeTownId || LOCAL_MAIN_TOWN_ID,
+      townId: targetId,
       townName,
       turnCount,
       activeAgentIndex,
@@ -602,7 +622,13 @@ export default function App() {
       logs: logs.slice(0, 40),
     };
     saveLocalTown(snapshot);
-    setSavedTowns(listLocalTowns());
+    if (!user) {
+      setSavedTowns(listLocalTowns());
+    } else {
+      setSavedTowns((prev) =>
+        mergeCloudAndLocalTowns(prev.filter((t) => !t.id.startsWith('local_'))),
+      );
+    }
   }, [
     user,
     activeTownId,
@@ -621,6 +647,7 @@ export default function App() {
     agents,
     structures,
     logs,
+    mergeCloudAndLocalTowns,
   ]);
 
   useEffect(() => {
@@ -629,7 +656,7 @@ export default function App() {
       if (!nextUser) {
         const localMain =
           loadLocalTown(LOCAL_MAIN_TOWN_ID) ??
-          createFreshTownState(LOCAL_MAIN_TOWN_ID, 'Alderbrook');
+          createFreshTownState(LOCAL_MAIN_TOWN_ID, 'Alderbrook', true);
         applyLoadedTownState(localMain);
         setSavedTowns(listLocalTowns());
         return;
@@ -640,7 +667,7 @@ export default function App() {
           listUserTowns(nextUser.uid),
         ]);
         applyLoadedTownState(cloudState);
-        setSavedTowns(
+        const baseCloudList: TownSummary[] =
           townsList.length > 0
             ? townsList
             : [
@@ -652,14 +679,14 @@ export default function App() {
                   buildingCount: cloudState.structures.length,
                   population: cloudState.agents.length,
                 },
-              ],
-        );
+              ];
+        setSavedTowns(mergeCloudAndLocalTowns(baseCloudList));
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
     });
     return () => unsub();
-  }, [applyLoadedTownState]);
+  }, [applyLoadedTownState, mergeCloudAndLocalTowns]);
 
   const stateRef = useRef({
     activeTownId,
@@ -2029,20 +2056,35 @@ export default function App() {
     setFollowActive(false);
     setSelectedPlotId(null);
 
-    if (user) {
+    const isLocalSlot = !user || activeTownId.startsWith('local_');
+    const resettingMainTown = user
+      ? activeTownId === user.uid
+      : activeTownId === LOCAL_MAIN_TOWN_ID;
+
+    if (!isLocalSlot && user) {
       try {
         const fresh = await resetTownInFirestore(user.uid, activeTownId, townName);
         applyLoadedTownState(fresh);
         const list = await listUserTowns(user.uid);
-        if (list.length > 0) setSavedTowns(list);
+        if (list.length > 0) setSavedTowns(mergeCloudAndLocalTowns(list));
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
     } else {
-      const fresh = createFreshTownState(activeTownId || LOCAL_MAIN_TOWN_ID, townName);
+      const fresh = createFreshTownState(
+        activeTownId || LOCAL_MAIN_TOWN_ID,
+        townName,
+        resettingMainTown,
+      );
       saveLocalTown(fresh);
       applyLoadedTownState(fresh);
-      setSavedTowns(listLocalTowns());
+      if (!user) {
+        setSavedTowns(listLocalTowns());
+      } else {
+        setSavedTowns((prev) =>
+          mergeCloudAndLocalTowns(prev.filter((t) => !t.id.startsWith('local_'))),
+        );
+      }
     }
     setFocusRequest({ type: 'reset', nonce: Date.now() });
   };
@@ -2054,17 +2096,8 @@ export default function App() {
       setIsPlaying(false);
       setErrorBanner(null);
 
-      if (snap.user) {
-        try {
-          const loaded = await loadOrInitializeTown(snap.user.uid, targetTownId);
-          applyLoadedTownState(loaded);
-          const list = await listUserTowns(snap.user.uid);
-          if (list.length > 0) setSavedTowns(list);
-        } catch (err) {
-          setErrorBanner(err instanceof Error ? err.message : 'Unable to switch saved town.');
-        }
-      } else {
-        // Persist current town slot before switching (strictly non-destructive)
+      // Persist current local slot before switching away (strictly non-destructive)
+      if (!snap.user || snap.activeTownId.startsWith('local_')) {
         saveLocalTown({
           townId: snap.activeTownId,
           townName: snap.townName,
@@ -2083,14 +2116,34 @@ export default function App() {
           structures: snap.structures,
           logs: snap.logs.slice(0, 40),
         });
+      }
+
+      if (snap.user && !targetTownId.startsWith('local_')) {
+        try {
+          const loaded = await loadOrInitializeTown(snap.user.uid, targetTownId);
+          applyLoadedTownState(loaded);
+          const list = await listUserTowns(snap.user.uid);
+          if (list.length > 0) setSavedTowns(mergeCloudAndLocalTowns(list));
+        } catch (err) {
+          setErrorBanner(err instanceof Error ? err.message : 'Unable to switch saved town.');
+        }
+      } else {
+        const isMain = targetTownId === LOCAL_MAIN_TOWN_ID;
         const loaded =
-          loadLocalTown(targetTownId) ?? createFreshTownState(targetTownId, 'Alderbrook');
+          loadLocalTown(targetTownId) ??
+          createFreshTownState(targetTownId, isMain ? 'Alderbrook' : 'New Town', isMain);
         applyLoadedTownState(loaded);
-        setSavedTowns(listLocalTowns());
+        if (!snap.user) {
+          setSavedTowns(listLocalTowns());
+        } else {
+          setSavedTowns((prev) =>
+            mergeCloudAndLocalTowns(prev.filter((t) => !t.id.startsWith('local_'))),
+          );
+        }
       }
       soundscape.playAgentChime(1);
     },
-    [applyLoadedTownState],
+    [applyLoadedTownState, mergeCloudAndLocalTowns],
   );
 
   const handleCreateNewTown = useCallback(
@@ -2100,46 +2153,56 @@ export default function App() {
       setIsPlaying(false);
       setErrorBanner(null);
 
+      // Save current local town first if we are on a local slot
+      if (!snap.user || snap.activeTownId.startsWith('local_')) {
+        saveLocalTown({
+          townId: snap.activeTownId,
+          townName: snap.townName,
+          turnCount: snap.turnCount,
+          activeAgentIndex: snap.activeAgentIndex,
+          activeDecree: snap.activeDecree,
+          metrics: snap.metrics,
+          timeOfDay: snap.timeOfDay,
+          weather: snap.weather,
+          theme: snap.townTheme,
+          unlockedBiomes: snap.unlockedBiomes,
+          roads: snap.roads,
+          railSpurBuilt: snap.railSpurBuilt,
+          autoMode: snap.autoMode,
+          agents: snap.agents,
+          structures: snap.structures,
+          logs: snap.logs.slice(0, 40),
+        });
+      }
+
       if (snap.user) {
         try {
           const fresh = await createNewTownInFirestore(snap.user.uid, cleanName);
           applyLoadedTownState(fresh);
           const list = await listUserTowns(snap.user.uid);
-          if (list.length > 0) setSavedTowns(list);
+          if (list.length > 0) setSavedTowns(mergeCloudAndLocalTowns(list));
           soundscape.playBuildCompleteChime();
           return {
             ok: true,
             badge: `Created Town: ${fresh.townName}`,
-            detail: `${fresh.townName} is ready in its own save slot. ${snap.townName} remains safely saved.`,
+            detail: `${fresh.townName} initialized with a clean empty map, Town Hall, 5 starter villagers & supplies. ${snap.townName} stays safely saved.`,
           };
-        } catch (err) {
+        } catch {
+          // Graceful local fallback if multi-town Firestore rules aren't deployed yet
+          const freshLocal = createNewLocalTown(cleanName);
+          applyLoadedTownState(freshLocal);
+          setSavedTowns((prev) =>
+            mergeCloudAndLocalTowns(prev.filter((t) => !t.id.startsWith('local_'))),
+          );
+          soundscape.playBuildCompleteChime();
           return {
-            ok: false,
-            badge: 'Could not create town',
-            detail: err instanceof Error ? err.message : 'Firestore error while creating town.',
+            ok: true,
+            badge: `Created Town: ${freshLocal.townName}`,
+            detail: `${freshLocal.townName} initialized cleanly on this device with Town Hall, 5 starter villagers & starter supplies. ${snap.townName} stays safely saved.`,
           };
         }
       }
 
-      // Guest mode: save current town first, then allocate brand-new local slot
-      saveLocalTown({
-        townId: snap.activeTownId,
-        townName: snap.townName,
-        turnCount: snap.turnCount,
-        activeAgentIndex: snap.activeAgentIndex,
-        activeDecree: snap.activeDecree,
-        metrics: snap.metrics,
-        timeOfDay: snap.timeOfDay,
-        weather: snap.weather,
-        theme: snap.townTheme,
-        unlockedBiomes: snap.unlockedBiomes,
-        roads: snap.roads,
-        railSpurBuilt: snap.railSpurBuilt,
-        autoMode: snap.autoMode,
-        agents: snap.agents,
-        structures: snap.structures,
-        logs: snap.logs.slice(0, 40),
-      });
       const fresh = createNewLocalTown(cleanName);
       applyLoadedTownState(fresh);
       setSavedTowns(listLocalTowns());
@@ -2147,10 +2210,10 @@ export default function App() {
       return {
         ok: true,
         badge: `Created Town: ${fresh.townName}`,
-        detail: `${fresh.townName} is ready in a new save slot. ${snap.townName} stays safely saved.`,
+        detail: `${fresh.townName} initialized with a clean empty map, Town Hall, 5 starter villagers & supplies. ${snap.townName} stays safely saved.`,
       };
     },
-    [applyLoadedTownState],
+    [applyLoadedTownState, mergeCloudAndLocalTowns],
   );
 
   const handleExpandBiome = useCallback(async (biome: BiomeId): Promise<MayorBuildResult> => {
@@ -2809,11 +2872,15 @@ export default function App() {
   };
 
   const activeSpeaker = agents.find((a) => a.id === activeAgentId);
+  const isMainTown = user ? activeTownId === user.uid : activeTownId === LOCAL_MAIN_TOWN_ID;
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-slate-950 text-slate-100">
       {/* Full-Screen 3D Town Canvas */}
       <TownViewport
+        townId={activeTownId}
+        townName={townName}
+        isMainTown={isMainTown}
         agents={agents}
         structures={structures}
         unlockedBiomes={unlockedBiomes}

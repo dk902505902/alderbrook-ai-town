@@ -223,17 +223,66 @@ function buildStructureCreatePayload(uid: string, structure: TownStructure): Rec
   return payload;
 }
 
-export function createFreshTownState(townId: string, townName: string): LoadedTownState {
-  const cleanName = clampStr(townName.trim(), 60) || 'Alderbrook';
-  const agents = createInitialAgents();
+export function createFreshTownState(
+  townId: string,
+  townName: string,
+  isMainTown = false,
+): LoadedTownState {
+  const cleanName = clampStr(townName.trim(), 60) || (isMainTown ? 'Alderbrook' : 'New Haven');
+  const baseAgents = createInitialAgents();
+  const agents: AgentRecord[] = isMainTown
+    ? baseAgents
+    : baseAgents.map((agent) => {
+        const starterTaskById: Record<string, { task: string; dialogue: string }> = {
+          mayor_sterling: {
+            task: `Charter ${cleanName} from Town Hall`,
+            dialogue: `Welcome to ${cleanName}! Our frontier is completely open — tell me what to build first.`,
+          },
+          architect_lyra: {
+            task: `Survey empty building plots in ${cleanName}`,
+            dialogue: `Fresh land in ${cleanName}! Ready to draft our first structure whenever you say.`,
+          },
+          commander_vance: {
+            task: `Secure ${cleanName} Town Hall perimeter`,
+            dialogue: `Perimeter clear around ${cleanName} Town Hall — starter supplies accounted for.`,
+          },
+          worker_pip: {
+            task: `Sort starter timber & stone at ${cleanName} Plaza`,
+            dialogue: `Starter lumber and quarry stone are stacked and ready to build ${cleanName}!`,
+          },
+          worker_kai: {
+            task: `Prepare builder tools for ${cleanName}`,
+            dialogue: `Hammer and blueprint ready — point me at any open plot in ${cleanName}!`,
+          },
+        };
+        const freshCopy = starterTaskById[agent.id];
+        return {
+          ...agent,
+          location: 'town_hall',
+          activePlotId: null,
+          assignedPlotId: null,
+          targetAgent: null,
+          userNote: '',
+          thought: `Arrived to establish ${cleanName} from scratch with starter supplies.`,
+          dialogue: freshCopy?.dialogue ?? `Ready to build ${cleanName}!`,
+          currentTask: freshCopy?.task ?? `Prepare starter site in ${cleanName}`,
+          updatedAtMs: Date.now(),
+        };
+      });
+
   const logs = createInitialLogs();
-  if (cleanName !== 'Alderbrook' && logs[0]) {
+  if (!isMainTown && logs[0]) {
     logs[0] = {
       ...logs[0],
-      thought: `Chartering ${cleanName} with open civic plots and outer frontiers.`,
-      dialogue: `Welcome to ${cleanName}! Council, survey the square and plan our first landmarks.`,
+      id: `charter-${townId}-${Date.now()}`,
+      location: 'town_hall',
+      thought: `Chartered ${cleanName} with a clean frontier map, Town Hall, 5 starter villagers, and starter supplies.`,
+      dialogue: `Welcome to ${cleanName}! Only Town Hall and starter supplies stand here — tell me what to build first.`,
+      newTask: `Charter ${cleanName}`,
+      timestampMs: Date.now(),
     };
   }
+
   return {
     townId,
     townName: cleanName,
@@ -407,7 +456,7 @@ export function createNewLocalTown(townName: string): LoadedTownState {
   const slug = slugifyTownName(cleanName);
   const rand = Math.random().toString(36).slice(2, 6);
   const newId = `local_${slug}_${rand}`;
-  const fresh = createFreshTownState(newId, cleanName);
+  const fresh = createFreshTownState(newId, cleanName, false);
   saveLocalTown(fresh);
   return fresh;
 }
@@ -462,7 +511,7 @@ export async function createNewTownInFirestore(
   const townPath = `towns/${townId}`;
   const townRef = doc(db, 'towns', townId);
 
-  const fresh = createFreshTownState(townId, cleanName);
+  const fresh = createFreshTownState(townId, cleanName, false);
   const batch = writeBatch(db);
 
   batch.set(townRef, {
@@ -528,14 +577,16 @@ export async function loadOrInitializeTown(
   }
 
   if (!townSnap.exists()) {
-    const initialAgents = createInitialAgents();
-    const initialLogs = createInitialLogs();
-    const defaultName = townId === uid ? 'Alderbrook' : 'Frontier Town';
+    const isMain = townId === uid;
+    const defaultName = isMain ? 'Alderbrook' : 'Frontier Town';
+    const fresh = createFreshTownState(townId, defaultName, isMain);
+    const initialAgents = fresh.agents;
+    const initialLogs = fresh.logs;
     const batch = writeBatch(db);
 
     batch.set(townRef, {
       ownerId: uid,
-      townName: defaultName,
+      townName: fresh.townName,
       turnCount: 0,
       activeAgentIndex: 0,
       activeDecree: '',
@@ -580,24 +631,7 @@ export async function loadOrInitializeTown(
       handleFirestoreError(error, OperationType.WRITE, townPath);
     }
 
-    return {
-      townId,
-      townName: defaultName,
-      turnCount: 0,
-      activeAgentIndex: 0,
-      activeDecree: '',
-      metrics: { ...DEFAULT_TOWN_METRICS },
-      timeOfDay: 'day',
-      weather: 'summer',
-      theme: 'meadow',
-      unlockedBiomes: [],
-      roads: [],
-      railSpurBuilt: false,
-      autoMode: false,
-      agents: initialAgents,
-      structures: [],
-      logs: initialLogs,
-    };
+    return fresh;
   }
 
   const townData = townSnap.data();
@@ -818,6 +852,7 @@ export async function persistTownExpansion(
   },
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const path = `towns/${townId}`;
   const patch: Record<string, unknown> = { updatedAt: serverTimestamp() };
   if (updates.townName !== undefined) {
@@ -864,6 +899,7 @@ export async function persistAgentTurn(
   } | null,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const townRef = doc(db, 'towns', townId);
   const agentRef = doc(db, 'towns', townId, 'agents', updatedAgent.id);
   const logRef = doc(db, 'towns', townId, 'logs', logEntry.id);
@@ -978,7 +1014,7 @@ export async function persistHiredWorkers(
   logs: TownLogItem[],
   townId: string = uid,
 ): Promise<void> {
-  if (workers.length === 0) return;
+  if (!townId || townId.startsWith('local_') || workers.length === 0) return;
   const batch = writeBatch(db);
   for (const worker of workers) {
     batch.set(doc(db, 'towns', townId, 'agents', worker.id), buildAgentDocPayload(uid, worker));
@@ -1012,6 +1048,7 @@ export async function persistGodDecree(
   logEntry: TownLogItem,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const townRef = doc(db, 'towns', townId);
   const logRef = doc(db, 'towns', townId, 'logs', logEntry.id);
 
@@ -1049,6 +1086,7 @@ export async function persistAgentNote(
   userNote: string,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const path = `towns/${townId}/agents/${agentId}`;
   try {
     await updateDoc(doc(db, 'towns', townId, 'agents', agentId), {
@@ -1066,6 +1104,7 @@ export async function persistWeatherShift(
   logEntry: TownLogItem,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const townRef = doc(db, 'towns', townId);
   const logRef = doc(db, 'towns', townId, 'logs', logEntry.id);
   const batch = writeBatch(db);
@@ -1099,6 +1138,7 @@ export async function persistEnvironmentSettings(
   updates: { timeOfDay?: TimeOfDay; weather?: WeatherMode; theme?: TownTheme },
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const path = `towns/${townId}`;
   try {
     await updateDoc(doc(db, 'towns', townId), {
@@ -1128,6 +1168,9 @@ export function subscribePendingRemoteCommands(
   onError?: (error: Error) => void,
   townId: string = uid,
 ): Unsubscribe {
+  if (!townId || townId.startsWith('local_')) {
+    return () => {};
+  }
   const remotePath = `towns/${townId}/remoteCommands`;
   const q = query(
     collection(db, 'towns', townId, 'remoteCommands'),
@@ -1181,6 +1224,7 @@ export async function markRemoteCommandStatus(
   remoteLogEntry?: TownLogItem | null,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const cmdPath = `towns/${townId}/remoteCommands/${commandId}`;
   const batch = writeBatch(db);
   batch.update(doc(db, 'towns', townId, 'remoteCommands', commandId), {
@@ -1218,6 +1262,7 @@ export async function persistRemoteStructureAction(
   structure: TownStructure,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const structPath = `towns/${townId}/structures/${structure.plotId}`;
   const structureRef = doc(db, 'towns', townId, 'structures', structure.plotId);
   try {
@@ -1272,6 +1317,7 @@ export async function persistCliAgentUpdate(
   logEntry: TownLogItem,
   townId: string = uid,
 ): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
   const agentPath = `towns/${townId}/agents/${updatedAgent.id}`;
   const batch = writeBatch(db);
   batch.update(doc(db, 'towns', townId, 'agents', updatedAgent.id), {
@@ -1346,8 +1392,10 @@ export async function resetTownInFirestore(
     pendingCommands = null;
   }
 
-  const initialAgents = createInitialAgents();
-  const initialLogs = createInitialLogs();
+  const isMain = townId === uid;
+  const fresh = createFreshTownState(townId, townName, isMain);
+  const initialAgents = fresh.agents;
+  const initialLogs = fresh.logs;
   const batch = writeBatch(db);
 
   existingLogs.forEach((d) => {
@@ -1421,22 +1469,5 @@ export async function resetTownInFirestore(
     handleFirestoreError(error, OperationType.WRITE, `towns/${townId}`);
   }
 
-  return {
-    townId,
-    townName: clampStr(townName, 60) || 'Alderbrook',
-    turnCount: 0,
-    activeAgentIndex: 0,
-    activeDecree: '',
-    metrics: { ...DEFAULT_TOWN_METRICS },
-    timeOfDay: 'day',
-    weather: 'summer',
-    theme: 'meadow',
-    unlockedBiomes: [],
-    roads: [],
-    railSpurBuilt: false,
-    autoMode: false,
-    agents: initialAgents,
-    structures: [],
-    logs: initialLogs,
-  };
+  return fresh;
 }

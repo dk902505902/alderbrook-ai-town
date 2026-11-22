@@ -529,14 +529,127 @@ function addInteriorBed(
   group.add(bg);
 }
 
+function createTownHallSignTexture(townName: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(0, 0, 512, 128);
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 8;
+    ctx.strokeRect(8, 8, 496, 112);
+
+    const display = (townName.trim() || 'ALDERBROOK').toUpperCase().slice(0, 22);
+    ctx.fillStyle = '#fef3c7';
+    ctx.font = 'bold 42px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(display, 256, 54);
+
+    ctx.fillStyle = '#fcd34d';
+    ctx.font = '600 20px system-ui, -apple-system, sans-serif';
+    ctx.fillText('TOWN HALL', 256, 94);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function buildStarterResourcesCluster(shadowTex: THREE.CanvasTexture): THREE.Group {
+  const group = new THREE.Group();
+  group.name = 'starter:resources';
+  group.position.set(-4.6, 0, -7.8);
+
+  addContactShadow(group, shadowTex, 2.1, 1.8);
+
+  const logMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.86, metalness: 0.04 }),
+    'wood',
+  );
+  const stoneMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.88, metalness: 0.05 }),
+    'stone',
+  );
+  const crateMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.78, metalness: 0.06 }),
+    'wood',
+  );
+  const strapMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5, metalness: 0.5 }),
+    'darkWood',
+  );
+
+  // Stacked starter timber logs (shared CylinderGeometry)
+  const logGeo = new THREE.CylinderGeometry(0.14, 0.14, 1.35, 7);
+  const logCoords: Array<[number, number, number]> = [
+    [-0.45, 0.14, -0.35],
+    [-0.14, 0.14, -0.35],
+    [0.17, 0.14, -0.35],
+    [-0.3, 0.36, -0.35],
+    [0.01, 0.36, -0.35],
+    [-0.14, 0.58, -0.35],
+  ];
+  for (const [lx, ly, lz] of logCoords) {
+    const log = new THREE.Mesh(logGeo, logMat);
+    log.rotation.x = Math.PI / 2;
+    log.position.set(lx, ly, lz);
+    log.castShadow = true;
+    log.receiveShadow = true;
+    group.add(log);
+  }
+
+  // Quarry stone starter blocks (shared BoxGeometry)
+  const stoneGeo = new THREE.BoxGeometry(0.46, 0.32, 0.44);
+  const stoneCoords: Array<[number, number, number, number]> = [
+    [0.68, 0.16, -0.15, 0.18],
+    [0.98, 0.16, 0.25, -0.25],
+    [0.82, 0.48, 0.05, 0.42],
+  ];
+  for (const [sx, sy, sz, ry] of stoneCoords) {
+    const block = new THREE.Mesh(stoneGeo, stoneMat);
+    block.position.set(sx, sy, sz);
+    block.rotation.y = ry;
+    block.castShadow = true;
+    block.receiveShadow = true;
+    group.add(block);
+  }
+
+  // Two starter supply crates with iron straps
+  const crateGeo = new THREE.BoxGeometry(0.54, 0.54, 0.54);
+  const strapGeo = new THREE.BoxGeometry(0.56, 0.08, 0.56);
+  const crateCoords: Array<[number, number, number, number]> = [
+    [-0.35, 0.27, 0.58, 0.2],
+    [0.24, 0.27, 0.62, -0.14],
+  ];
+  for (const [cx, cy, cz, ry] of crateCoords) {
+    const crate = new THREE.Mesh(crateGeo, crateMat);
+    crate.position.set(cx, cy, cz);
+    crate.rotation.y = ry;
+    crate.castShadow = true;
+    crate.receiveShadow = true;
+    const strap = new THREE.Mesh(strapGeo, strapMat);
+    strap.position.set(cx, cy, cz);
+    strap.rotation.y = ry;
+    group.add(crate, strap);
+  }
+
+  return group;
+}
+
 function buildTownHall(
   shadowTex: THREE.CanvasTexture,
   lanternMats: THREE.MeshStandardMaterial[],
   windUniforms: WindUniforms,
+  initialTownName = 'Alderbrook',
 ): {
   group: THREE.Group;
   roofMaterials: THREE.MeshStandardMaterial[];
   fireMaterials: THREE.MeshStandardMaterial[];
+  signMat: THREE.MeshStandardMaterial;
+  signTex: THREE.CanvasTexture;
 } {
   const group = new THREE.Group();
   group.name = 'landmark:town_hall';
@@ -693,10 +806,25 @@ function buildTownHall(
   finial.position.set(0, 6.75, 0.2);
   group.add(finial);
 
+  // Dynamic Town Nameplate Plaque above Portico
+  const signTex = createTownHallSignTexture(initialTownName);
+  const signMat = new THREE.MeshStandardMaterial({
+    map: signTex,
+    roughness: 0.45,
+    metalness: 0.12,
+  });
+  const signBacking = new THREE.Mesh(new THREE.BoxGeometry(2.65, 0.68, 0.1), goldMat);
+  signBacking.position.set(0, 2.98, 1.98);
+  const signFace = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 0.56), signMat);
+  signFace.position.set(0, 2.98, 2.04);
+  group.add(signBacking, signFace);
+
   return {
     group,
     roofMaterials: [roofMat, towerStoneMat, clockMat, finialGoldMat],
     fireMaterials: [fireGlowMat],
+    signMat,
+    signTex,
   };
 }
 
@@ -1458,6 +1586,15 @@ export class TownSceneController {
   private lastStructures: TownStructure[] = [];
   private lastSelectedPlotId: PlotId | null = null;
 
+  // Multi-Town State (Main Alderbrook vs Clean Empty Frontier Towns)
+  private isCleanFrontier = false;
+  private currentTownId = '';
+  private currentTownName = 'Alderbrook';
+  private townHallSignMat: THREE.MeshStandardMaterial | null = null;
+  private townHallSignTex: THREE.CanvasTexture | null = null;
+  private mainTownOnlyObjects: THREE.Object3D[] = [];
+  private starterResourcesGroup: THREE.Group | null = null;
+
   // See-Inside Building Interiors (Roof Cutaway)
   private staticCutaways: CutawayEntry[] = [];
   private plotCutaways = new Map<PlotId, CutawayEntry>();
@@ -1680,6 +1817,7 @@ export class TownSceneController {
     ewPath.position.set(0, 0.018, -0.5);
     ewPath.receiveShadow = true;
     this.scene.add(nsPath, ewPath);
+    this.mainTownOnlyObjects.push(nsPath, ewPath);
 
     const monumentMat = tagThemeMaterial(
       new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.7, metalness: 0.1 }),
@@ -1786,6 +1924,7 @@ export class TownSceneController {
       this.lanternMaterials,
       this.windUniforms,
     );
+    this.mainTownOnlyObjects.push(this.detailsHandle.group);
     this.disposables.push(this.detailsHandle);
 
     // Expandable Outer Biomes (Dense Forest, Desert Dunes, Crystal Cave) + Instanced Roads
@@ -1821,7 +1960,14 @@ export class TownSceneController {
     const awningTex = this.getOrCreateAwningTexture(this.townTheme);
     this.disposables.push(shadowTex);
 
-    const townHallBuilt = buildTownHall(shadowTex, this.lanternMaterials, this.windUniforms);
+    const townHallBuilt = buildTownHall(
+      shadowTex,
+      this.lanternMaterials,
+      this.windUniforms,
+      this.currentTownName,
+    );
+    this.townHallSignMat = townHallBuilt.signMat;
+    this.townHallSignTex = townHallBuilt.signTex;
     const townHall = townHallBuilt.group;
     townHall.position.copy(LANDMARKS.town_hall.center);
     townHall.traverse((obj) => {
@@ -1842,6 +1988,12 @@ export class TownSceneController {
       currentOpacity: 1,
     });
 
+    // Starter Resources Cluster (visible only in newly founded clean frontier towns)
+    this.starterResourcesGroup = buildStarterResourcesCluster(shadowTex);
+    this.starterResourcesGroup.visible = this.isCleanFrontier;
+    this.scene.add(this.starterResourcesGroup);
+    this.landmarkGroups.push(this.starterResourcesGroup);
+
     const workshopBuilt = buildWorkshop(shadowTex, this.lanternMaterials);
     const workshop = workshopBuilt.group;
     workshop.position.copy(LANDMARKS.workshop.center);
@@ -1854,6 +2006,7 @@ export class TownSceneController {
     });
     this.scene.add(workshop);
     this.landmarkGroups.push(workshop);
+    this.mainTownOnlyObjects.push(workshop);
     this.clickableObjects.push(workshop);
     this.staticCutaways.push({
       id: 'landmark:workshop',
@@ -1878,6 +2031,7 @@ export class TownSceneController {
       });
       this.scene.add(built.group);
       this.landmarkGroups.push(built.group);
+      this.mainTownOnlyObjects.push(built.group);
       this.clickableObjects.push(built.group);
       this.staticCutaways.push({
         id: h.id,
@@ -1901,6 +2055,7 @@ export class TownSceneController {
     });
     this.scene.add(marketBuilt.group);
     this.landmarkGroups.push(marketBuilt.group);
+    this.mainTownOnlyObjects.push(marketBuilt.group);
     this.clickableObjects.push(marketBuilt.group);
 
     const parkBuilt = buildPark(shadowTex, this.lanternMaterials, this.waterUniforms);
@@ -1911,6 +2066,7 @@ export class TownSceneController {
     this.waterJetMat = parkBuilt.waterJetMat;
     this.scene.add(parkBuilt.group);
     this.landmarkGroups.push(parkBuilt.group);
+    this.mainTownOnlyObjects.push(parkBuilt.group);
     this.clickableObjects.push(parkBuilt.group);
 
     // "The Signal Relay" (CLI Agent Hub) near the outer edge & Train Station
@@ -1926,6 +2082,7 @@ export class TownSceneController {
     this.signalRelayHandle = signalRelay;
     this.scene.add(signalRelay.group);
     this.landmarkGroups.push(signalRelay.group);
+    this.mainTownOnlyObjects.push(signalRelay.group);
     this.clickableObjects.push(signalRelay.group);
     this.disposables.push(signalRelay);
     this.staticCutaways.push({
@@ -1997,6 +2154,7 @@ export class TownSceneController {
     this.smokePoints = new THREE.Points(smokeGeo, smokeMat);
     this.smokePoints.frustumCulled = false;
     this.scene.add(this.smokePoints);
+    this.mainTownOnlyObjects.push(this.smokePoints);
 
     // 2b. Artisan Bakery Chimney Cozy Steam/Smoke Puffs (24 motes)
     const bSmokeCount = 24;
@@ -2207,6 +2365,178 @@ export class TownSceneController {
     this.commArcLine.visible = true;
   }
 
+  private updateTownHallSign(townName: string): void {
+    if (!this.townHallSignMat) return;
+    const nextTex = createTownHallSignTexture(townName);
+    const oldTex = this.townHallSignTex;
+    this.townHallSignMat.map = nextTex;
+    this.townHallSignMat.needsUpdate = true;
+    this.townHallSignTex = nextTex;
+    oldTex?.dispose();
+  }
+
+  private computeAgentDestination(agent: AgentRecord, slotIndex: number): THREE.Vector3 {
+    const slot = getAgentSlotOffset(agent.id, slotIndex, _slotOffset);
+
+    if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
+      const pm = PLOT_META[agent.activePlotId];
+      if (this.completedPlots.has(agent.activePlotId)) {
+        return new THREE.Vector3(pm.x + slot.x * 0.28, 0, pm.z + slot.z * 0.28);
+      }
+      const len = Math.hypot(pm.x, pm.z) || 1;
+      return new THREE.Vector3(
+        pm.x * (1 - 2.6 / len) + slot.x * 0.65,
+        0,
+        pm.z * (1 - 2.6 / len) + slot.z * 0.65,
+      );
+    }
+
+    // In clean newly created frontier towns, gather starter villagers visibly around Town Hall & Plaza
+    if (this.isCleanFrontier) {
+      const frontierSlots: Array<[number, number]> = [
+        [0, -6.55],     // Mayor Sterling center front of Town Hall steps
+        [-2.05, -7.1],  // Architect Lyra near Town Hall & starter supplies
+        [2.05, -7.1],   // Commander Vance on east Town Hall flank
+        [-3.15, -6.1],  // Worker Pip beside starter timber/crates
+        [3.15, -6.1],   // Worker Kai surveying open build plots
+      ];
+      if (slotIndex < frontierSlots.length) {
+        const [fx, fz] = frontierSlots[slotIndex];
+        return new THREE.Vector3(fx, 0, fz);
+      }
+      const angle = ((slotIndex - frontierSlots.length) * 0.85) + 0.4;
+      return new THREE.Vector3(Math.cos(angle) * 3.4, 0, -5.2 + Math.sin(angle) * 1.4);
+    }
+
+    let destBase = LANDMARKS[agent.location].gatherPoint;
+    let slotScale = 1.0;
+
+    if (agent.location === 'town_hall' && (agent.id === 'mayor_sterling' || slotIndex % 3 === 0)) {
+      destBase = new THREE.Vector3(0, 0, -9.85);
+      slotScale = 0.55;
+    } else if (agent.location === 'workshop' && (agent.id === 'architect_lyra' || agent.id === 'worker_kai' || slotIndex % 2 === 0)) {
+      destBase = new THREE.Vector3(10.35, 0, -0.25);
+      slotScale = 0.45;
+    }
+
+    return new THREE.Vector3(
+      destBase.x + slot.x * slotScale,
+      0,
+      destBase.z + slot.z * slotScale,
+    );
+  }
+
+  public loadTown(params: {
+    townId: string;
+    townName: string;
+    isMainTown: boolean;
+    agents: AgentRecord[];
+    structures: TownStructure[];
+    unlockedBiomes: BiomeId[];
+    roads: string[];
+    railSpurBuilt: boolean;
+    activeAgentId: AgentId | null;
+    selectedAgentId: AgentId | null;
+    selectedPlotId: PlotId | null;
+    timeOfDay: TimeOfDay;
+    weather: WeatherMode;
+    theme: TownTheme;
+  }): void {
+    this.currentTownId = params.townId;
+    this.currentTownName = params.townName || (params.isMainTown ? 'Alderbrook' : 'New Town');
+    this.isCleanFrontier = !params.isMainTown;
+
+    // 1. Update Town Hall facade banner
+    this.updateTownHallSign(this.currentTownName);
+
+    // 2. Toggle Alderbrook-only landmarks vs clean empty frontier starter resources
+    for (const obj of this.mainTownOnlyObjects) {
+      obj.visible = params.isMainTown;
+    }
+    if (this.starterResourcesGroup) {
+      this.starterResourcesGroup.visible = this.isCleanFrontier;
+    }
+    if (this.railwayHandle) {
+      this.railwayHandle.group.visible = params.isMainTown || params.railSpurBuilt;
+    }
+
+    // 3. Clear transient visual effects & cached cutaway/plot state
+    this.commArcTimer = 0;
+    this.commSpeakerId = null;
+    this.commTargetId = null;
+    if (this.commArcLine) this.commArcLine.visible = false;
+    this.focusedCutawayId = null;
+    this.followActive = false;
+    this.bakeryChimneys = [];
+    if (this.bakerySmokePoints) this.bakerySmokePoints.visible = false;
+    this.windmillRotors = [];
+    this.plotCutaways.clear();
+    this.completedPlots.clear();
+
+    // 4. Force-remove & dispose all existing plot meshes so zero buildings carry over
+    this.plotGroups.forEach((grp) => {
+      this.scene.remove(grp);
+      const clickIdx = this.clickableObjects.indexOf(grp);
+      if (clickIdx !== -1) this.clickableObjects.splice(clickIdx, 1);
+      disposeStructureGroup(grp, this.lanternMaterials);
+    });
+    this.plotGroups.clear();
+    this.plotSignatures.clear();
+
+    // 5. Apply outer biomes, instanced cobblestone roads, railway spur & active town's structures
+    this.unlockedBiomes = [...params.unlockedBiomes];
+    this.expansionHandle?.setUnlockedBiomes(params.unlockedBiomes);
+    this.expansionHandle?.setRoads(params.roads);
+    this.railwayHandle?.setRailSpurBuilt(params.railSpurBuilt);
+    this.syncStructures(params.structures, params.selectedPlotId);
+
+    // 6. Force-rebuild all villager rigs cleanly at their exact active town positions
+    this.rigs.forEach((rig) => {
+      this.scene.remove(rig.root);
+      const clickIdx = this.clickableObjects.indexOf(rig.root);
+      if (clickIdx !== -1) this.clickableObjects.splice(clickIdx, 1);
+      for (const mat of rig.ownedMaterials) {
+        mat.dispose();
+      }
+    });
+    this.rigs.clear();
+
+    this.activeAgentId = params.activeAgentId;
+    this.selectedAgentId = params.selectedAgentId;
+    const capped = params.agents.slice(0, MAX_TOWN_AGENTS);
+    capped.forEach((agent, index) => {
+      const rig = buildCharacter(agent, index, this.sharedRigAssets, false);
+      const startPos = this.computeAgentDestination(agent, index);
+      rig.root.position.copy(startPos);
+      rig.homeAnchor.copy(startPos);
+      rig.waypoints = [];
+      rig.isMoving = false;
+      rig.currentLocation = agent.location;
+      rig.currentPlotId = agent.activePlotId;
+      rig.selectionRing.visible = agent.id === this.selectedAgentId;
+      rig.activeRing.visible = agent.id === this.activeAgentId;
+      this.scene.add(rig.root);
+      this.rigs.set(agent.id, rig);
+      this.clickableObjects.push(rig.root);
+    });
+
+    // 7. Apply theme, atmosphere & frame the town immediately
+    this.setTheme(params.theme);
+    this.setAtmosphere(params.timeOfDay, params.weather);
+    this.cameraTargetGoal = null;
+    if (this.isCleanFrontier) {
+      this.camera.position.set(13.5, 11.5, 14.5);
+      this.controls.target.set(0, 0.9, -4.2);
+    } else {
+      this.camera.position.set(16, 13.5, 19.5);
+      this.controls.target.set(0, 0.8, 0);
+    }
+    this.controls.update();
+    if (!this.disposed) {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
   public syncExpansion(
     unlockedBiomes: BiomeId[],
     roads: string[],
@@ -2218,6 +2548,9 @@ export class TownSceneController {
     this.expansionHandle?.setUnlockedBiomes(unlockedBiomes);
     this.expansionHandle?.setRoads(roads);
     this.railwayHandle?.setRailSpurBuilt(railSpurBuilt);
+    if (this.railwayHandle) {
+      this.railwayHandle.group.visible = !this.isCleanFrontier || railSpurBuilt;
+    }
     if (prevKey !== nextKey) {
       this.syncStructures(this.lastStructures, this.lastSelectedPlotId);
     }
@@ -2403,33 +2736,7 @@ export class TownSceneController {
 
       if (rig.currentLocation !== agent.location || rig.currentPlotId !== agent.activePlotId) {
         const slot = getAgentSlotOffset(agent.id, rig.slotIndex, _slotOffset);
-        let destBase = LANDMARKS[agent.location].gatherPoint;
-        let slotScale = 1.0;
-
-        if (!agent.activePlotId && agent.location === 'town_hall' && (agent.id === 'mayor_sterling' || rig.slotIndex % 3 === 0)) {
-          destBase = new THREE.Vector3(0, 0, -9.85);
-          slotScale = 0.55;
-        } else if (!agent.activePlotId && agent.location === 'workshop' && (agent.id === 'architect_lyra' || agent.id === 'worker_kai' || rig.slotIndex % 2 === 0)) {
-          destBase = new THREE.Vector3(10.35, 0, -0.25);
-          slotScale = 0.45;
-        } else if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
-          const pm = PLOT_META[agent.activePlotId];
-          if (this.completedPlots.has(agent.activePlotId)) {
-            // Step right inside completed structures so roof cutaway reveals villagers indoors
-            destBase = new THREE.Vector3(pm.x, 0, pm.z);
-            slotScale = 0.28;
-          } else {
-            const len = Math.hypot(pm.x, pm.z) || 1;
-            destBase = new THREE.Vector3(pm.x * (1 - 2.6 / len), 0, pm.z * (1 - 2.6 / len));
-            slotScale = 0.65;
-          }
-        }
-
-        const finalPos = new THREE.Vector3(
-          destBase.x + slot.x * slotScale,
-          0,
-          destBase.z + slot.z * slotScale,
-        );
+        const finalPos = this.computeAgentDestination(agent, rig.slotIndex);
         const midPoint = new THREE.Vector3(
           PLAZA_CENTER.x + slot.x * 0.45,
           0,
@@ -2542,12 +2849,20 @@ export class TownSceneController {
       this.raycaster.setFromCamera(this.pointer, this.camera);
 
       const hits = this.raycaster.intersectObjects(this.clickableObjects, true);
-      if (hits.length === 0) {
+      const visibleHit = hits.find((hit) => {
+        let cur: THREE.Object3D | null = hit.object;
+        while (cur) {
+          if (!cur.visible) return false;
+          cur = cur.parent;
+        }
+        return true;
+      });
+      if (!visibleHit) {
         this.focusedCutawayId = null;
         return;
       }
 
-      let obj: THREE.Object3D | null = hits[0].object;
+      let obj: THREE.Object3D | null = visibleHit.object;
       while (obj) {
         if (obj.userData?.agentId) {
           this.callbacks.onSelectAgent(obj.userData.agentId as AgentId);
@@ -2782,8 +3097,12 @@ export class TownSceneController {
       for (const rotor of this.windmillRotors) {
         rotor.rotation.z -= delta * rotorSpeed;
       }
-      this.railwayHandle?.update(delta, elapsed);
-      this.signalRelayHandle?.update(delta, elapsed);
+      if (this.railwayHandle?.group.visible) {
+        this.railwayHandle.update(delta, elapsed);
+      }
+      if (this.signalRelayHandle?.group.visible) {
+        this.signalRelayHandle.update(delta, elapsed);
+      }
       this.expansionHandle?.update(elapsed);
 
       // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom)
@@ -2829,16 +3148,18 @@ export class TownSceneController {
         updateCutaway(entry, plotCutIdx++);
       });
 
-      // 4. Workshop Chimney Smoke
-      const smokeAttr = this.smokePoints.geometry.getAttribute('position') as THREE.BufferAttribute;
-      for (let i = 0; i < this.smokePhases.length; i++) {
-        this.smokePhases[i] = (this.smokePhases[i] + delta * 0.22) % 1;
-        const p = this.smokePhases[i];
-        this.smokePositions[i * 3] = 11.2 + Math.sin(elapsed * 1.4 + i) * 0.25 + p * 0.8;
-        this.smokePositions[i * 3 + 1] = 4.8 + p * 3.8;
-        this.smokePositions[i * 3 + 2] = 0.7 + Math.cos(elapsed * 1.2 + i) * 0.2;
+      // 4. Workshop Chimney Smoke (Main town only)
+      if (this.smokePoints.visible) {
+        const smokeAttr = this.smokePoints.geometry.getAttribute('position') as THREE.BufferAttribute;
+        for (let i = 0; i < this.smokePhases.length; i++) {
+          this.smokePhases[i] = (this.smokePhases[i] + delta * 0.22) % 1;
+          const p = this.smokePhases[i];
+          this.smokePositions[i * 3] = 11.2 + Math.sin(elapsed * 1.4 + i) * 0.25 + p * 0.8;
+          this.smokePositions[i * 3 + 1] = 4.8 + p * 3.8;
+          this.smokePositions[i * 3 + 2] = 0.7 + Math.cos(elapsed * 1.2 + i) * 0.2;
+        }
+        smokeAttr.needsUpdate = true;
       }
-      smokeAttr.needsUpdate = true;
 
       // 4b. Artisan Bakery Chimney Cozy Steam/Smoke (always active when Bakery built, richer in Rain & Winter)
       const showBakerySteam = this.bakeryChimneys.length > 0;
@@ -2975,7 +3296,7 @@ export class TownSceneController {
         const rz = rig.root.position.z;
         if (Math.abs(rx) < 2.4 && rz > -12.2 && rz < -8.8) {
           targetFloorY = 0.38;
-        } else if (rx > 8.7 && rx < 12.2 && rz > -2.3 && rz < 1.3) {
+        } else if (!this.isCleanFrontier && rx > 8.7 && rx < 12.2 && rz > -2.3 && rz < 1.3) {
           targetFloorY = 0.33;
         } else if (rig.currentPlotId && this.completedPlots.has(rig.currentPlotId)) {
           const pm = PLOT_META[rig.currentPlotId];
@@ -3091,6 +3412,8 @@ export class TownSceneController {
     window.cancelAnimationFrame(this.frameId);
     window.clearTimeout(this.frameId);
     this.controls.dispose();
+    this.townHallSignTex?.dispose();
+    this.townHallSignTex = null;
     for (const d of this.disposables) {
       d.dispose();
     }

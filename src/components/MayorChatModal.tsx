@@ -351,14 +351,51 @@ function cleanSearchQueryFromMessage(text: string): string {
   return stripped.slice(0, 180) || 'top 5 world news headlines today';
 }
 
+function titleCaseWords(raw: string): string {
+  return raw
+    .trim()
+    .split(/\s+/)
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ''))
+    .join(' ')
+    .slice(0, 48);
+}
+
 function parseNewTownName(text: string): string | null {
-  const match =
-    text.match(/(?:called|named)\s+["']?([a-zA-Z0-9][a-zA-Z0-9\s'-]{1,36})["']?/i) ||
-    text.match(/(?:new\s+(?:town|city|village|settlement))\s+["']?([a-zA-Z0-9][a-zA-Z0-9\s'-]{1,36})["']?/i);
-  if (!match?.[1]) return null;
-  const cleaned = match[1].replace(/[.!?]+$/g, '').trim();
-  if (!cleaned || /^(for|to|with|please|now)$/i.test(cleaned)) return null;
-  return cleaned.slice(0, 48);
+  const cleaned = text.replace(/^(mayor\s*,?\s*)/i, '').replace(/[.!?]+$/g, '').trim();
+  const calledMatch = cleaned.match(
+    /(?:called|named)\s+["']?([a-zA-Z0-9][a-zA-Z0-9\s'-]{0,36})["']?/i,
+  );
+  if (calledMatch?.[1]) {
+    const val = calledMatch[1].trim();
+    if (val && !/^(for|to|with|please|now)$/i.test(val)) return titleCaseWords(val);
+  }
+
+  // e.g. "Create moon city", "Start a Starlight town", "Make Neo Village"
+  const prefixNameMatch = cleaned.match(
+    /(?:create|start|found|charter|make|build|open)\s+(?:a\s+)?(?:new\s+)?([a-zA-Z0-9][a-zA-Z0-9\s'-]{0,28}?)\s+(town|city|village|settlement)\b/i,
+  );
+  if (prefixNameMatch?.[1]) {
+    const base = prefixNameMatch[1]
+      .replace(/^(a|an|the|new|another|second|my)\s+/i, '')
+      .trim();
+    const kind = prefixNameMatch[2];
+    if (base && !/^(a|an|the|new|another|second|my|one)$/i.test(base)) {
+      return titleCaseWords(`${base} ${kind}`);
+    }
+  }
+
+  // e.g. "Create new town Moon", "Start city Solaris"
+  const suffixNameMatch = cleaned.match(
+    /(?:new\s+)?(?:town|city|village|settlement)\s+["']?([a-zA-Z0-9][a-zA-Z0-9\s'-]{0,32})["']?/i,
+  );
+  if (suffixNameMatch?.[1]) {
+    const val = suffixNameMatch[1].trim();
+    if (val && !/^(for|to|with|please|now|hall|square|log|center)$/i.test(val)) {
+      return titleCaseWords(val);
+    }
+  }
+
+  return null;
 }
 
 function parseLocalIntent(
@@ -381,16 +418,17 @@ function parseLocalIntent(
     };
   }
 
-  // 2) Create a NEW saved town / city (non-destructive)
+  // 2) Create a NEW saved town / city (non-destructive) — handles "Create moon city", "Create a new town called New Haven", etc.
   if (
-    /\b(create|start|found|charter|make|new)\b/.test(lower) &&
-    /\b(new town|new city|new village|another town|second town|town called|city called|town named|city named)\b/.test(
+    /\b(create|start|found|charter|make|open|build)\b/.test(lower) &&
+    /\b(town|city|village|settlement)\b/.test(lower) &&
+    !/\b(town hall|town log|town pulse|town status|city hall|in town|in the town|for the town)\b/.test(
       lower,
     )
   ) {
     const parsedName = parseNewTownName(text) || 'New Haven';
     return {
-      reply: `Chartering a brand-new saved town called ${parsedName}! Your existing town stays safely saved in your Town Switcher.`,
+      reply: `Chartering a brand-new saved town called ${parsedName} with a clean empty map! Your existing town stays safely saved in your Town Switcher.`,
       action: { type: 'create_town', townName: parsedName },
     };
   }

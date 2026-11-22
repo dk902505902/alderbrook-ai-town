@@ -22,6 +22,9 @@ import {
 } from '../types/town.ts';
 
 interface TownViewportProps {
+  townId: string;
+  townName: string;
+  isMainTown: boolean;
   agents: AgentRecord[];
   structures: TownStructure[];
   unlockedBiomes: BiomeId[];
@@ -63,6 +66,9 @@ interface TownViewportProps {
 }
 
 export function TownViewport({
+  townId,
+  townName,
+  isMainTown,
   agents,
   structures,
   unlockedBiomes,
@@ -91,7 +97,40 @@ export function TownViewport({
 }: TownViewportProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<TownSceneController | null>(null);
+  const loadedTownKeyRef = useRef<string | null>(null);
   const labelRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const latestTownDataRef = useRef({
+    townId,
+    townName,
+    isMainTown,
+    agents,
+    structures,
+    unlockedBiomes,
+    roads,
+    railSpurBuilt,
+    activeAgentId,
+    selectedAgentId,
+    selectedPlotId,
+    timeOfDay,
+    weather,
+    townTheme,
+  });
+  latestTownDataRef.current = {
+    townId,
+    townName,
+    isMainTown,
+    agents,
+    structures,
+    unlockedBiomes,
+    roads,
+    railSpurBuilt,
+    activeAgentId,
+    selectedAgentId,
+    selectedPlotId,
+    timeOfDay,
+    weather,
+    townTheme,
+  };
   const callbacksRef = useRef({
     onSelectAgent,
     onSelectLocation,
@@ -141,26 +180,74 @@ export function TownViewport({
     }, graphicsQuality, townTheme);
 
     controllerRef.current = controller;
+    const snap = latestTownDataRef.current;
+    controller.loadTown({
+      townId: snap.townId,
+      townName: snap.townName,
+      isMainTown: snap.isMainTown,
+      agents: snap.agents,
+      structures: snap.structures,
+      unlockedBiomes: snap.unlockedBiomes,
+      roads: snap.roads,
+      railSpurBuilt: snap.railSpurBuilt,
+      activeAgentId: snap.activeAgentId,
+      selectedAgentId: snap.selectedAgentId,
+      selectedPlotId: snap.selectedPlotId,
+      timeOfDay: snap.timeOfDay,
+      weather: snap.weather,
+      theme: snap.townTheme,
+    });
+    loadedTownKeyRef.current = `${snap.townId}:${snap.isMainTown}:${snap.townName}`;
 
     return () => {
       controller.dispose();
       controllerRef.current = null;
+      loadedTownKeyRef.current = null;
     };
     // Intentionally mount WebGL once
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Immediately rebuild & refresh the 3D scene whenever switching towns or creating a new town
+  const currentTownKey = `${townId}:${isMainTown}:${townName}`;
   useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    if (loadedTownKeyRef.current === currentTownKey) return;
+    const snap = latestTownDataRef.current;
+    controller.loadTown({
+      townId: snap.townId,
+      townName: snap.townName,
+      isMainTown: snap.isMainTown,
+      agents: snap.agents,
+      structures: snap.structures,
+      unlockedBiomes: snap.unlockedBiomes,
+      roads: snap.roads,
+      railSpurBuilt: snap.railSpurBuilt,
+      activeAgentId: snap.activeAgentId,
+      selectedAgentId: snap.selectedAgentId,
+      selectedPlotId: snap.selectedPlotId,
+      timeOfDay: snap.timeOfDay,
+      weather: snap.weather,
+      theme: snap.townTheme,
+    });
+    loadedTownKeyRef.current = currentTownKey;
+  }, [currentTownKey]);
+
+  useEffect(() => {
+    if (loadedTownKeyRef.current !== currentTownKey) return;
     controllerRef.current?.syncAgents(agents, activeAgentId, selectedAgentId);
-  }, [agents, activeAgentId, selectedAgentId]);
+  }, [agents, activeAgentId, selectedAgentId, currentTownKey]);
 
   useEffect(() => {
+    if (loadedTownKeyRef.current !== currentTownKey) return;
     controllerRef.current?.syncExpansion(unlockedBiomes, roads, railSpurBuilt);
-  }, [unlockedBiomes, roads, railSpurBuilt]);
+  }, [unlockedBiomes, roads, railSpurBuilt, currentTownKey]);
 
   useEffect(() => {
+    if (loadedTownKeyRef.current !== currentTownKey) return;
     controllerRef.current?.syncStructures(structures, selectedPlotId);
-  }, [structures, selectedPlotId]);
+  }, [structures, selectedPlotId, currentTownKey]);
 
   useEffect(() => {
     controllerRef.current?.setAtmosphere(timeOfDay, weather);

@@ -25,6 +25,7 @@ export interface WaterUniforms {
 }
 
 export interface TownDetailsHandle {
+  group: THREE.Group;
   windUniforms: WindUniforms;
   setDensityFactor: (factor: number) => void;
   setLanternShadows: (enabled: boolean) => void;
@@ -621,6 +622,7 @@ export function buildScatteredTownDetails(
   const totalFences = fencePlacements.length;
 
   return {
+    group,
     windUniforms,
     setDensityFactor: (factor: number) => {
       const f = Math.max(0.35, Math.min(1, factor));
@@ -826,6 +828,7 @@ export function buildExpandableBiomesAndRoads(
     }
 
     roadMesh.count = idx;
+    roadMesh.visible = idx > 0;
     roadMesh.instanceMatrix.needsUpdate = true;
     if (roadMesh.instanceColor) roadMesh.instanceColor.needsUpdate = true;
   };
