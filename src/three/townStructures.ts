@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import type { PlotId, StructureType, TownStructure, TownTheme } from '../types/town.ts';
-import { createWindSwayMaterial, type WindUniforms } from './townEnvironment.ts';
+import type { GraphicsQuality, PlotId, StructureType, TownStructure, TownTheme } from '../types/town.ts';
+import { createClothWaveMaterial, createWindSwayMaterial, type WindUniforms } from './townEnvironment.ts';
 import { applyThemeToObjectTree, tagThemeMaterial, type ThemeMaterialRole } from './townThemes.ts';
 
 function addPart(
@@ -59,6 +59,96 @@ function createWindowMat(
   );
   lanternMaterials.push(mat);
   return mat;
+}
+
+/**
+ * Builds 4 hollow exterior walls around a rectangular footprint so the building interior
+ * is clearly visible when its roof fades to opacity 0.15.
+ */
+function addHollowBoxWalls(
+  parent: THREE.Group,
+  width: number,
+  height: number,
+  depth: number,
+  baseY: number,
+  thickness: number,
+  wallMat: THREE.Material,
+  floorMat: THREE.Material,
+): void {
+  const cy = baseY + height / 2;
+  // Floor slab
+  addPart(parent, new THREE.BoxGeometry(width - thickness * 0.4, 0.06, depth - thickness * 0.4), floorMat, 0, baseY + 0.03, 0);
+  // Back wall (-Z)
+  addPart(parent, new THREE.BoxGeometry(width, height, thickness), wallMat, 0, cy, -depth / 2 + thickness / 2);
+  // Front wall (+Z)
+  addPart(parent, new THREE.BoxGeometry(width, height, thickness), wallMat, 0, cy, depth / 2 - thickness / 2);
+  // Left wall (-X)
+  addPart(parent, new THREE.BoxGeometry(thickness, height, depth - thickness * 2), wallMat, -width / 2 + thickness / 2, cy, 0);
+  // Right wall (+X)
+  addPart(parent, new THREE.BoxGeometry(thickness, height, depth - thickness * 2), wallMat, width / 2 - thickness / 2, cy, 0);
+}
+
+function addWoodenTable(
+  parent: THREE.Group,
+  x: number,
+  baseY: number,
+  z: number,
+  w: number,
+  d: number,
+  woodMat: THREE.Material,
+): void {
+  addPart(parent, new THREE.BoxGeometry(w, 0.08, d), woodMat, x, baseY + 0.42, z);
+  const lx = w * 0.38;
+  const lz = d * 0.36;
+  const legGeo = new THREE.BoxGeometry(0.07, 0.4, 0.07);
+  addPart(parent, legGeo, woodMat, x - lx, baseY + 0.2, z - lz);
+  addPart(parent, legGeo, woodMat, x + lx, baseY + 0.2, z - lz);
+  addPart(parent, legGeo, woodMat, x - lx, baseY + 0.2, z + lz);
+  addPart(parent, legGeo, woodMat, x + lx, baseY + 0.2, z + lz);
+}
+
+function addWallShelf(
+  parent: THREE.Group,
+  x: number,
+  baseY: number,
+  z: number,
+  rotY: number,
+  woodMat: THREE.Material,
+  itemMat: THREE.Material,
+): void {
+  const shelf = new THREE.Group();
+  shelf.position.set(x, baseY, z);
+  shelf.rotation.y = rotY;
+  addPart(shelf, new THREE.BoxGeometry(0.76, 0.92, 0.05), woodMat, 0, 0.46, -0.1);
+  addPart(shelf, new THREE.BoxGeometry(0.74, 0.05, 0.22), woodMat, 0, 0.34, 0);
+  addPart(shelf, new THREE.BoxGeometry(0.74, 0.05, 0.22), woodMat, 0, 0.66, 0);
+  // Small props / loaves / jars / books
+  addPart(shelf, new THREE.BoxGeometry(0.18, 0.16, 0.14), itemMat, -0.2, 0.45, 0.01);
+  addPart(shelf, new THREE.BoxGeometry(0.22, 0.14, 0.14), itemMat, 0.14, 0.44, 0.01);
+  addPart(shelf, new THREE.BoxGeometry(0.16, 0.18, 0.13), itemMat, -0.14, 0.78, 0.01);
+  addPart(shelf, new THREE.BoxGeometry(0.18, 0.14, 0.13), itemMat, 0.18, 0.76, 0.01);
+  parent.add(shelf);
+}
+
+function addCozyBed(
+  parent: THREE.Group,
+  x: number,
+  baseY: number,
+  z: number,
+  rotY: number,
+  woodMat: THREE.Material,
+  blanketMat: THREE.Material,
+  pillowMat: THREE.Material,
+): void {
+  const bed = new THREE.Group();
+  bed.position.set(x, baseY, z);
+  bed.rotation.y = rotY;
+  addPart(bed, new THREE.BoxGeometry(0.66, 0.18, 1.05), woodMat, 0, 0.12, 0);
+  addPart(bed, new THREE.BoxGeometry(0.68, 0.44, 0.08), woodMat, 0, 0.25, -0.5);
+  addPart(bed, new THREE.BoxGeometry(0.58, 0.14, 0.94), pillowMat, 0, 0.26, 0.02);
+  addPart(bed, new THREE.BoxGeometry(0.6, 0.15, 0.64), blanketMat, 0, 0.275, 0.17);
+  addPart(bed, new THREE.BoxGeometry(0.42, 0.1, 0.22), pillowMat, 0, 0.36, -0.32);
+  parent.add(bed);
 }
 
 export function buildEmptyPlotMesh(
@@ -207,35 +297,87 @@ export function buildCompletedStructureMesh(
 
   const plinthMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 }), 'stone');
   const woodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.82 }), 'wood');
+  const interiorFloorMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xa16207, roughness: 0.86 }), 'wood');
+  const interiorWoodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.78 }), 'darkWood');
+  const hearthStoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.9 }), 'stone');
+  const pillowMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.82 });
+  const breadItemMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.72 });
   const winMat = createWindowMat(lanternMaterials);
+
+  const cutawayRoofMaterials: THREE.MeshStandardMaterial[] = [];
+  const interiorFireMats: THREE.MeshStandardMaterial[] = [];
+
+  const createFireGlowMat = (): THREE.MeshStandardMaterial => {
+    const fm = new THREE.MeshStandardMaterial({
+      color: 0xfef08a,
+      emissive: 0xf97316,
+      emissiveIntensity: 1.65,
+      roughness: 0.25,
+    });
+    interiorFireMats.push(fm);
+    return fm;
+  };
 
   const type: StructureType = structure.structureType;
 
   if (type === 'bakery') {
     const brickMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.78 }), 'wall');
     const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.65 }), 'roofPrimary');
+    const chimneyWoodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.82 }), 'wood');
+    const chimneyCapMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 }), 'stone');
     const awningMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.6 }), 'banner');
+    cutawayRoofMaterials.push(roofMat, chimneyWoodMat, chimneyCapMat);
 
     addPart(group, new THREE.BoxGeometry(2.6, 0.24, 2.4), plinthMat, 0, 0.12, 0);
-    addPart(group, new THREE.BoxGeometry(2.3, 1.55, 2.0), brickMat, 0, 1.01, 0);
+    // Hollow exterior walls so the glowing bread oven & counter are visible inside
+    addHollowBoxWalls(group, 2.3, 1.55, 2.0, 0.24, 0.14, brickMat, interiorFloorMat);
+
+    // Interior: Warm Glowing Brick Bread Oven (back-right corner beneath chimney)
+    addPart(group, new THREE.BoxGeometry(0.76, 0.96, 0.68), hearthStoneMat, 0.58, 0.74, -0.48);
+    addPart(group, new THREE.CylinderGeometry(0.32, 0.36, 0.42, 8), hearthStoneMat, 0.58, 1.38, -0.48);
+    addPart(group, new THREE.BoxGeometry(0.38, 0.34, 0.12), createFireGlowMat(), 0.58, 0.66, -0.14);
+    // Interior: Wooden Bakery Prep Table with Bread Loaves & Flour Sack
+    addWoodenTable(group, -0.35, 0.26, 0.15, 0.92, 0.56, interiorWoodMat);
+    addPart(group, new THREE.CylinderGeometry(0.11, 0.12, 0.18, 6), breadItemMat, -0.52, 0.76, 0.14, 0, 0, Math.PI / 2);
+    addPart(group, new THREE.CylinderGeometry(0.1, 0.11, 0.18, 6), breadItemMat, -0.22, 0.76, 0.18, 0, 0.4, Math.PI / 2);
+    addPart(group, new THREE.CylinderGeometry(0.14, 0.16, 0.24, 7), pillowMat, 0.02, 0.8, 0.08);
+    // Interior: Bread Display Shelf along left wall
+    addWallShelf(group, -0.94, 0.26, -0.22, Math.PI / 2, interiorWoodMat, breadItemMat);
+
+    // Cutaway Roof & Chimney
     addPart(group, new THREE.ConeGeometry(1.85, 1.15, 4), roofMat, 0, 2.36, 0, 0, Math.PI / 4);
-    addPart(group, new THREE.BoxGeometry(0.45, 1.3, 0.45), woodMat, 0.78, 2.35, -0.55);
-    addPart(group, new THREE.BoxGeometry(0.56, 0.1, 0.56), plinthMat, 0.78, 3.02, -0.55);
+    addPart(group, new THREE.BoxGeometry(0.45, 1.3, 0.45), chimneyWoodMat, 0.78, 2.35, -0.55);
+    addPart(group, new THREE.BoxGeometry(0.56, 0.1, 0.56), chimneyCapMat, 0.78, 3.02, -0.55);
     addPart(group, new THREE.BoxGeometry(1.5, 0.14, 0.65), awningMat, 0, 1.18, 1.24, 0.3);
     addPart(group, new THREE.BoxGeometry(0.5, 0.78, 0.08), woodMat, -0.45, 0.63, 1.02);
     addPart(group, new THREE.BoxGeometry(0.58, 0.52, 0.08), winMat, 0.48, 0.95, 1.02);
     addPart(group, new THREE.BoxGeometry(0.48, 0.44, 0.08), winMat, 1.16, 1.0, 0.1);
   } else if (type === 'watchtower') {
-    const stoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.84 }), 'stone');
+    const stoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.84, side: THREE.DoubleSide }), 'stone');
     const slateMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.58, metalness: 0.12 }), 'roofPrimary');
+    const deckRoofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.82 }), 'wood');
+    const blanketMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.72 }), 'banner');
     const beaconMat = createWindowMat(lanternMaterials, 0xfef08a, 0xfacc15, 'lantern');
+    cutawayRoofMaterials.push(slateMat, deckRoofMat);
 
     addPart(group, new THREE.CylinderGeometry(1.45, 1.65, 0.35, 8), stoneMat, 0, 0.175, 0);
-    addPart(group, new THREE.CylinderGeometry(0.92, 1.18, 2.55, 8), stoneMat, 0, 1.6, 0);
-    addPart(group, new THREE.BoxGeometry(2.15, 0.38, 2.15), woodMat, 0, 2.98, 0);
-    addPart(group, new THREE.ConeGeometry(1.58, 1.25, 4), slateMat, 0, 3.78, 0, 0, Math.PI / 4);
-    addPart(group, new THREE.SphereGeometry(0.22, 8, 6), beaconMat, 0, 3.3, 0);
-    addPart(group, new THREE.BoxGeometry(0.46, 0.82, 0.1), woodMat, 0, 0.76, 1.06);
+    // Hollow open-top lower stone tower shaft so guard room is visible when roof & upper deck fade
+    addPart(group, new THREE.CylinderGeometry(1.06, 1.2, 2.35, 8, 1, true), stoneMat, 0, 1.52, 0);
+    addPart(group, new THREE.CylinderGeometry(1.12, 1.12, 0.08, 8), interiorFloorMat, 0, 0.36, 0);
+
+    // Interior: Guard Bunk Bed, Tactical Table, Supply Shelf & Warm Brazier
+    addCozyBed(group, -0.46, 0.4, -0.22, 0.25, interiorWoodMat, blanketMat, pillowMat);
+    addWoodenTable(group, 0.36, 0.4, 0.18, 0.62, 0.48, interiorWoodMat);
+    addPart(group, new THREE.BoxGeometry(0.32, 0.03, 0.24), pillowMat, 0.36, 0.87, 0.18);
+    addWallShelf(group, 0.28, 0.4, -0.78, 0, interiorWoodMat, hearthStoneMat);
+    addPart(group, new THREE.CylinderGeometry(0.18, 0.12, 0.36, 6), hearthStoneMat, -0.1, 0.58, 0.56);
+    addPart(group, new THREE.OctahedronGeometry(0.14, 0), createFireGlowMat(), -0.1, 0.84, 0.56);
+
+    // Cutaway Upper Lookout Deck & Slate Roof
+    addPart(group, new THREE.BoxGeometry(2.15, 0.34, 2.15), deckRoofMat, 0, 2.86, 0);
+    addPart(group, new THREE.ConeGeometry(1.58, 1.25, 4), slateMat, 0, 3.66, 0, 0, Math.PI / 4);
+    addPart(group, new THREE.SphereGeometry(0.22, 8, 6), beaconMat, 0, 3.22, 0);
+    addPart(group, new THREE.BoxGeometry(0.46, 0.82, 0.1), woodMat, 0, 0.76, 1.14);
   } else if (type === 'greenhouse') {
     const ironMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.4, metalness: 0.55 }), 'metal');
     const glassMat = tagThemeMaterial(
@@ -248,6 +390,8 @@ export function buildCompletedStructureMesh(
       }),
       'glass',
     );
+    const roofGlassMat = glassMat.clone();
+    cutawayRoofMaterials.push(roofGlassMat);
     const foliageMat = tagThemeMaterial(
       windUniforms
         ? createWindSwayMaterial({ color: 0x16a34a, roughness: 0.85 }, windUniforms, {
@@ -261,18 +405,19 @@ export function buildCompletedStructureMesh(
 
     addPart(group, new THREE.BoxGeometry(2.7, 0.45, 2.3), plinthMat, 0, 0.225, 0);
     addPart(group, new THREE.BoxGeometry(2.45, 1.25, 2.05), glassMat, 0, 1.08, 0);
-    addPart(group, new THREE.ConeGeometry(1.88, 0.9, 4), glassMat, 0, 2.15, 0, 0, Math.PI / 4);
+    addPart(group, new THREE.ConeGeometry(1.88, 0.9, 4), roofGlassMat, 0, 2.15, 0, 0, Math.PI / 4);
     // Iron ribs
     addPart(group, new THREE.BoxGeometry(2.55, 0.08, 0.08), ironMat, 0, 1.72, 1.04);
     addPart(group, new THREE.BoxGeometry(2.55, 0.08, 0.08), ironMat, 0, 1.72, -1.04);
-    // Foliage shrubs inside + swaying exterior planter crops
+    // Foliage shrubs inside + potting bench + swaying exterior planter crops
     addPart(group, new THREE.DodecahedronGeometry(0.42, 0), foliageMat, -0.5, 0.82, 0);
     addPart(group, new THREE.DodecahedronGeometry(0.48, 0), foliageMat, 0.48, 0.86, -0.15);
+    addWoodenTable(group, 0, 0.45, -0.55, 0.95, 0.38, interiorWoodMat);
     addPart(group, new THREE.ConeGeometry(0.16, 0.42, 5), foliageMat, -1.12, 0.28, 1.32);
     addPart(group, new THREE.ConeGeometry(0.16, 0.45, 5), foliageMat, 1.12, 0.28, 1.32);
     addPart(group, new THREE.BoxGeometry(0.32, 0.36, 0.08), winMat, 0, 1.15, 1.04);
   } else if (type === 'windmill') {
-    const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.8 }), 'wall');
+    const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.8, side: THREE.DoubleSide }), 'wall');
     const capMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.65 }), 'roofPrimary');
     const sailMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.72 }), 'trim');
     const wheatMat = tagThemeMaterial(
@@ -285,9 +430,16 @@ export function buildCompletedStructureMesh(
         : new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.82 }),
       'crop',
     );
+    cutawayRoofMaterials.push(capMat);
 
     addPart(group, new THREE.CylinderGeometry(1.35, 1.55, 0.32, 10), plinthMat, 0, 0.16, 0);
-    addPart(group, new THREE.CylinderGeometry(0.88, 1.18, 2.65, 10), wallMat, 0, 1.64, 0);
+    // Open-top hollow mill tower with interior millstone & flour sacks
+    addPart(group, new THREE.CylinderGeometry(0.88, 1.18, 2.65, 10, 1, true), wallMat, 0, 1.64, 0);
+    addPart(group, new THREE.CylinderGeometry(1.12, 1.12, 0.06, 10), interiorFloorMat, 0, 0.34, 0);
+    addPart(group, new THREE.CylinderGeometry(0.42, 0.46, 0.28, 10), hearthStoneMat, 0, 0.5, -0.1);
+    addPart(group, new THREE.CylinderGeometry(0.18, 0.2, 0.38, 7), pillowMat, -0.52, 0.56, 0.26);
+    addPart(group, new THREE.CylinderGeometry(0.16, 0.18, 0.32, 7), pillowMat, 0.48, 0.53, 0.32);
+
     addPart(group, new THREE.ConeGeometry(1.12, 1.05, 10), capMat, 0, 3.48, 0);
     addPart(group, new THREE.BoxGeometry(0.46, 0.8, 0.12), woodMat, 0, 0.72, 1.12);
     addPart(group, new THREE.BoxGeometry(0.38, 0.38, 0.08), winMat, 0, 1.85, 0.98);
@@ -296,15 +448,15 @@ export function buildCompletedStructureMesh(
       addPart(group, new THREE.ConeGeometry(0.15, 0.48, 5), wheatMat, wx, 0.24, wz);
     }
 
-    // Animated Windmill Rotor Group
+    // Animated Windmill Rotor Group (4 lattice sail vanes rotating continuously)
     const rotor = new THREE.Group();
     rotor.position.set(0, 2.65, 1.04);
     addPart(rotor, new THREE.CylinderGeometry(0.12, 0.12, 0.32, 8), woodMat, 0, 0, 0, Math.PI / 2);
     for (let i = 0; i < 4; i++) {
       const arm = new THREE.Group();
       arm.rotation.z = (i * Math.PI) / 2;
-      addPart(arm, new THREE.BoxGeometry(0.08, 1.55, 0.06), woodMat, 0, 0.78, 0.06);
-      addPart(arm, new THREE.BoxGeometry(0.42, 1.12, 0.03), sailMat, 0.18, 0.94, 0.08);
+      addPart(arm, new THREE.BoxGeometry(0.08, 1.62, 0.06), woodMat, 0, 0.81, 0.06);
+      addPart(arm, new THREE.BoxGeometry(0.44, 1.18, 0.03), sailMat, 0.2, 0.96, 0.08);
       rotor.add(arm);
     }
     group.add(rotor);
@@ -312,9 +464,20 @@ export function buildCompletedStructureMesh(
   } else if (type === 'library') {
     const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.78 }), 'wall');
     const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.62 }), 'roofPrimary');
+    const bookMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x6366f1, roughness: 0.6 }), 'banner');
+    cutawayRoofMaterials.push(roofMat);
 
     addPart(group, new THREE.BoxGeometry(2.8, 0.28, 2.4), plinthMat, 0, 0.14, 0);
-    addPart(group, new THREE.BoxGeometry(2.4, 1.65, 1.95), wallMat, 0, 1.1, 0);
+    addHollowBoxWalls(group, 2.4, 1.65, 1.95, 0.28, 0.14, wallMat, interiorFloorMat);
+
+    // Interior: Reading Table, Open Parchment, Bookshelves & Warm Lamp
+    addWoodenTable(group, 0, 0.3, 0.12, 0.95, 0.56, interiorWoodMat);
+    addPart(group, new THREE.BoxGeometry(0.32, 0.04, 0.22), pillowMat, -0.15, 0.78, 0.12);
+    addPart(group, new THREE.SphereGeometry(0.1, 7, 6), createFireGlowMat(), 0.26, 0.84, 0.12);
+    addWallShelf(group, -0.96, 0.3, -0.1, Math.PI / 2, interiorWoodMat, bookMat);
+    addWallShelf(group, 0.96, 0.3, -0.1, -Math.PI / 2, interiorWoodMat, breadItemMat);
+    addWallShelf(group, 0, 0.3, -0.76, 0, interiorWoodMat, bookMat);
+
     addPart(group, new THREE.ConeGeometry(1.92, 1.0, 4), roofMat, 0, 2.42, 0, 0, Math.PI / 4);
     addPart(group, new THREE.CylinderGeometry(0.11, 0.12, 1.55, 8), wallMat, -0.78, 1.05, 1.08);
     addPart(group, new THREE.CylinderGeometry(0.11, 0.12, 1.55, 8), wallMat, 0.78, 1.05, 1.08);
@@ -335,13 +498,22 @@ export function buildCompletedStructureMesh(
           'crop',
         )
       : crateMat;
+    cutawayRoofMaterials.push(roofMat);
 
     // Stilts + raised floor
     for (const [sx, sz] of [[-1.0, -0.8], [1.0, -0.8], [-1.0, 0.8], [1.0, 0.8]] as Array<[number, number]>) {
       addPart(group, new THREE.BoxGeometry(0.22, 0.45, 0.22), woodMat, sx, 0.225, sz);
     }
     addPart(group, new THREE.BoxGeometry(2.6, 0.18, 2.1), woodMat, 0, 0.5, 0);
-    addPart(group, new THREE.BoxGeometry(2.3, 1.3, 1.85), timberMat, 0, 1.24, 0);
+    addHollowBoxWalls(group, 2.3, 1.3, 1.85, 0.59, 0.14, timberMat, interiorFloorMat);
+
+    // Interior: Grain sacks, supply shelves & weigh table
+    addPart(group, new THREE.CylinderGeometry(0.2, 0.22, 0.44, 7), pillowMat, -0.58, 0.84, -0.32);
+    addPart(group, new THREE.CylinderGeometry(0.18, 0.2, 0.38, 7), pillowMat, -0.22, 0.81, -0.42);
+    addPart(group, new THREE.BoxGeometry(0.4, 0.36, 0.4), crateMat, 0.54, 0.8, -0.35);
+    addWoodenTable(group, 0.15, 0.62, 0.32, 0.76, 0.42, interiorWoodMat);
+    addWallShelf(group, 0.92, 0.62, 0.05, -Math.PI / 2, interiorWoodMat, crateMat);
+
     const roof = addPart(group, new THREE.CylinderGeometry(0.98, 0.98, 2.45, 10, 1, false, 0, Math.PI), roofMat, 0, 1.89, 0);
     roof.rotation.z = Math.PI / 2;
     addPart(group, new THREE.BoxGeometry(0.45, 0.45, 0.45), crateMat, 0.75, 0.82, 1.12);
@@ -352,12 +524,15 @@ export function buildCompletedStructureMesh(
     const pillarMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.78 }), 'wood');
     const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.55 }), 'roofSecondary');
     const lampMat = createWindowMat(lanternMaterials, 0xfef3c7, 0xf59e0b, 'lantern');
+    cutawayRoofMaterials.push(roofMat);
 
     addPart(group, new THREE.CylinderGeometry(1.7, 1.85, 0.26, 6), plinthMat, 0, 0.13, 0);
     for (let i = 0; i < 6; i++) {
       const angle = (i / 6) * Math.PI * 2;
       addPart(group, new THREE.CylinderGeometry(0.08, 0.09, 1.6, 6), pillarMat, Math.cos(angle) * 1.28, 1.06, Math.sin(angle) * 1.28);
     }
+    // Cozy wooden garden tea table inside pavilion
+    addWoodenTable(group, 0, 0.26, 0, 0.75, 0.75, interiorWoodMat);
     addPart(group, new THREE.ConeGeometry(2.05, 0.85, 6), roofMat, 0, 2.28, 0);
     addPart(group, new THREE.ConeGeometry(1.25, 0.65, 6), roofMat, 0, 2.86, 0);
     addPart(group, new THREE.SphereGeometry(0.24, 8, 6), lampMat, 0, 1.55, 0);
@@ -367,9 +542,14 @@ export function buildCompletedStructureMesh(
     const trimMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65 }), 'trim');
     const spireMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.42, metalness: 0.45 }), 'roofPrimary');
     const faceMat = createWindowMat(lanternMaterials, 0xfef9c3, 0xfde047, 'window');
+    cutawayRoofMaterials.push(spireMat, trimMat);
 
     addPart(group, new THREE.BoxGeometry(2.2, 0.32, 2.2), plinthMat, 0, 0.16, 0);
-    addPart(group, new THREE.BoxGeometry(1.48, 2.8, 1.48), brickMat, 0, 1.72, 0);
+    addHollowBoxWalls(group, 1.48, 2.8, 1.48, 0.32, 0.14, brickMat, interiorFloorMat);
+    // Interior: Clockmaker Desk, Shelves & Glowing Pendulum Weight
+    addWoodenTable(group, 0, 0.36, -0.22, 0.72, 0.44, interiorWoodMat);
+    addPart(group, new THREE.SphereGeometry(0.14, 8, 6), createFireGlowMat(), 0, 1.25, 0);
+
     addPart(group, new THREE.BoxGeometry(1.66, 0.22, 1.66), trimMat, 0, 3.18, 0);
     addPart(group, new THREE.ConeGeometry(1.25, 1.45, 4), spireMat, 0, 4.02, 0, 0, Math.PI / 4);
     // Clock dials on front/back/sides
@@ -378,12 +558,22 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.BoxGeometry(0.46, 0.78, 0.1), woodMat, 0, 0.71, 0.76);
   }
 
-  // Tier 2 Enhancement: Banner & Side Alcove
+  // Tier 2 Enhancement: Cloth-Wave Banner & Side Alcove
   if (structure.tier >= 2) {
-    const bannerMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.55 }), 'banner');
+    const bannerMat = tagThemeMaterial(
+      windUniforms
+        ? createClothWaveMaterial({ color: 0x2563eb, roughness: 0.58 }, windUniforms, {
+            waveAmp: 0.065,
+            waveFreq: 5.2,
+            phaseOffset: 1.4,
+          })
+        : new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.55, side: THREE.DoubleSide }),
+      'banner',
+    );
     const poleMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.35, metalness: 0.6 }), 'gold');
-    addPart(group, new THREE.CylinderGeometry(0.04, 0.04, 1.4, 6), poleMat, -1.42, 0.7, 1.18);
-    addPart(group, new THREE.BoxGeometry(0.42, 0.62, 0.05), bannerMat, -1.42, 1.12, 1.21);
+    addPart(group, new THREE.CylinderGeometry(0.04, 0.04, 1.45, 6), poleMat, -1.42, 0.72, 1.18);
+    addPart(group, new THREE.BoxGeometry(0.52, 0.05, 0.05), poleMat, -1.42, 1.42, 1.2);
+    addPart(group, new THREE.PlaneGeometry(0.46, 0.68, 3, 7), bannerMat, -1.42, 1.07, 1.22);
   }
 
   // Tier 3 Enhancement: Gilded Crest & Courtyard Lantern Post
@@ -408,6 +598,9 @@ export function buildCompletedStructureMesh(
     );
     ring.rotation.x = -Math.PI / 2;
   }
+
+  group.userData.cutawayRoofMaterials = cutawayRoofMaterials;
+  group.userData.interiorFireMats = interiorFireMats;
 
   if (theme !== 'meadow') {
     applyThemeToObjectTree(group, theme);
@@ -434,4 +627,281 @@ export function disposeStructureGroup(
       }
     }
   });
+}
+
+export interface SignalRelayHandle {
+  group: THREE.Group;
+  roofMaterials: THREE.MeshStandardMaterial[];
+  fireMaterials: THREE.MeshStandardMaterial[];
+  applyTheme: (theme: TownTheme) => void;
+  setGraphicsQuality: (quality: GraphicsQuality) => void;
+  pulse: (durationSec?: number) => void;
+  update: (delta: number, elapsed: number) => void;
+  dispose: () => void;
+}
+
+/**
+ * Builds "The Signal Relay" (CLI Agent Hub) — a low-poly timber-and-stone cabin with:
+ * - Hollow 4-wall interior (telegraph/terminal console, glowing screen, chair, punch-card rack)
+ * - Smooth roof cutaway materials (opacity -> 0.15 on click/close zoom)
+ * - Rotating rooftop antenna switching cleanly between Meadow (brass/cyan dish),
+ *   Fantasy Night (arcane violet crystal spire), and Solarpunk Oasis (copper solar relay)
+ * - Pulsing status beacon + expanding signal halo ring when external CLI agents send commands
+ */
+export function buildSignalRelayLandmark(
+  shadowTex: THREE.Texture,
+  lanternMaterials: THREE.MeshStandardMaterial[],
+  initialTheme: TownTheme = 'meadow',
+): SignalRelayHandle {
+  const group = new THREE.Group();
+  group.userData.signalRelay = true;
+  addContactShadow(group, shadowTex, 4.9);
+
+  const roofMaterials: THREE.MeshStandardMaterial[] = [];
+  const fireMaterials: THREE.MeshStandardMaterial[] = [];
+
+  // Shared cabin materials
+  const stoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 }), 'stone');
+  const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1e8d8, roughness: 0.78 }), 'wall');
+  const timberMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.82 }), 'darkWood');
+  const woodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.78 }), 'wood');
+  const floorMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x78553a, roughness: 0.88 }), 'darkWood');
+  const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x1e3a5f, roughness: 0.62 }), 'roofPrimary');
+  const trimMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.52, metalness: 0.35 }), 'metal');
+  const windowMat = createWindowMat(lanternMaterials, 0xe0f2fe, 0x38bdf8, 'window');
+  roofMaterials.push(roofMat, trimMat);
+
+  // Stone foundation plinth + front step
+  addPart(group, new THREE.BoxGeometry(3.45, 0.3, 2.95), stoneMat, 0, 0.15, 0);
+  addPart(group, new THREE.BoxGeometry(1.1, 0.16, 0.45), stoneMat, 0, 0.08, 1.62);
+
+  // Hollow 4-wall timber-and-stone relay cabin
+  addHollowBoxWalls(group, 3.0, 1.85, 2.48, 0.3, 0.15, wallMat, floorMat);
+
+  // Lower stone wainscot strips & corner timber posts (minimal boxes)
+  const postGeo = new THREE.BoxGeometry(0.18, 1.9, 0.18);
+  addPart(group, postGeo, timberMat, -1.48, 1.25, -1.22);
+  addPart(group, postGeo, timberMat, 1.48, 1.25, -1.22);
+  addPart(group, postGeo, timberMat, -1.48, 1.25, 1.22);
+  addPart(group, postGeo, timberMat, 1.48, 1.25, 1.22);
+
+  // Front door + glowing side windows + small brass nameplate
+  addPart(group, new THREE.BoxGeometry(0.68, 1.15, 0.08), woodMat, 0, 0.88, 1.26);
+  const signBrassMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.32, metalness: 0.72 }),
+    'gold',
+  );
+  addPart(group, new THREE.BoxGeometry(0.95, 0.2, 0.06), signBrassMat, 0, 1.68, 1.27);
+  addPart(group, new THREE.BoxGeometry(0.66, 0.56, 0.08), windowMat, -0.92, 1.26, 1.26);
+  addPart(group, new THREE.BoxGeometry(0.66, 0.56, 0.08), windowMat, 0.92, 1.26, 1.26);
+  addPart(group, new THREE.BoxGeometry(0.08, 0.56, 0.72), windowMat, 1.52, 1.26, 0);
+
+  // Interior: Telegraph / Terminal Console Desk, Glowing Screen, Chair & Punch-Card Rack
+  const consoleMetalMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45, metalness: 0.5 });
+  const terminalScreenMat = new THREE.MeshStandardMaterial({
+    color: 0x67e8f9,
+    emissive: 0x06b6d4,
+    emissiveIntensity: 1.1,
+    roughness: 0.25,
+  });
+  const cardMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.72 });
+  fireMaterials.push(terminalScreenMat);
+
+  // Desk along back-left interior
+  addWoodenTable(group, -0.45, 0.36, -0.58, 1.35, 0.62, woodMat);
+  // Terminal monitor housing + glowing status screen + telegraph key pad
+  addPart(group, new THREE.BoxGeometry(0.62, 0.44, 0.32), consoleMetalMat, -0.52, 1.04, -0.68);
+  addPart(group, new THREE.BoxGeometry(0.5, 0.32, 0.04), terminalScreenMat, -0.52, 1.06, -0.51);
+  addPart(group, new THREE.BoxGeometry(0.46, 0.06, 0.22), signBrassMat, -0.48, 0.85, -0.38);
+  // Operator chair in front of console
+  addPart(group, new THREE.BoxGeometry(0.4, 0.07, 0.4), timberMat, -0.45, 0.64, 0.14);
+  addPart(group, new THREE.BoxGeometry(0.4, 0.42, 0.07), timberMat, -0.45, 0.86, 0.32);
+  addPart(group, new THREE.CylinderGeometry(0.05, 0.08, 0.28, 6), consoleMetalMat, -0.45, 0.49, 0.14);
+
+  // Punch-card rack along back-right wall
+  addPart(group, new THREE.BoxGeometry(0.84, 1.18, 0.28), consoleMetalMat, 0.85, 0.95, -0.84);
+  addPart(group, new THREE.BoxGeometry(0.68, 0.12, 0.18), cardMat, 0.85, 0.74, -0.76);
+  addPart(group, new THREE.BoxGeometry(0.68, 0.12, 0.18), cardMat, 0.85, 1.04, -0.76);
+  addPart(group, new THREE.BoxGeometry(0.68, 0.12, 0.18), terminalScreenMat, 0.85, 1.32, -0.76);
+
+  // Cutaway Pitched Roof + Mast Collar
+  const roofMesh = addPart(group, new THREE.ConeGeometry(2.38, 1.18, 4), roofMat, 0, 2.72, 0, 0, Math.PI / 4);
+  roofMesh.scale.set(1.06, 1, 0.92);
+  addPart(group, new THREE.BoxGeometry(3.26, 0.12, 2.74), trimMat, 0, 2.16, 0);
+
+  // Rooftop Mast & Rotating Signal Assembly (stays visible even during cutaway)
+  const mastMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.4, metalness: 0.65 });
+  const brassMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.28, metalness: 0.78 });
+  const cyanAccentMat = new THREE.MeshStandardMaterial({
+    color: 0x22d3ee,
+    emissive: 0x06b6d4,
+    emissiveIntensity: 0.85,
+    roughness: 0.25,
+  });
+  const crystalMat = new THREE.MeshStandardMaterial({
+    color: 0xc084fc,
+    emissive: 0x9333ea,
+    emissiveIntensity: 1.3,
+    roughness: 0.18,
+    metalness: 0.15,
+  });
+  const copperMat = new THREE.MeshStandardMaterial({ color: 0xc2410c, roughness: 0.3, metalness: 0.76 });
+  const solarPanelMat = new THREE.MeshStandardMaterial({
+    color: 0x0e7490,
+    emissive: 0x0891b2,
+    emissiveIntensity: 0.45,
+    roughness: 0.22,
+    metalness: 0.5,
+  });
+
+  addPart(group, new THREE.CylinderGeometry(0.14, 0.2, 0.28, 8), mastMat, 0, 3.24, 0);
+  addPart(group, new THREE.CylinderGeometry(0.06, 0.08, 1.32, 8), mastMat, 0, 3.92, 0);
+
+  const antennaRotor = new THREE.Group();
+  antennaRotor.position.set(0, 4.18, 0);
+  group.add(antennaRotor);
+
+  // 1) Meadow assembly: brass parabolic dish + cyan feed horn + telegraph crossbar
+  const meadowDish = new THREE.Group();
+  const dishCup = addPart(meadowDish, new THREE.CylinderGeometry(0.56, 0.14, 0.26, 12), brassMat, 0, 0.06, 0.22, Math.PI / 2.3);
+  dishCup.castShadow = false;
+  addPart(meadowDish, new THREE.CylinderGeometry(0.04, 0.04, 0.42, 6), mastMat, 0, 0.14, 0.36, Math.PI / 2.3);
+  addPart(meadowDish, new THREE.SphereGeometry(0.11, 8, 6), cyanAccentMat, 0, 0.22, 0.56);
+  addPart(meadowDish, new THREE.BoxGeometry(1.18, 0.05, 0.05), brassMat, 0, -0.34, 0);
+  antennaRotor.add(meadowDish);
+
+  // 2) Fantasy Night assembly: glowing arcane crystal spire + rune ring
+  const fantasyCrystal = new THREE.Group();
+  addPart(fantasyCrystal, new THREE.OctahedronGeometry(0.36, 0), crystalMat, 0, 0.24, 0);
+  const runeRing = new THREE.Mesh(
+    new THREE.TorusGeometry(0.56, 0.04, 6, 18),
+    cyanAccentMat,
+  );
+  runeRing.rotation.x = Math.PI / 2.6;
+  runeRing.position.y = 0.2;
+  fantasyCrystal.add(runeRing);
+  antennaRotor.add(fantasyCrystal);
+
+  // 3) Solarpunk Oasis assembly: copper solar relay dish + twin solar wings
+  const solarpunkDish = new THREE.Group();
+  addPart(solarpunkDish, new THREE.CylinderGeometry(0.5, 0.16, 0.22, 10), copperMat, 0, 0.08, 0.2, Math.PI / 2.4);
+  addPart(solarpunkDish, new THREE.SphereGeometry(0.1, 8, 6), cyanAccentMat, 0, 0.2, 0.5);
+  addPart(solarpunkDish, new THREE.BoxGeometry(0.72, 0.04, 0.34), solarPanelMat, -0.62, -0.18, 0, 0.28, 0, 0.18);
+  addPart(solarpunkDish, new THREE.BoxGeometry(0.72, 0.04, 0.34), solarPanelMat, 0.62, -0.18, 0, 0.28, 0, -0.18);
+  antennaRotor.add(solarpunkDish);
+
+  // Status Beacon Light & Expanding Signal Pulse Ring atop mast
+  const beaconMat = new THREE.MeshStandardMaterial({
+    color: 0x34d399,
+    emissive: 0x10b981,
+    emissiveIntensity: 1.0,
+    roughness: 0.2,
+  });
+  const beaconBulb = new THREE.Mesh(new THREE.SphereGeometry(0.15, 10, 8), beaconMat);
+  beaconBulb.position.set(0, 4.72, 0);
+  group.add(beaconBulb);
+
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: 0x22d3ee,
+    transparent: true,
+    opacity: 0.35,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const beaconHalo = new THREE.Mesh(new THREE.RingGeometry(0.22, 0.32, 20), haloMat);
+  beaconHalo.rotation.x = -Math.PI / 2;
+  beaconHalo.position.set(0, 4.72, 0);
+  group.add(beaconHalo);
+
+  const beaconLight = new THREE.PointLight(0x22d3ee, 0.8, 7.5, 1.8);
+  beaconLight.position.set(0, 4.85, 0);
+  group.add(beaconLight);
+
+  let currentTheme: TownTheme = initialTheme;
+  let graphicsQuality: GraphicsQuality = 'medium';
+  let pulseTimer = 0;
+
+  const applyTheme = (theme: TownTheme) => {
+    currentTheme = theme;
+    applyThemeToObjectTree(group, theme);
+    meadowDish.visible = theme === 'meadow';
+    fantasyCrystal.visible = theme === 'fantasy_night';
+    solarpunkDish.visible = theme === 'solarpunk_oasis';
+
+    if (theme === 'fantasy_night') {
+      beaconMat.color.setHex(0xc084fc);
+      beaconMat.emissive.setHex(0xa855f7);
+      haloMat.color.setHex(0xd8b4fe);
+      beaconLight.color.setHex(0xc084fc);
+    } else if (theme === 'solarpunk_oasis') {
+      beaconMat.color.setHex(0x2dd4bf);
+      beaconMat.emissive.setHex(0x14b8a6);
+      haloMat.color.setHex(0x5eead4);
+      beaconLight.color.setHex(0x2dd4bf);
+    } else {
+      beaconMat.color.setHex(0x34d399);
+      beaconMat.emissive.setHex(0x10b981);
+      haloMat.color.setHex(0x22d3ee);
+      beaconLight.color.setHex(0x22d3ee);
+    }
+  };
+
+  const setGraphicsQuality = (quality: GraphicsQuality) => {
+    graphicsQuality = quality;
+    beaconLight.visible = quality !== 'low';
+  };
+
+  const pulse = (durationSec = 8) => {
+    pulseTimer = Math.max(pulseTimer, durationSec);
+  };
+
+  const update = (delta: number, elapsed: number) => {
+    const active = pulseTimer > 0;
+    if (active) {
+      pulseTimer = Math.max(0, pulseTimer - delta);
+    }
+
+    // Smooth dish / crystal rotation (spins briskly when receiving CLI signals)
+    const spinSpeed = active ? 2.1 : 0.42;
+    antennaRotor.rotation.y += delta * spinSpeed;
+    if (currentTheme === 'fantasy_night') {
+      fantasyCrystal.position.y = Math.sin(elapsed * 2.6) * 0.08;
+      runeRing.rotation.z = elapsed * (active ? 2.4 : 0.7);
+    }
+
+    // Beacon intensity + expanding signal ring
+    if (active) {
+      const wave = 0.5 + 0.5 * Math.sin(elapsed * 8.5);
+      beaconMat.emissiveIntensity = 1.6 + wave * 2.2;
+      beaconLight.intensity = graphicsQuality === 'low' ? 0 : 1.5 + wave * 2.2;
+      const ringPhase = (elapsed * 1.4) % 1;
+      const ringScale = 1 + ringPhase * 4.2;
+      beaconHalo.scale.set(ringScale, ringScale, 1);
+      haloMat.opacity = (1 - ringPhase) * 0.85;
+      beaconHalo.visible = true;
+    } else {
+      const idleWave = 0.5 + 0.5 * Math.sin(elapsed * 2.2);
+      beaconMat.emissiveIntensity = 0.65 + idleWave * 0.55;
+      beaconLight.intensity = graphicsQuality === 'low' ? 0 : 0.45 + idleWave * 0.35;
+      const ringScale = 1 + idleWave * 0.45;
+      beaconHalo.scale.set(ringScale, ringScale, 1);
+      haloMat.opacity = 0.16 + idleWave * 0.14;
+      beaconHalo.visible = graphicsQuality !== 'low';
+    }
+  };
+
+  applyTheme(initialTheme);
+
+  return {
+    group,
+    roofMaterials,
+    fireMaterials,
+    applyTheme,
+    setGraphicsQuality,
+    pulse,
+    update,
+    dispose: () => {
+      disposeStructureGroup(group, lanternMaterials);
+    },
+  };
 }

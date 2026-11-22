@@ -185,6 +185,11 @@ export interface TownLogItem {
   dialogue: string;
   newTask: string;
   timestampMs: number;
+  /** Local-only inference metadata (not written to Firestore) */
+  modelUsed?: string;
+  providerUsed?: string;
+  providerLabel?: string;
+  keySlot?: number;
 }
 
 export interface BuildOrderResult {
@@ -301,12 +306,47 @@ export function getWeatherSeasonEffect(
 }
 
 export type AIProviderPreset = 'gemini' | 'openrouter' | 'groq' | 'openai' | 'custom';
+export type AIKeyStrategy = 'round_robin' | 'failover_only';
+export const EXTERNAL_CLI_PROVIDER_ID = 'external_cli' as const;
+
+export interface AIProviderEntry {
+  /** Stable unique ID (e.g. 'gemini', 'groq', 'openrouter', 'openai', 'custom_173...') */
+  id: string;
+  preset: AIProviderPreset;
+  name: string;
+  baseUrl: string;
+  defaultModel: string;
+  /** Pool of 1 or more API keys for this provider (rotated & failed-over automatically) */
+  apiKeys: string[];
+  keyStrategy?: AIKeyStrategy;
+}
+
+export interface CharacterModelOverride {
+  /** Matches an AIProviderEntry.id */
+  providerId: string;
+  model: string;
+}
+
+export interface SavedProviderCredentials {
+  baseUrl?: string;
+  apiKey?: string;
+  modelName?: string;
+}
 
 export interface AIProviderConfig {
+  /** Active global default provider entry ID (matches an entry in providers[]) */
+  defaultProviderId?: string;
+  /** Multiple configured AI providers, each supporting multiple API keys */
+  providers?: AIProviderEntry[];
+  /** Mirrored global default fields kept in sync for backward compatibility */
   preset: AIProviderPreset;
   baseUrl: string;
   modelName: string;
   apiKey: string;
+  /** Legacy cached per-provider credentials (migrated automatically into providers[]) */
+  providerCredentials?: Partial<Record<AIProviderPreset, SavedProviderCredentials>>;
+  /** Optional per-character provider/model overrides; unset or null falls back to global default */
+  characterModels?: Record<string, CharacterModelOverride | null>;
 }
 
 export interface ProviderPresetMeta {
@@ -638,7 +678,11 @@ export type RemoteCommandType =
   | 'hire_worker'
   | 'god_decree'
   | 'build_structure'
-  | 'build_plot';
+  | 'build_plot'
+  | 'villager_speak'
+  | 'assign_task'
+  | 'set_theme'
+  | 'trigger_train';
 
 export interface RemoteCommandRecord {
   id: string;
@@ -650,6 +694,25 @@ export interface RemoteCommandRecord {
   resultMessage?: string;
   createdAtMs?: number;
 }
+
+export interface CliAgentActivity {
+  agentName: string;
+  lastAction: string;
+  summary: string;
+  lastSeenMs: number;
+}
+
+export interface SignalRelayConfig {
+  baseUrl: string;
+  customTownId: string;
+  agentSecret: string;
+}
+
+export const DEFAULT_SIGNAL_RELAY_CONFIG: SignalRelayConfig = {
+  baseUrl: '',
+  customTownId: '',
+  agentSecret: '',
+};
 
 export interface RemoteBridgeConfig {
   webhookUrl: string;

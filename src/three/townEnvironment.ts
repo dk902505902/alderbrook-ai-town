@@ -110,6 +110,47 @@ export function createWindSwayMaterial(
   return mat;
 }
 
+export function createClothWaveMaterial(
+  params: THREE.MeshStandardMaterialParameters,
+  windUniforms: WindUniforms,
+  options: { waveAmp?: number; waveFreq?: number; phaseOffset?: number } = {},
+): THREE.MeshStandardMaterial {
+  const waveAmp = options.waveAmp ?? 0.085;
+  const waveFreq = options.waveFreq ?? 5.5;
+  const phaseOffset = options.phaseOffset ?? 0.0;
+
+  const mat = new THREE.MeshStandardMaterial({
+    side: THREE.DoubleSide,
+    ...params,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = windUniforms.uTime;
+    shader.uniforms.uWindStrength = windUniforms.uWindStrength;
+
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <common>',
+      `#include <common>
+      uniform float uTime;
+      uniform float uWindStrength;`,
+    );
+
+    // Anchor rigidly at top edge (uv.y == 1.0) and flutter smoothly toward bottom hem (uv.y == 0.0)
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `#include <begin_vertex>
+      float dropFactor = clamp(1.0 - uv.y, 0.0, 1.0);
+      float flutter = dropFactor * dropFactor;
+      float clothPhase = uTime * 3.4 - uv.y * ${waveFreq.toFixed(2)} + uv.x * 2.2 + ${phaseOffset.toFixed(2)};
+      float waveZ = (sin(clothPhase) + 0.35 * sin(clothPhase * 1.9 + 1.1)) * ${waveAmp.toFixed(4)} * flutter * uWindStrength;
+      float waveX = cos(clothPhase * 0.75) * ${(waveAmp * 0.38).toFixed(4)} * flutter * uWindStrength;
+      transformed.z += waveZ;
+      transformed.x += waveX;`,
+    );
+  };
+  mat.customProgramCacheKey = () => `cloth_wave_${waveAmp}_${waveFreq}_${phaseOffset}`;
+  return mat;
+}
+
 export function createRipplingWaterMaterial(
   waterUniforms: WaterUniforms,
 ): THREE.MeshPhysicalMaterial {
@@ -174,6 +215,13 @@ function isNearRoadOrBuilding(x: number, z: number, minPlotClearance = 3.1): boo
   if (Math.hypot(x - 10.5, z + 0.5) < 4.2) return true; // Workshop
   if (Math.hypot(x + 10.5, z + 0.5) < 4.2) return true; // Market
   if (Math.hypot(x, z - 10.2) < 4.4) return true; // Park
+  // Residential Cottages (West & East Meadow)
+  if (Math.hypot(x + 13.8, z - 6.2) < 3.4) return true;
+  if (Math.hypot(x - 13.8, z - 6.2) < 3.4) return true;
+  // The Signal Relay (CLI Agent Hub near Train Station)
+  if (Math.hypot(x - 10.6, z - 12.6) < 3.7) return true;
+  // Scenic Railway Perimeter & Station Corridor
+  if (distCenter > 16.8 && distCenter < 22.8) return true;
 
   for (const plotId of ALL_PLOT_IDS) {
     const pm = PLOT_META[plotId];

@@ -20,6 +20,7 @@ interface TownMinimapProps {
   onSelectAgent: (id: AgentId) => void;
   onFocusLocation: (loc: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
+  onSelectSignalRelay?: () => void;
 }
 
 const LANDMARK_MARKERS: Array<{ id: LocationId; label: string; x: number; z: number }> = [
@@ -44,6 +45,7 @@ export function TownMinimap({
   onSelectAgent,
   onFocusLocation,
   onSelectPlot,
+  onSelectSignalRelay,
 }: TownMinimapProps) {
   const structureByPlot = new Map<PlotId, TownStructure>();
   for (const s of structures) {
@@ -140,6 +142,32 @@ export function TownMinimap({
             </g>
           );
         })}
+
+        {/* Signal Relay Hub Marker */}
+        {onSelectSignalRelay && (
+          <g onClick={onSelectSignalRelay} className="cursor-pointer">
+            <rect
+              x={toMapCoord(10.6) - 13}
+              y={toMapCoord(12.2) - 8}
+              width="26"
+              height="16"
+              rx="4"
+              fill="rgba(8, 51, 68, 0.92)"
+              stroke="#22d3ee"
+              strokeWidth="1.2"
+            />
+            <text
+              x={toMapCoord(10.6)}
+              y={toMapCoord(12.2) + 3}
+              textAnchor="middle"
+              fill="#a5f3fc"
+              fontSize="7.5"
+              fontWeight="700"
+            >
+              Relay
+            </text>
+          </g>
+        )}
 
         {/* Agents */}
         {agents.map((agent) => {

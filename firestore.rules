@@ -82,7 +82,7 @@ service cloud.firestore {
     }
 
     function isValidRemoteCommandType(t) {
-      return t in ['set_weather', 'hire_worker', 'god_decree', 'build_structure', 'build_plot'];
+      return t in ['set_weather', 'hire_worker', 'god_decree', 'build_structure', 'build_plot', 'villager_speak', 'assign_task', 'set_theme', 'trigger_train'];
     }
 
     function isValidRemoteCommandStatus(st) {

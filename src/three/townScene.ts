@@ -18,17 +18,21 @@ import {
 } from '../types/town.ts';
 import {
   buildScatteredTownDetails,
+  createClothWaveMaterial,
   createRipplingWaterMaterial,
   createWindSwayMaterial,
   type TownDetailsHandle,
   type WaterUniforms,
   type WindUniforms,
 } from './townEnvironment.ts';
+import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import {
   buildCompletedStructureMesh,
   buildEmptyPlotMesh,
   buildScaffoldingMesh,
+  buildSignalRelayLandmark,
   disposeStructureGroup,
+  type SignalRelayHandle,
 } from './townStructures.ts';
 import {
   applyThemeToMaterial,
@@ -54,6 +58,7 @@ export interface TownSceneCallbacks {
   onSelectAgent: (agentId: AgentId) => void;
   onSelectLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
+  onSelectSignalRelay?: () => void;
   onContextLost?: () => void;
   onContextRestored?: () => void;
   onLabelUpdate?: (positions: Record<AgentId, ProjectedLabel>) => void;
@@ -118,6 +123,22 @@ function getAgentSlotOffset(agentId: AgentId, index: number, out: THREE.Vector3)
 
 // Atmosphere presets are resolved dynamically via getThemeAtmosphere(theme, timeOfDay, weather)
 
+interface CutawayEntry {
+  id: string;
+  center: THREE.Vector3;
+  triggerRadius: number;
+  roofMaterials: THREE.MeshStandardMaterial[];
+  fireMaterials: THREE.MeshStandardMaterial[];
+  currentOpacity: number;
+}
+
+const RESIDENTIAL_HOUSES: Array<{ id: string; x: number; z: number }> = [
+  { id: 'house:west_cottage', x: -13.8, z: 6.2 },
+  { id: 'house:east_cottage', x: 13.8, z: 6.2 },
+];
+
+const SIGNAL_RELAY_POS = new THREE.Vector3(10.6, 0, 12.6);
+
 interface CharacterRig {
   id: AgentId;
   name: string;
@@ -133,9 +154,11 @@ interface CharacterRig {
   activeRing: THREE.Mesh;
   ownedMaterials: THREE.Material[];
   waypoints: THREE.Vector3[];
+  homeAnchor: THREE.Vector3;
   currentLocation: LocationId;
   currentPlotId: PlotId | null;
   walkPhase: number;
+  idleStrollTimer: number;
   spawnTimer: number;
   isMoving: boolean;
   facingAngle: number;
@@ -311,6 +334,25 @@ function createContactShadowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+function createFireflyTexture(): THREE.CanvasTexture {
+  const size = 32;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 1, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+    grad.addColorStop(0.35, 'rgba(254, 240, 138, 0.85)');
+    grad.addColorStop(1, 'rgba(254, 240, 138, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 // Themed market awning textures are generated via createThemedAwningTexture() in townThemes.ts
 
 function createCobbleTexture(maxAnisotropy: number): THREE.CanvasTexture {
@@ -367,10 +409,130 @@ function addContactShadow(
   return mesh;
 }
 
+function addHollowLandmarkWalls(
+  group: THREE.Group,
+  w: number,
+  h: number,
+  d: number,
+  baseY: number,
+  thick: number,
+  wallMat: THREE.Material,
+  floorMat: THREE.Material,
+): void {
+  const cy = baseY + h / 2;
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(w - thick * 0.4, 0.06, d - thick * 0.4), floorMat);
+  floor.position.set(0, baseY + 0.03, 0);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(w, h, thick), wallMat);
+  back.position.set(0, cy, -d / 2 + thick / 2);
+  const front = new THREE.Mesh(new THREE.BoxGeometry(w, h, thick), wallMat);
+  front.position.set(0, cy, d / 2 - thick / 2);
+  const left = new THREE.Mesh(new THREE.BoxGeometry(thick, h, d - thick * 2), wallMat);
+  left.position.set(-w / 2 + thick / 2, cy, 0);
+  const right = new THREE.Mesh(new THREE.BoxGeometry(thick, h, d - thick * 2), wallMat);
+  right.position.set(w / 2 - thick / 2, cy, 0);
+  group.add(floor, back, front, left, right);
+}
+
+function addInteriorTableAndChairs(
+  group: THREE.Group,
+  x: number,
+  baseY: number,
+  z: number,
+  w: number,
+  d: number,
+  woodMat: THREE.Material,
+  chairCount = 2,
+): void {
+  const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.08, d), woodMat);
+  top.position.set(x, baseY + 0.46, z);
+  group.add(top);
+  const legGeo = new THREE.BoxGeometry(0.08, 0.44, 0.08);
+  for (const [lx, lz] of [
+    [-w * 0.4, -d * 0.36],
+    [w * 0.4, -d * 0.36],
+    [-w * 0.4, d * 0.36],
+    [w * 0.4, d * 0.36],
+  ] as Array<[number, number]>) {
+    const leg = new THREE.Mesh(legGeo, woodMat);
+    leg.position.set(x + lx, baseY + 0.22, z + lz);
+    group.add(leg);
+  }
+  const seatGeo = new THREE.BoxGeometry(0.32, 0.26, 0.32);
+  for (let i = 0; i < chairCount; i++) {
+    const side = i % 2 === 0 ? -1 : 1;
+    const offset = chairCount > 2 ? (i < 2 ? -w * 0.22 : w * 0.22) : 0;
+    const chair = new THREE.Mesh(seatGeo, woodMat);
+    chair.position.set(x + offset, baseY + 0.13, z + side * (d * 0.5 + 0.24));
+    group.add(chair);
+  }
+}
+
+function addInteriorShelf(
+  group: THREE.Group,
+  x: number,
+  baseY: number,
+  z: number,
+  rotY: number,
+  woodMat: THREE.Material,
+  itemMat: THREE.Material,
+): void {
+  const sg = new THREE.Group();
+  sg.position.set(x, baseY, z);
+  sg.rotation.y = rotY;
+  const back = new THREE.Mesh(new THREE.BoxGeometry(1.05, 1.25, 0.06), woodMat);
+  back.position.set(0, 0.625, -0.1);
+  const s1 = new THREE.Mesh(new THREE.BoxGeometry(1.02, 0.06, 0.24), woodMat);
+  s1.position.set(0, 0.42, 0);
+  const s2 = new THREE.Mesh(new THREE.BoxGeometry(1.02, 0.06, 0.24), woodMat);
+  s2.position.set(0, 0.84, 0);
+  const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, 0.16), itemMat);
+  b1.position.set(-0.26, 0.57, 0.01);
+  const b2 = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.2, 0.16), itemMat);
+  b2.position.set(0.18, 0.55, 0.01);
+  const b3 = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.26, 0.15), itemMat);
+  b3.position.set(-0.18, 1.0, 0.01);
+  const b4 = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.2, 0.15), itemMat);
+  b4.position.set(0.24, 0.97, 0.01);
+  sg.add(back, s1, s2, b1, b2, b3, b4);
+  group.add(sg);
+}
+
+function addInteriorBed(
+  group: THREE.Group,
+  x: number,
+  baseY: number,
+  z: number,
+  rotY: number,
+  woodMat: THREE.Material,
+  blanketMat: THREE.Material,
+  linenMat: THREE.Material,
+): void {
+  const bg = new THREE.Group();
+  bg.position.set(x, baseY, z);
+  bg.rotation.y = rotY;
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.22, 1.28), woodMat);
+  frame.position.set(0, 0.14, 0);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.52, 0.09), woodMat);
+  head.position.set(0, 0.3, -0.6);
+  const mattress = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.16, 1.14), linenMat);
+  mattress.position.set(0, 0.3, 0.02);
+  const blanket = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.17, 0.78), blanketMat);
+  blanket.position.set(0, 0.32, 0.2);
+  const pillow = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.12, 0.26), linenMat);
+  pillow.position.set(0, 0.42, -0.38);
+  bg.add(frame, head, mattress, blanket, pillow);
+  group.add(bg);
+}
+
 function buildTownHall(
   shadowTex: THREE.CanvasTexture,
   lanternMats: THREE.MeshStandardMaterial[],
-): THREE.Group {
+  windUniforms: WindUniforms,
+): {
+  group: THREE.Group;
+  roofMaterials: THREE.MeshStandardMaterial[];
+  fireMaterials: THREE.MeshStandardMaterial[];
+} {
   const group = new THREE.Group();
   group.name = 'landmark:town_hall';
   group.userData = { locationId: 'town_hall' };
@@ -383,9 +545,18 @@ function buildTownHall(
     new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.65, metalness: 0.1 }),
     'trim',
   );
+  // Dedicated cutaway roof/tower materials so Town Hall roof fades independently to opacity 0.15
   const roofMat = tagThemeMaterial(
     new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.55, metalness: 0.18 }),
     'roofPrimary',
+  );
+  const towerStoneMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xe2dcd0, roughness: 0.85, metalness: 0.05 }),
+    'wall',
+  );
+  const finialGoldMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.22, metalness: 0.88 }),
+    'gold',
   );
   const goldMat = tagThemeMaterial(
     new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.22, metalness: 0.88 }),
@@ -395,6 +566,29 @@ function buildTownHall(
     new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.72, metalness: 0.05 }),
     'wood',
   );
+  const floorMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xa16207, roughness: 0.84, metalness: 0.04 }),
+    'wood',
+  );
+  const hearthStoneMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.9 }),
+    'stone',
+  );
+  const furnitureWoodMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x6b3510, roughness: 0.76 }),
+    'darkWood',
+  );
+  const scrollMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.78 });
+  const bookAccentMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.62 }),
+    'banner',
+  );
+  const fireGlowMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf97316,
+    emissiveIntensity: 1.65,
+    roughness: 0.22,
+  });
   const clockMat = tagThemeMaterial(
     new THREE.MeshStandardMaterial({
       color: 0xfef3c7,
@@ -412,10 +606,32 @@ function buildTownHall(
   plinth.position.y = 0.175;
   group.add(plinth);
 
-  const hall = new THREE.Mesh(new THREE.BoxGeometry(5.2, 2.8, 3.6), stoneMat);
-  hall.position.y = 0.35 + 1.4;
-  group.add(hall);
+  // Hollow 4 exterior walls + wooden council chamber floor
+  addHollowLandmarkWalls(group, 5.2, 2.8, 3.6, 0.35, 0.22, stoneMat, floorMat);
 
+  // --- Detailed Low-Poly Town Hall Interior ---
+  // 1. Warm Stone Council Fireplace centered on back wall
+  const hearth = new THREE.Mesh(new THREE.BoxGeometry(1.45, 1.35, 0.62), hearthStoneMat);
+  hearth.position.set(0, 1.05, -1.28);
+  const mantle = new THREE.Mesh(new THREE.BoxGeometry(1.62, 0.14, 0.72), furnitureWoodMat);
+  mantle.position.set(0, 1.78, -1.26);
+  const fireLogs = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.42, 0.22), fireGlowMat);
+  fireLogs.position.set(0, 0.72, -0.98);
+  group.add(hearth, mantle, fireLogs);
+
+  // 2. Grand Oak Council Table, Parchment Map & 4 Chairs
+  addInteriorTableAndChairs(group, 0, 0.38, 0.22, 2.1, 0.96, furnitureWoodMat, 4);
+  const scroll = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.04, 0.42), scrollMat);
+  scroll.position.set(-0.2, 0.9, 0.22);
+  const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.22, 6), goldMat);
+  candle.position.set(0.45, 0.99, 0.22);
+  group.add(scroll, candle);
+
+  // 3. Bookshelves along left & right council walls
+  addInteriorShelf(group, -2.26, 0.38, -0.1, Math.PI / 2, furnitureWoodMat, bookAccentMat);
+  addInteriorShelf(group, 2.26, 0.38, -0.1, -Math.PI / 2, furnitureWoodMat, bookAccentMat);
+
+  // Front Portico Columns & Grand Door
   const colGeo = new THREE.CylinderGeometry(0.14, 0.17, 2.6, 10);
   [-1.6, -0.65, 0.65, 1.6].forEach((x) => {
     const col = new THREE.Mesh(colGeo, trimMat);
@@ -427,12 +643,34 @@ function buildTownHall(
   door.position.set(0, 1.2, 1.82);
   group.add(door);
 
+  // Cloth-Wave Town Hall Ceremonial Banners flanking the portico
+  const bannerGeo = new THREE.PlaneGeometry(0.56, 1.42, 4, 10);
+  [-2.18, 2.18].forEach((bx, idx) => {
+    const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.72, 6), goldMat);
+    rod.rotation.z = Math.PI / 2;
+    rod.position.set(bx, 2.74, 1.94);
+    const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.28), goldMat);
+    bracket.position.set(bx, 2.74, 1.82);
+    const bannerMat = tagThemeMaterial(
+      createClothWaveMaterial(
+        { color: 0xb91c1c, roughness: 0.56, metalness: 0.08 },
+        windUniforms,
+        { waveAmp: 0.09, waveFreq: 5.8, phaseOffset: idx * 1.9 },
+      ),
+      'banner',
+    );
+    const banner = new THREE.Mesh(bannerGeo, bannerMat);
+    banner.position.set(bx, 2.02, 1.96);
+    group.add(rod, bracket, banner);
+  });
+
+  // Cutaway Roof & Clock Tower Spire
   const roof = new THREE.Mesh(new THREE.ConeGeometry(4.1, 1.6, 4), roofMat);
   roof.rotation.y = Math.PI / 4;
   roof.position.y = 3.15 + 0.8;
   group.add(roof);
 
-  const tower = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, 1.4), stoneMat);
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, 1.4), towerStoneMat);
   tower.position.set(0, 4.1, 0.2);
   group.add(tower);
 
@@ -446,17 +684,25 @@ function buildTownHall(
   spire.position.set(0, 5.9, 0.2);
   group.add(spire);
 
-  const finial = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), goldMat);
+  const finial = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), finialGoldMat);
   finial.position.set(0, 6.75, 0.2);
   group.add(finial);
 
-  return group;
+  return {
+    group,
+    roofMaterials: [roofMat, towerStoneMat, clockMat, finialGoldMat],
+    fireMaterials: [fireGlowMat],
+  };
 }
 
 function buildWorkshop(
   shadowTex: THREE.CanvasTexture,
   lanternMats: THREE.MeshStandardMaterial[],
-): THREE.Group {
+): {
+  group: THREE.Group;
+  roofMaterials: THREE.MeshStandardMaterial[];
+  fireMaterials: THREE.MeshStandardMaterial[];
+} {
   const group = new THREE.Group();
   group.name = 'landmark:workshop';
   group.userData = { locationId: 'workshop' };
@@ -465,9 +711,17 @@ function buildWorkshop(
     new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.88, metalness: 0.04 }),
     'brick',
   );
+  const chimneyBrickMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.88, metalness: 0.04 }),
+    'brick',
+  );
   const timberMat = tagThemeMaterial(
     new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.78, metalness: 0.05 }),
     'wood',
+  );
+  const stoneFloorMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.9 }),
+    'stone',
   );
   const roofMat = tagThemeMaterial(
     new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.58, metalness: 0.15 }),
@@ -477,6 +731,17 @@ function buildWorkshop(
     new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.32, metalness: 0.85 }),
     'metal',
   );
+  const blanketMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.74 }),
+    'crate',
+  );
+  const linenMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.82 });
+  const forgeFireMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf97316,
+    emissiveIntensity: 1.7,
+    roughness: 0.22,
+  });
   const glowMat = tagThemeMaterial(
     new THREE.MeshStandardMaterial({
       color: 0xfef08a,
@@ -490,22 +755,39 @@ function buildWorkshop(
 
   addContactShadow(group, shadowTex, 3.2, 2.8);
 
-  const base = new THREE.Mesh(
-    new THREE.BoxGeometry(4.6, 0.3, 3.6),
-    tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.9 }), 'stone'),
-  );
+  const base = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.3, 3.6), stoneFloorMat);
   base.position.y = 0.15;
   group.add(base);
 
-  const walls = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.2, 3.2), brickMat);
-  walls.position.y = 1.4;
-  group.add(walls);
+  // Hollow 4 brick exterior walls + stone floor
+  addHollowLandmarkWalls(group, 4.2, 2.2, 3.2, 0.3, 0.18, brickMat, stoneFloorMat);
 
-  [-1.95, 1.95].forEach((x) => {
-    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.22, 2.25, 3.32), timberMat);
-    beam.position.set(x, 1.4, 0);
+  // --- Detailed Low-Poly Workshop Interior ---
+  // 1. Glowing Blacksmith Forge Hearth beneath the chimney
+  const forgeBase = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.88, 0.86), stoneFloorMat);
+  forgeBase.position.set(1.15, 0.76, -0.78);
+  const forgeCoals = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.22, 0.52), forgeFireMat);
+  forgeCoals.position.set(1.15, 1.24, -0.76);
+  group.add(forgeBase, forgeCoals);
+
+  // 2. Sturdy Wooden Workbench Table & Tool Shelf
+  addInteriorTableAndChairs(group, -0.1, 0.33, 0.52, 1.35, 0.62, timberMat, 1);
+  addInteriorShelf(group, 0.0, 0.33, -1.28, 0, timberMat, ironMat);
+
+  // 3. Rest Cot / Bed in the quiet corner
+  addInteriorBed(group, -1.35, 0.33, -0.68, 0, timberMat, blanketMat, linenMat);
+
+  // Timber corner corner-beams (hollow-safe corner posts)
+  for (const [bx, bz] of [
+    [-2.02, -1.52],
+    [2.02, -1.52],
+    [-2.02, 1.52],
+    [2.02, 1.52],
+  ] as Array<[number, number]>) {
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.22, 2.25, 0.22), timberMat);
+    beam.position.set(bx, 1.4, bz);
     group.add(beam);
-  });
+  }
 
   const roof = new THREE.Mesh(new THREE.CylinderGeometry(0, 2.8, 1.5, 4), roofMat);
   roof.rotation.y = Math.PI / 4;
@@ -513,7 +795,7 @@ function buildWorkshop(
   roof.position.y = 3.25;
   group.add(roof);
 
-  const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.65, 2.0, 0.65), brickMat);
+  const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.65, 2.0, 0.65), chimneyBrickMat);
   chimney.position.set(1.2, 3.6, -0.7);
   group.add(chimney);
 
@@ -541,7 +823,103 @@ function buildWorkshop(
     group.add(log);
   });
 
-  return group;
+  return {
+    group,
+    roofMaterials: [roofMat, chimneyBrickMat],
+    fireMaterials: [forgeFireMat],
+  };
+}
+
+function buildResidentialHouse(
+  id: string,
+  shadowTex: THREE.CanvasTexture,
+  lanternMats: THREE.MeshStandardMaterial[],
+  quiltHex: number,
+): {
+  group: THREE.Group;
+  roofMaterials: THREE.MeshStandardMaterial[];
+  fireMaterials: THREE.MeshStandardMaterial[];
+} {
+  const group = new THREE.Group();
+  group.name = id;
+  group.userData = { houseId: id };
+
+  const plinthMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.88 }), 'stone');
+  const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf5efe6, roughness: 0.82 }), 'wall');
+  const floorMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xa16207, roughness: 0.84 }), 'wood');
+  const woodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.78 }), 'darkWood');
+  const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.62 }), 'roofPrimary');
+  const chimneyMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.88 }), 'stone');
+  const quiltMat = new THREE.MeshStandardMaterial({ color: quiltHex, roughness: 0.76 });
+  const linenMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.82 });
+  const fireMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf97316,
+    emissiveIntensity: 1.6,
+    roughness: 0.24,
+  });
+  const winMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfef3c7,
+      emissive: 0xf59e0b,
+      emissiveIntensity: 0.35,
+      roughness: 0.28,
+    }),
+    'window',
+  );
+  lanternMats.push(winMat);
+
+  addContactShadow(group, shadowTex, 2.9, 2.5);
+
+  const plinth = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.28, 2.8), plinthMat);
+  plinth.position.y = 0.14;
+  group.add(plinth);
+
+  // Hollow 4 cottage walls + wooden floor
+  addHollowLandmarkWalls(group, 3.1, 1.75, 2.5, 0.28, 0.15, wallMat, floorMat);
+
+  // --- Cozy Residential Interior ---
+  // 1. Warm Stone Fireplace on back wall
+  const hearth = new THREE.Mesh(new THREE.BoxGeometry(0.92, 1.15, 0.48), plinthMat);
+  hearth.position.set(0.75, 0.88, -0.88);
+  const embers = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.34, 0.16), fireMat);
+  embers.position.set(0.75, 0.62, -0.64);
+  group.add(hearth, embers);
+
+  // 2. Cozy Wooden Bed with Quilt & Pillow
+  addInteriorBed(group, -0.92, 0.31, -0.45, 0, woodMat, quiltMat, linenMat);
+
+  // 3. Wooden Dining Table & Chairs
+  addInteriorTableAndChairs(group, 0.45, 0.31, 0.38, 0.88, 0.56, woodMat, 2);
+
+  // 4. Wall Shelf with jars & books
+  addInteriorShelf(group, 1.32, 0.31, 0.05, -Math.PI / 2, woodMat, quiltMat);
+
+  // Front Door, Porch Step & Glowing Windows
+  const door = new THREE.Mesh(new THREE.BoxGeometry(0.56, 1.05, 0.1), woodMat);
+  door.position.set(-0.48, 0.8, 1.26);
+  const step = new THREE.Mesh(new THREE.BoxGeometry(0.84, 0.14, 0.36), plinthMat);
+  step.position.set(-0.48, 0.07, 1.54);
+  const winFront = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.48, 0.1), winMat);
+  winFront.position.set(0.58, 1.12, 1.26);
+  const winSide = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.48, 0.58), winMat);
+  winSide.position.set(-1.56, 1.12, 0.1);
+  group.add(door, step, winFront, winSide);
+
+  // Cutaway Pitched Roof & Chimney
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(2.42, 1.22, 4), roofMat);
+  roof.rotation.y = Math.PI / 4;
+  roof.scale.set(1.12, 1, 0.92);
+  roof.position.set(0, 2.62, 0);
+  const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.25, 0.42), chimneyMat);
+  chimney.position.set(0.75, 2.75, -0.82);
+  group.add(roof, chimney);
+
+  return {
+    group,
+    roofMaterials: [roofMat, chimneyMat],
+    fireMaterials: [fireMat],
+  };
 }
 
 function buildMarket(
@@ -974,7 +1352,14 @@ function buildCharacter(
   const slot = getAgentSlotOffset(agent.id, slotIndex, _slotOffset);
   let destBase = LANDMARKS[agent.location].gatherPoint;
   let slotScale = 0.7;
-  if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
+  // Place key villagers inside Town Hall & Workshop so roof cutaway reveals them working indoors
+  if (!agent.activePlotId && agent.location === 'town_hall' && (agent.id === 'mayor_sterling' || slotIndex % 3 === 0)) {
+    destBase = new THREE.Vector3(0, 0, -9.85);
+    slotScale = 0.55;
+  } else if (!agent.activePlotId && agent.location === 'workshop' && (agent.id === 'architect_lyra' || agent.id === 'worker_kai' || slotIndex % 2 === 0)) {
+    destBase = new THREE.Vector3(10.35, 0, -0.25);
+    slotScale = 0.45;
+  } else if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
     const pm = PLOT_META[agent.activePlotId];
     const len = Math.hypot(pm.x, pm.z) || 1;
     destBase = new THREE.Vector3(pm.x * (1 - 2.6 / len), 0, pm.z * (1 - 2.6 / len));
@@ -1011,9 +1396,11 @@ function buildCharacter(
     activeRing,
     ownedMaterials,
     waypoints,
+    homeAnchor: finalPos.clone(),
     currentLocation: agent.location,
     currentPlotId: agent.activePlotId,
     walkPhase: Math.random() * Math.PI * 2,
+    idleStrollTimer: 4 + (slotIndex * 2.3) % 7,
     spawnTimer: spawnAtPlaza ? 0.85 : 0,
     isMoving: spawnAtPlaza,
     facingAngle: 0,
@@ -1059,12 +1446,24 @@ export class TownSceneController {
     uTime: { value: 0 },
   };
   private detailsHandle!: TownDetailsHandle;
+  private railwayHandle!: TownRailwayHandle;
+  private signalRelayHandle: SignalRelayHandle | null = null;
 
-  // Weather & Smoke Particles
+  // See-Inside Building Interiors (Roof Cutaway)
+  private staticCutaways: CutawayEntry[] = [];
+  private plotCutaways = new Map<PlotId, CutawayEntry>();
+  private completedPlots = new Set<PlotId>();
+  private focusedCutawayId: string | null = null;
+
+  // Weather, Night Fireflies & Smoke Particles
   private weatherMode: WeatherMode = 'summer';
   private weatherPoints!: THREE.Points;
   private weatherPositions!: Float32Array;
   private weatherMat!: THREE.PointsMaterial;
+  private fireflyPoints!: THREE.Points;
+  private fireflyPositions!: Float32Array;
+  private fireflyBases!: Float32Array;
+  private fireflyMat!: THREE.PointsMaterial;
   private smokePoints!: THREE.Points;
   private smokePositions!: Float32Array;
   private smokePhases!: Float32Array;
@@ -1193,7 +1592,7 @@ export class TownSceneController {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = !this.isSoftwareGl;
     this.controls.dampingFactor = 0.06;
-    this.controls.minDistance = 8;
+    this.controls.minDistance = 5.5;
     this.controls.maxDistance = 38;
     this.controls.minPolarAngle = 0.28;
     this.controls.maxPolarAngle = Math.PI / 2.25;
@@ -1294,11 +1693,26 @@ export class TownSceneController {
     orb.castShadow = true;
     this.scene.add(base, obelisk, orb);
 
+    // Build Scenic Perimeter Railway & Wooden Station first so outer trees stay clear of the rails
+    this.railwayHandle = buildTownRailway(this.scene, this.lanternMaterials, this.townTheme);
+    this.clickableObjects.push(this.railwayHandle.stationGroup);
+    this.disposables.push(this.railwayHandle);
+
     const treePositions: Array<[number, number]> = [];
     for (let i = 0; i < 34; i++) {
       const angle = (i / 34) * Math.PI * 2;
-      const dist = 17.5 + (i % 3) * 3.8;
-      treePositions.push([Math.cos(angle) * dist, Math.sin(angle) * dist]);
+      let dist = 17.5 + (i % 3) * 3.8;
+      let tx = Math.cos(angle) * dist;
+      let tz = Math.sin(angle) * dist;
+      if (
+        this.railwayHandle.isNearTrackOrStation(tx, tz, 2.9) ||
+        Math.hypot(tx - SIGNAL_RELAY_POS.x, tz - SIGNAL_RELAY_POS.z) < 4.2
+      ) {
+        dist = 24.4 + (i % 3) * 2.2;
+        tx = Math.cos(angle) * dist;
+        tz = Math.sin(angle) * dist;
+      }
+      treePositions.push([tx, tz]);
     }
     this.treeCount = treePositions.length;
 
@@ -1379,7 +1793,8 @@ export class TownSceneController {
     const awningTex = this.getOrCreateAwningTexture(this.townTheme);
     this.disposables.push(shadowTex);
 
-    const townHall = buildTownHall(shadowTex, this.lanternMaterials);
+    const townHallBuilt = buildTownHall(shadowTex, this.lanternMaterials, this.windUniforms);
+    const townHall = townHallBuilt.group;
     townHall.position.copy(LANDMARKS.town_hall.center);
     townHall.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh && !((obj as THREE.Mesh).material as THREE.Material).transparent) {
@@ -1390,8 +1805,17 @@ export class TownSceneController {
     this.scene.add(townHall);
     this.landmarkGroups.push(townHall);
     this.clickableObjects.push(townHall);
+    this.staticCutaways.push({
+      id: 'landmark:town_hall',
+      center: LANDMARKS.town_hall.center.clone().setY(1.6),
+      triggerRadius: 13.8,
+      roofMaterials: townHallBuilt.roofMaterials,
+      fireMaterials: townHallBuilt.fireMaterials,
+      currentOpacity: 1,
+    });
 
-    const workshop = buildWorkshop(shadowTex, this.lanternMaterials);
+    const workshopBuilt = buildWorkshop(shadowTex, this.lanternMaterials);
+    const workshop = workshopBuilt.group;
     workshop.position.copy(LANDMARKS.workshop.center);
     workshop.rotation.y = -Math.PI / 2;
     workshop.traverse((obj) => {
@@ -1403,6 +1827,39 @@ export class TownSceneController {
     this.scene.add(workshop);
     this.landmarkGroups.push(workshop);
     this.clickableObjects.push(workshop);
+    this.staticCutaways.push({
+      id: 'landmark:workshop',
+      center: LANDMARKS.workshop.center.clone().setY(1.4),
+      triggerRadius: 12.2,
+      roofMaterials: workshopBuilt.roofMaterials,
+      fireMaterials: workshopBuilt.fireMaterials,
+      currentOpacity: 1,
+    });
+
+    // Two Cozy Residential Houses with See-Inside Interiors (Fireplace, Bed, Table, Shelves)
+    const quiltColors = [0xdc2626, 0x2563eb];
+    RESIDENTIAL_HOUSES.forEach((h, idx) => {
+      const built = buildResidentialHouse(h.id, shadowTex, this.lanternMaterials, quiltColors[idx % quiltColors.length]);
+      built.group.position.set(h.x, 0, h.z);
+      built.group.rotation.y = Math.atan2(-h.x, -h.z);
+      built.group.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh && !((obj as THREE.Mesh).material as THREE.Material).transparent) {
+          obj.castShadow = true;
+          obj.receiveShadow = true;
+        }
+      });
+      this.scene.add(built.group);
+      this.landmarkGroups.push(built.group);
+      this.clickableObjects.push(built.group);
+      this.staticCutaways.push({
+        id: h.id,
+        center: new THREE.Vector3(h.x, 1.2, h.z),
+        triggerRadius: 11.4,
+        roofMaterials: built.roofMaterials,
+        fireMaterials: built.fireMaterials,
+        currentOpacity: 1,
+      });
+    });
 
     const marketBuilt = buildMarket(shadowTex, awningTex, this.lanternMaterials);
     this.marketAwningMat = marketBuilt.awningMat;
@@ -1427,6 +1884,30 @@ export class TownSceneController {
     this.scene.add(parkBuilt.group);
     this.landmarkGroups.push(parkBuilt.group);
     this.clickableObjects.push(parkBuilt.group);
+
+    // "The Signal Relay" (CLI Agent Hub) near the outer edge & Train Station
+    const signalRelay = buildSignalRelayLandmark(shadowTex, this.lanternMaterials, this.townTheme);
+    signalRelay.group.position.copy(SIGNAL_RELAY_POS);
+    signalRelay.group.rotation.y = Math.atan2(-SIGNAL_RELAY_POS.x, -SIGNAL_RELAY_POS.z);
+    signalRelay.group.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh && !((obj as THREE.Mesh).material as THREE.Material).transparent) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    this.signalRelayHandle = signalRelay;
+    this.scene.add(signalRelay.group);
+    this.landmarkGroups.push(signalRelay.group);
+    this.clickableObjects.push(signalRelay.group);
+    this.disposables.push(signalRelay);
+    this.staticCutaways.push({
+      id: 'landmark:signal_relay',
+      center: SIGNAL_RELAY_POS.clone().setY(1.4),
+      triggerRadius: 11.8,
+      roofMaterials: signalRelay.roofMaterials,
+      fireMaterials: signalRelay.fireMaterials,
+      currentOpacity: 1,
+    });
   }
 
   private buildAgents(initialAgents: AgentRecord[]): void {
@@ -1525,6 +2006,58 @@ export class TownSceneController {
     this.commArcLine.visible = false;
     this.commArcLine.frustumCulled = false;
     this.scene.add(this.commArcLine);
+
+    // 4. Dedicated Subtle Glowing Night Fireflies (disabled on Low quality for 4 GB RAM phones)
+    const fireflyCount = 56;
+    this.fireflyPositions = new Float32Array(fireflyCount * 3);
+    this.fireflyBases = new Float32Array(fireflyCount * 3);
+    for (let i = 0; i < fireflyCount; i++) {
+      const angle = (i / fireflyCount) * Math.PI * 2 + (i % 5) * 0.41;
+      const radius = 3.2 + ((i * 73) % 150) / 10;
+      const bx = Math.cos(angle) * radius;
+      const by = 0.75 + ((i * 29) % 28) / 10;
+      const bz = Math.sin(angle) * radius;
+      this.fireflyBases[i * 3] = bx;
+      this.fireflyBases[i * 3 + 1] = by;
+      this.fireflyBases[i * 3 + 2] = bz;
+      this.fireflyPositions[i * 3] = bx;
+      this.fireflyPositions[i * 3 + 1] = by;
+      this.fireflyPositions[i * 3 + 2] = bz;
+    }
+    const fireflyTex = createFireflyTexture();
+    this.disposables.push(fireflyTex);
+    const fireflyGeo = new THREE.BufferGeometry();
+    fireflyGeo.setAttribute('position', new THREE.BufferAttribute(this.fireflyPositions, 3));
+    this.fireflyMat = new THREE.PointsMaterial({
+      map: fireflyTex,
+      color: 0xfde047,
+      size: 0.36,
+      transparent: true,
+      opacity: 0.82,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.fireflyPoints = new THREE.Points(fireflyGeo, this.fireflyMat);
+    this.fireflyPoints.visible = false;
+    this.fireflyPoints.frustumCulled = false;
+    this.scene.add(this.fireflyPoints);
+  }
+
+  private updateFireflyState(): void {
+    if (!this.fireflyPoints) return;
+    const isNightLike =
+      this.townTheme === 'fantasy_night' ||
+      this.timeOfDay === 'night' ||
+      this.timeOfDay === 'twilight';
+    // Strictly disabled on Low graphics quality to protect 4 GB RAM mobile devices
+    this.fireflyPoints.visible = isNightLike && this.graphicsQuality !== 'low';
+    this.fireflyMat.color.setHex(
+      this.townTheme === 'fantasy_night'
+        ? 0xd8b4fe
+        : this.townTheme === 'solarpunk_oasis'
+          ? 0x67e8f9
+          : 0xfde047,
+    );
   }
 
   public setGraphicsQuality(quality: GraphicsQuality): void {
@@ -1550,7 +2083,10 @@ export class TownSceneController {
 
     this.detailsHandle?.setDensityFactor(quality === 'low' ? 0.5 : 1.0);
     this.detailsHandle?.setLanternShadows(enableShadows);
+    this.railwayHandle?.setGraphicsQuality(quality);
+    this.signalRelayHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
+    this.updateFireflyState();
   }
 
   public setTheme(theme: TownTheme): void {
@@ -1566,6 +2102,8 @@ export class TownSceneController {
       applyThemeToObjectTree(grp, theme);
     });
     this.detailsHandle?.applyTheme(theme);
+    this.railwayHandle?.applyTheme(theme);
+    this.signalRelayHandle?.applyTheme(theme);
 
     if (this.treeFoliageMesh) {
       const pal = TREE_CANOPY_PALETTES[theme];
@@ -1605,22 +2143,10 @@ export class TownSceneController {
       this.weatherMat.size = 0.22;
       this.weatherMat.opacity = 0.88;
     } else {
-      // Summer: crisp clear sky by day, gentle fireflies at dusk/night or in Fantasy Night / Solarpunk
-      const showMotes =
-        this.townTheme === 'fantasy_night' ||
-        timeOfDay === 'twilight' ||
-        timeOfDay === 'night';
-      this.weatherPoints.visible = showMotes;
-      this.weatherMat.color.setHex(
-        this.townTheme === 'fantasy_night'
-          ? 0xd8b4fe
-          : this.townTheme === 'solarpunk_oasis'
-            ? 0x67e8f9
-            : 0xfde047,
-      );
-      this.weatherMat.size = 0.22;
-      this.weatherMat.opacity = 0.88;
+      this.weatherPoints.visible = false;
     }
+
+    this.updateFireflyState();
   }
 
   public setFollowActive(follow: boolean): void {
@@ -1712,9 +2238,29 @@ export class TownSceneController {
 
     if (rebuiltAny) {
       const rotors: THREE.Group[] = [];
-      this.plotGroups.forEach((grp) => {
+      const prevOpacities = new Map<PlotId, number>();
+      this.plotCutaways.forEach((entry, pid) => {
+        prevOpacities.set(pid, entry.currentOpacity);
+      });
+      this.plotCutaways.clear();
+      this.completedPlots.clear();
+
+      this.plotGroups.forEach((grp, plotId) => {
         if (grp.userData.windmillRotor) {
           rotors.push(grp.userData.windmillRotor as THREE.Group);
+        }
+        const roofMats = grp.userData.cutawayRoofMaterials as THREE.MeshStandardMaterial[] | undefined;
+        if (roofMats && roofMats.length > 0) {
+          const meta = PLOT_META[plotId];
+          this.completedPlots.add(plotId);
+          this.plotCutaways.set(plotId, {
+            id: `plot:${plotId}`,
+            center: new THREE.Vector3(meta.x, 1.3, meta.z),
+            triggerRadius: 11.4,
+            roofMaterials: roofMats,
+            fireMaterials: (grp.userData.interiorFireMats as THREE.MeshStandardMaterial[]) || [],
+            currentOpacity: prevOpacities.get(plotId) ?? 1,
+          });
         }
       });
       this.windmillRotors = rotors;
@@ -1731,6 +2277,19 @@ export class TownSceneController {
         }
       }
       this.bakeryChimneys = chimneys;
+
+      // Guide any villager already stationed at a newly completed plot into its interior
+      this.rigs.forEach((rig) => {
+        if (rig.currentPlotId && this.completedPlots.has(rig.currentPlotId)) {
+          const pm = PLOT_META[rig.currentPlotId];
+          if (Math.hypot(rig.homeAnchor.x - pm.x, rig.homeAnchor.z - pm.z) > 1.05) {
+            const slot = getAgentSlotOffset(rig.id, rig.slotIndex, _slotOffset);
+            const indoorPos = new THREE.Vector3(pm.x + slot.x * 0.28, 0, pm.z + slot.z * 0.28);
+            rig.homeAnchor.copy(indoorPos);
+            rig.waypoints = [indoorPos];
+          }
+        }
+      });
     }
   }
 
@@ -1780,11 +2339,23 @@ export class TownSceneController {
         let destBase = LANDMARKS[agent.location].gatherPoint;
         let slotScale = 1.0;
 
-        if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
+        if (!agent.activePlotId && agent.location === 'town_hall' && (agent.id === 'mayor_sterling' || rig.slotIndex % 3 === 0)) {
+          destBase = new THREE.Vector3(0, 0, -9.85);
+          slotScale = 0.55;
+        } else if (!agent.activePlotId && agent.location === 'workshop' && (agent.id === 'architect_lyra' || agent.id === 'worker_kai' || rig.slotIndex % 2 === 0)) {
+          destBase = new THREE.Vector3(10.35, 0, -0.25);
+          slotScale = 0.45;
+        } else if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
           const pm = PLOT_META[agent.activePlotId];
-          const len = Math.hypot(pm.x, pm.z) || 1;
-          destBase = new THREE.Vector3(pm.x * (1 - 2.6 / len), 0, pm.z * (1 - 2.6 / len));
-          slotScale = 0.65;
+          if (this.completedPlots.has(agent.activePlotId)) {
+            // Step right inside completed structures so roof cutaway reveals villagers indoors
+            destBase = new THREE.Vector3(pm.x, 0, pm.z);
+            slotScale = 0.28;
+          } else {
+            const len = Math.hypot(pm.x, pm.z) || 1;
+            destBase = new THREE.Vector3(pm.x * (1 - 2.6 / len), 0, pm.z * (1 - 2.6 / len));
+            slotScale = 0.65;
+          }
         }
 
         const finalPos = new THREE.Vector3(
@@ -1798,6 +2369,7 @@ export class TownSceneController {
           PLAZA_CENTER.z + slot.z * 0.45,
         );
         rig.waypoints = [midPoint, finalPos];
+        rig.homeAnchor.copy(finalPos);
         rig.currentLocation = agent.location;
         rig.currentPlotId = agent.activePlotId;
       }
@@ -1812,6 +2384,13 @@ export class TownSceneController {
         1.0,
         rig.root.position.z,
       );
+      if (rig.currentPlotId && this.completedPlots.has(rig.currentPlotId)) {
+        this.focusedCutawayId = `plot:${rig.currentPlotId}`;
+      } else if (rig.currentLocation === 'town_hall' || rig.currentLocation === 'workshop') {
+        this.focusedCutawayId = `landmark:${rig.currentLocation}`;
+      } else {
+        this.focusedCutawayId = null;
+      }
     }
   }
 
@@ -1819,6 +2398,10 @@ export class TownSceneController {
     const cfg = LANDMARKS[locationId];
     if (cfg) {
       this.cameraTargetGoal = cfg.lookTarget.clone();
+      this.focusedCutawayId =
+        locationId === 'town_hall' || locationId === 'workshop'
+          ? `landmark:${locationId}`
+          : null;
     }
   }
 
@@ -1826,10 +2409,26 @@ export class TownSceneController {
     const meta = PLOT_META[plotId];
     if (meta) {
       this.cameraTargetGoal = new THREE.Vector3(meta.x, 1.1, meta.z);
+      this.focusedCutawayId = `plot:${plotId}`;
     }
   }
 
+  public focusSignalRelay(): void {
+    this.followActive = false;
+    this.focusedCutawayId = 'landmark:signal_relay';
+    this.cameraTargetGoal = SIGNAL_RELAY_POS.clone().setY(1.4);
+  }
+
+  public pulseSignalRelay(durationSec = 8): void {
+    this.signalRelayHandle?.pulse(durationSec);
+  }
+
+  public triggerTrain(): void {
+    this.railwayHandle?.triggerTrainNow();
+  }
+
   public resetCamera(): void {
+    this.focusedCutawayId = null;
     this.cameraTargetGoal = new THREE.Vector3(0, 0.8, 0);
   }
 
@@ -1860,7 +2459,10 @@ export class TownSceneController {
       this.raycaster.setFromCamera(this.pointer, this.camera);
 
       const hits = this.raycaster.intersectObjects(this.clickableObjects, true);
-      if (hits.length === 0) return;
+      if (hits.length === 0) {
+        this.focusedCutawayId = null;
+        return;
+      }
 
       let obj: THREE.Object3D | null = hits[0].object;
       while (obj) {
@@ -1869,11 +2471,37 @@ export class TownSceneController {
           return;
         }
         if (obj.userData?.plotId) {
-          this.callbacks.onSelectPlot(obj.userData.plotId as PlotId);
+          const pid = obj.userData.plotId as PlotId;
+          this.focusedCutawayId = `plot:${pid}`;
+          this.callbacks.onSelectPlot(pid);
+          return;
+        }
+        if (obj.userData?.houseId) {
+          const hid = obj.userData.houseId as string;
+          const house = RESIDENTIAL_HOUSES.find((h) => h.id === hid);
+          if (house) {
+            this.focusedCutawayId = hid;
+            this.followActive = false;
+            this.cameraTargetGoal = new THREE.Vector3(house.x, 1.1, house.z);
+          }
+          return;
+        }
+        if (obj.userData?.signalRelay) {
+          this.focusSignalRelay();
+          this.callbacks.onSelectSignalRelay?.();
+          return;
+        }
+        if (obj.userData?.stationId) {
+          this.focusedCutawayId = null;
+          this.followActive = false;
+          this.cameraTargetGoal = this.railwayHandle.stationFocusTarget.clone();
           return;
         }
         if (obj.userData?.locationId) {
-          this.callbacks.onSelectLocation(obj.userData.locationId as LocationId);
+          const lid = obj.userData.locationId as LocationId;
+          this.focusedCutawayId =
+            lid === 'town_hall' || lid === 'workshop' ? `landmark:${lid}` : null;
+          this.callbacks.onSelectLocation(lid);
           return;
         }
         obj = obj.parent;
@@ -2053,7 +2681,7 @@ export class TownSceneController {
 
       this.controls.update();
 
-      // 3. Park Fountain Shimmering Ripples, Water Jet & Built Windmill Sails
+      // 3. Park Fountain Shimmering Ripples, Water Jet, Windmill Sails & 1-Minute Scenic Railway
       if (this.waterMesh) {
         this.waterMesh.position.y = 0.45 + Math.sin(elapsed * 2.2) * 0.006;
       }
@@ -2062,10 +2690,56 @@ export class TownSceneController {
         this.waterJet.scale.set(1, jetPulse, 1);
         this.waterJet.rotation.y = elapsed * 1.4;
       }
-      const rotorSpeed = this.weatherMode === 'summer' ? 1.65 : 1.15;
+      const rotorSpeed =
+        (this.weatherMode === 'summer' ? 1.65 : 1.25) + Math.sin(elapsed * 0.7) * 0.18;
       for (const rotor of this.windmillRotors) {
         rotor.rotation.z -= delta * rotorSpeed;
       }
+      this.railwayHandle?.update(delta, elapsed);
+      this.signalRelayHandle?.update(delta, elapsed);
+
+      // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom)
+      const updateCutaway = (entry: CutawayEntry, idx: number) => {
+        const isFocused = this.focusedCutawayId === entry.id;
+        const camDist = this.camera.position.distanceTo(entry.center);
+        const isCloseZoom = camDist < entry.triggerRadius;
+        const targetOpacity = isFocused || isCloseZoom ? 0.15 : 1.0;
+
+        entry.currentOpacity = THREE.MathUtils.damp(entry.currentOpacity, targetOpacity, 7.5, delta);
+        const openCutaway = entry.currentOpacity < 0.985;
+
+        for (let m = 0; m < entry.roofMaterials.length; m++) {
+          const mat = entry.roofMaterials[m];
+          const isGlass = mat.userData.themeRole === 'glass';
+          const desiredOpacity = isGlass
+            ? Math.min(0.62, entry.currentOpacity)
+            : openCutaway
+              ? entry.currentOpacity
+              : 1.0;
+          const desiredTransparent = isGlass || openCutaway;
+
+          if (mat.transparent !== desiredTransparent) {
+            mat.transparent = desiredTransparent;
+            mat.needsUpdate = true;
+          }
+          mat.depthWrite = !desiredTransparent;
+          mat.opacity = desiredOpacity;
+        }
+
+        // Cozy subtle flicker on interior fireplaces, ovens & forges
+        for (let f = 0; f < entry.fireMaterials.length; f++) {
+          entry.fireMaterials[f].emissiveIntensity =
+            1.55 + Math.sin(elapsed * 7.4 + idx * 1.9 + f) * 0.28 + Math.sin(elapsed * 13.8 + f) * 0.12;
+        }
+      };
+
+      for (let i = 0; i < this.staticCutaways.length; i++) {
+        updateCutaway(this.staticCutaways[i], i);
+      }
+      let plotCutIdx = 10;
+      this.plotCutaways.forEach((entry) => {
+        updateCutaway(entry, plotCutIdx++);
+      });
 
       // 4. Workshop Chimney Smoke
       const smokeAttr = this.smokePoints.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -2095,7 +2769,7 @@ export class TownSceneController {
         bAttr.needsUpdate = true;
       }
 
-      // 5. Weather Particles (Rain / Winter Snow / Summer Evening Fireflies)
+      // 5. Weather Particles (Rain / Winter Snow)
       if (this.weatherPoints.visible) {
         const wAttr = this.weatherPoints.geometry.getAttribute('position') as THREE.BufferAttribute;
         const count = this.weatherPositions.length / 3;
@@ -2119,17 +2793,28 @@ export class TownSceneController {
               this.weatherPositions[i * 3 + 2] = ((i * 41) % 34) - 17;
             }
           }
-        } else {
-          for (let i = 0; i < count; i++) {
-            this.weatherPositions[i * 3] += Math.sin(elapsed * 0.9 + i) * delta * 0.5;
-            this.weatherPositions[i * 3 + 1] = 0.6 + ((i * 19) % 40) / 10 + Math.sin(elapsed * 1.6 + i * 0.7) * 0.45;
-            this.weatherPositions[i * 3 + 2] += Math.cos(elapsed * 0.8 + i) * delta * 0.5;
-          }
         }
         wAttr.needsUpdate = true;
       }
 
-      // 6. Agent Movement & Kinematics (lively Summer socializing speed, brisk Rain shelter walk)
+      // 5b. Dedicated Night Fireflies (strictly skipped on Low graphics quality)
+      if (this.fireflyPoints && this.fireflyPoints.visible) {
+        const fAttr = this.fireflyPoints.geometry.getAttribute('position') as THREE.BufferAttribute;
+        const fCount = this.fireflyPositions.length / 3;
+        for (let i = 0; i < fCount; i++) {
+          const bx = this.fireflyBases[i * 3];
+          const by = this.fireflyBases[i * 3 + 1];
+          const bz = this.fireflyBases[i * 3 + 2];
+          const t = elapsed * 0.85 + i * 1.37;
+          this.fireflyPositions[i * 3] = bx + Math.sin(t) * 0.95;
+          this.fireflyPositions[i * 3 + 1] = by + Math.sin(t * 1.7 + i) * 0.42;
+          this.fireflyPositions[i * 3 + 2] = bz + Math.cos(t * 0.9 + i * 0.5) * 0.95;
+        }
+        this.fireflyMat.opacity = 0.68 + Math.sin(elapsed * 3.1) * 0.2;
+        fAttr.needsUpdate = true;
+      }
+
+      // 6. Agent Movement, Indoor Elevation & Enhanced Limb-Swing Kinematics
       const width = this.container.clientWidth;
       const height = this.container.clientHeight;
       const labelPositions = {} as Record<AgentId, ProjectedLabel>;
@@ -2138,6 +2823,27 @@ export class TownSceneController {
         this.weatherMode === 'summer' ? 4.1 : this.weatherMode === 'rain' ? 3.5 : 3.0;
 
       this.rigs.forEach((rig) => {
+        // Gentle local stroll around home post when idle so villagers naturally swing limbs
+        if (rig.waypoints.length === 0) {
+          rig.idleStrollTimer -= delta;
+          if (rig.idleStrollTimer <= 0) {
+            rig.idleStrollTimer = 7.5 + ((rig.slotIndex * 3.7 + elapsed) % 6.5);
+            const strollAngle = (elapsed * 1.7 + rig.slotIndex * 2.1) % (Math.PI * 2);
+            const isIndoorPost =
+              (rig.currentPlotId !== null && this.completedPlots.has(rig.currentPlotId)) ||
+              (Math.abs(rig.homeAnchor.x) < 2.2 && rig.homeAnchor.z < -8.8 && rig.homeAnchor.z > -12.0) ||
+              (rig.homeAnchor.x > 8.9 && rig.homeAnchor.x < 12.1 && Math.abs(rig.homeAnchor.z + 0.5) < 1.5);
+            const strollR = isIndoorPost ? 0.55 : 1.05;
+            rig.waypoints.push(
+              new THREE.Vector3(
+                rig.homeAnchor.x + Math.cos(strollAngle) * strollR,
+                0,
+                rig.homeAnchor.z + Math.sin(strollAngle) * strollR,
+              ),
+            );
+          }
+        }
+
         if (rig.waypoints.length > 0) {
           const target = rig.waypoints[0];
           _moveVec.subVectors(target, rig.root.position);
@@ -2175,14 +2881,32 @@ export class TownSceneController {
           rig.root.quaternion.slerp(_targetQuat, 1 - Math.exp(-4 * delta));
         }
 
+        // Smoothly elevate villagers when stepping onto indoor floors (Town Hall, Workshop, Completed Plots)
+        let targetFloorY = 0;
+        const rx = rig.root.position.x;
+        const rz = rig.root.position.z;
+        if (Math.abs(rx) < 2.4 && rz > -12.2 && rz < -8.8) {
+          targetFloorY = 0.38;
+        } else if (rx > 8.7 && rx < 12.2 && rz > -2.3 && rz < 1.3) {
+          targetFloorY = 0.33;
+        } else if (rig.currentPlotId && this.completedPlots.has(rig.currentPlotId)) {
+          const pm = PLOT_META[rig.currentPlotId];
+          if (Math.hypot(rx - pm.x, rz - pm.z) < 1.25) {
+            targetFloorY = 0.28;
+          }
+        }
+        rig.root.position.y = THREE.MathUtils.damp(rig.root.position.y, targetFloorY, 10, delta);
+
         if (rig.isMoving) {
-          rig.walkPhase += delta * (walkSpeed * 3.25);
-          const swing = Math.sin(rig.walkPhase) * 0.55;
+          rig.walkPhase += delta * (walkSpeed * 3.4);
+          const swing = Math.sin(rig.walkPhase) * 0.68;
           rig.leftLegPivot.rotation.x = swing;
           rig.rightLegPivot.rotation.x = -swing;
-          rig.leftArmPivot.rotation.x = -swing * 0.75;
-          rig.rightArmPivot.rotation.x = swing * 0.75;
-          rig.bodyGroup.position.y = Math.abs(Math.sin(rig.walkPhase)) * 0.06;
+          rig.leftArmPivot.rotation.x = -swing * 0.85;
+          rig.rightArmPivot.rotation.x = swing * 0.85;
+          rig.bodyGroup.position.y = Math.abs(Math.sin(rig.walkPhase)) * 0.08;
+          rig.bodyGroup.rotation.z = Math.sin(rig.walkPhase) * 0.055;
+          rig.bodyGroup.rotation.y = Math.cos(rig.walkPhase) * 0.08;
         } else {
           const settle = 1 - Math.exp(-8 * delta);
           rig.leftLegPivot.rotation.x = THREE.MathUtils.lerp(rig.leftLegPivot.rotation.x, 0, settle);
@@ -2194,6 +2918,8 @@ export class TownSceneController {
             settle,
           );
           rig.bodyGroup.position.y = Math.sin(elapsed * 2 + rig.walkPhase) * 0.015;
+          rig.bodyGroup.rotation.z = THREE.MathUtils.lerp(rig.bodyGroup.rotation.z, 0, settle);
+          rig.bodyGroup.rotation.y = THREE.MathUtils.lerp(rig.bodyGroup.rotation.y, 0, settle);
           rig.headGroup.rotation.x =
             rig.id === this.activeAgentId ? Math.sin(elapsed * 5) * 0.08 : 0;
         }

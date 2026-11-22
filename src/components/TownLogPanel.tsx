@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Download, Search } from 'lucide-react';
+import { formatCompactModelName } from '../lib/aiRouting.ts';
 import { LOCATION_LABELS, type TownLogItem } from '../types/town.ts';
 
 interface TownLogPanelProps {
@@ -42,7 +43,8 @@ export function TownLogPanel({ logs }: TownLogPanelProps) {
         .map((entry) => {
           const loc = LOCATION_LABELS[entry.location] || entry.location;
           const target = entry.targetAgent ? ` -> ${entry.targetAgent}` : '';
-          return `### Turn ${entry.turnNumber} — ${entry.agentName} (${loc}${target})\n- **Dialogue:** "${entry.dialogue}"\n- **Thought:** ${entry.thought}\n- **Task:** ${entry.newTask}\n`;
+          const modelLine = entry.modelUsed ? `- **Model:** ${entry.modelUsed}\n` : '';
+          return `### Turn ${entry.turnNumber} — ${entry.agentName} (${loc}${target})\n- **Dialogue:** "${entry.dialogue}"\n- **Thought:** ${entry.thought}\n- **Task:** ${entry.newTask}\n${modelLine}`;
         }),
     ];
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
@@ -156,6 +158,23 @@ export function TownLogPanel({ logs }: TownLogPanelProps) {
                     <>
                       <span aria-hidden="true">→</span>
                       <span className="text-slate-300">{entry.targetAgent}</span>
+                    </>
+                  )}
+                  {entry.modelUsed && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span
+                        className="font-mono text-[10px] text-slate-400/90"
+                        title={`Model used: ${
+                          entry.providerLabel
+                            ? `${entry.providerLabel}${entry.keySlot ? ` (Key #${entry.keySlot})` : ''} · `
+                            : entry.providerUsed
+                              ? `${entry.providerUsed} · `
+                              : ''
+                        }${entry.modelUsed}`}
+                      >
+                        {formatCompactModelName(entry.modelUsed)}
+                      </span>
                     </>
                   )}
                 </div>

@@ -665,6 +665,10 @@ const VALID_REMOTE_COMMAND_TYPES = new Set<RemoteCommandType>([
   'god_decree',
   'build_structure',
   'build_plot',
+  'villager_speak',
+  'assign_task',
+  'set_theme',
+  'trigger_train',
 ]);
 
 export function subscribePendingRemoteCommands(
@@ -815,6 +819,45 @@ export async function enqueueRemoteCommand(
     return cmdId;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, cmdPath);
+  }
+}
+
+export async function persistCliAgentUpdate(
+  uid: string,
+  updatedAgent: AgentRecord,
+  logEntry: TownLogItem,
+): Promise<void> {
+  const agentPath = `towns/${uid}/agents/${updatedAgent.id}`;
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'towns', uid, 'agents', updatedAgent.id), {
+    location: updatedAgent.location,
+    activePlotId: updatedAgent.activePlotId ?? '',
+    targetAgent: clampStr(updatedAgent.targetAgent, 60),
+    thought: clampStr(updatedAgent.thought, 500),
+    dialogue: clampStr(updatedAgent.dialogue, 240),
+    currentTask: clampStr(updatedAgent.currentTask, 240),
+    userNote: clampStr(updatedAgent.userNote, 180),
+    updatedAt: serverTimestamp(),
+  });
+
+  batch.set(doc(db, 'towns', uid, 'logs', logEntry.id), {
+    ownerId: uid,
+    turnNumber: logEntry.turnNumber,
+    agentId: updatedAgent.id,
+    agentName: clampStr(logEntry.agentName, 60),
+    rank: updatedAgent.rank,
+    location: updatedAgent.location,
+    targetAgent: clampStr(logEntry.targetAgent, 60),
+    thought: clampStr(logEntry.thought, 500),
+    dialogue: clampStr(logEntry.dialogue, 300),
+    newTask: clampStr(logEntry.newTask, 240),
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, agentPath);
   }
 }
 

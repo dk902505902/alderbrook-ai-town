@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import type { Request, Response } from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import dns from 'node:dns/promises';
 import net from 'node:net';
@@ -190,19 +191,48 @@ const VALID_STRUCTURES = new Set<StructureType>(ALL_STRUCTURES);
 
 const VALID_BUILD_ACTIONS = new Set<BuildAction>(['none', 'propose', 'construct', 'upgrade']);
 
+function parseHeaderKeyPool(req: Request): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const pushKey = (k: unknown) => {
+    if (typeof k !== 'string') return;
+    const trimmed = k.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    keys.push(trimmed);
+  };
+
+  const rawPool = req.header('x-ai-api-keys')?.trim();
+  if (rawPool) {
+    try {
+      const parsed = JSON.parse(rawPool);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed.slice(0, 12)) {
+          pushKey(item);
+        }
+      }
+    } catch {
+      // Fall back to single x-ai-api-key header
+    }
+  }
+  pushKey(req.header('x-ai-api-key'));
+  return keys;
+}
+
 function resolveProviderConfig(req: Request): {
   baseUrl: string;
   modelName: string;
   apiKey: string;
+  apiKeys: string[];
 } {
   const headerBase = req.header('x-ai-base-url')?.trim();
   const headerModel = req.header('x-ai-model-name')?.trim();
-  const headerKey = req.header('x-ai-api-key')?.trim();
+  const headerKeys = parseHeaderKeyPool(req);
 
-  const rawBase =
-    headerBase ||
-    process.env.AI_BASE_URL?.trim() ||
-    'https://generativelanguage.googleapis.com/v1beta/openai';
+  const defaultGeminiBase = 'https://generativelanguage.googleapis.com/v1beta/openai';
+  const envBase = process.env.AI_BASE_URL?.trim();
+
+  const rawBase = headerBase || envBase || defaultGeminiBase;
 
   const cleanBase = rawBase
     .replace(/\/chat\/completions\/?$/i, '')
@@ -213,13 +243,23 @@ function resolveProviderConfig(req: Request): {
     process.env.AI_MODEL_NAME?.trim() ||
     'gemini-3.1-flash-lite';
 
-  const apiKey =
-    headerKey ||
-    process.env.AI_API_KEY?.trim() ||
-    process.env.GEMINI_API_KEY?.trim() ||
+  const normalizedEnvBase = envBase
+    ? envBase.replace(/\/chat\/completions\/?$/i, '').replace(/\/+$/, '')
+    : '';
+  const isGeminiBase = cleanBase.startsWith('https://generativelanguage.googleapis.com');
+  const matchesEnvBase =
+    !headerBase ||
+    (normalizedEnvBase ? cleanBase === normalizedEnvBase : isGeminiBase);
+
+  const fallbackApiKey =
+    (matchesEnvBase ? process.env.AI_API_KEY?.trim() : '') ||
+    (isGeminiBase ? process.env.GEMINI_API_KEY?.trim() : '') ||
     '';
 
-  return { baseUrl: cleanBase, modelName, apiKey };
+  const apiKeys = headerKeys.length > 0 ? headerKeys : fallbackApiKey ? [fallbackApiKey] : [];
+  const apiKey = apiKeys[0] ?? '';
+
+  return { baseUrl: cleanBase, modelName, apiKey, apiKeys };
 }
 
 function getHierarchyRules(agent: AgentSnapshot): string {
@@ -690,6 +730,71 @@ async function callChatCompletions(
   }
 }
 
+async function callChatCompletionsWithKeyPool(
+  baseUrl: string,
+  apiKeys: string[],
+  body: Record<string, unknown>,
+  allowStripResponseFormat = false,
+): Promise<{
+  status: number;
+  data: Record<string, unknown>;
+  errorText?: string;
+  modelUsed?: string;
+  keyAttemptIndex: number;
+  keysTried: number;
+}> {
+  const failoverStatuses = new Set([401, 402, 403, 429, 500, 502, 503]);
+  let lastResult: {
+    status: number;
+    data: Record<string, unknown>;
+    errorText?: string;
+    modelUsed?: string;
+  } = { status: 502, data: {}, errorText: 'No API keys available.' };
+
+  for (let i = 0; i < apiKeys.length; i++) {
+    const key = apiKeys[i];
+    let result = await callChatCompletions(baseUrl, key, body);
+
+    if (
+      allowStripResponseFormat &&
+      'errorText' in result &&
+      result.errorText &&
+      result.status === 400 &&
+      'response_format' in body
+    ) {
+      const fallback = { ...body };
+      delete fallback.response_format;
+      result = await callChatCompletions(baseUrl, key, fallback);
+    }
+
+    lastResult = result;
+    if (!('errorText' in result && result.errorText)) {
+      return {
+        ...result,
+        keyAttemptIndex: i,
+        keysTried: i + 1,
+      };
+    }
+
+    // Automatically fail over to the next key in the pool on quota/rate-limit/auth/transient errors
+    if (i < apiKeys.length - 1 && failoverStatuses.has(result.status)) {
+      continue;
+    }
+
+    return {
+      ...result,
+      keyAttemptIndex: i,
+      keysTried: i + 1,
+    };
+  }
+
+  return {
+    ...lastResult,
+    keyAttemptIndex: Math.max(0, apiKeys.length - 1),
+    keysTried: apiKeys.length,
+  };
+}
+
 async function createServer() {
   const app = express();
   app.use(express.json({ limit: '96kb' }));
@@ -702,8 +807,8 @@ async function createServer() {
   });
 
   app.post('/api/ai/test', async (req: Request, res: Response) => {
-    const { baseUrl, modelName, apiKey } = resolveProviderConfig(req);
-    if (!apiKey) {
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
       res.status(400).json({
         ok: false,
         error: 'No API key provided. Enter an API key in AI Providers settings or configure GEMINI_API_KEY / AI_API_KEY.',
@@ -713,7 +818,7 @@ async function createServer() {
 
     const startedAt = Date.now();
     try {
-      const result = await callChatCompletions(baseUrl, apiKey, {
+      const result = await callChatCompletionsWithKeyPool(baseUrl, apiKeys, {
         model: modelName,
         messages: [
           { role: 'user', content: 'Reply with exactly the word READY.' },
@@ -723,9 +828,11 @@ async function createServer() {
       });
 
       if ('errorText' in result && result.errorText) {
+        const poolNote =
+          apiKeys.length > 1 ? ` (tried ${result.keysTried}/${apiKeys.length} keys)` : '';
         res.status(result.status >= 400 ? result.status : 502).json({
           ok: false,
-          error: `Provider returned HTTP ${result.status}: ${result.errorText}`,
+          error: `Provider returned HTTP ${result.status}${poolNote}: ${result.errorText}`,
         });
         return;
       }
@@ -735,7 +842,10 @@ async function createServer() {
       res.json({
         ok: true,
         latencyMs: Date.now() - startedAt,
-        modelName,
+        modelName: result.modelUsed || modelName,
+        keyAttemptIndex: result.keyAttemptIndex,
+        keysTried: result.keysTried,
+        totalKeys: apiKeys.length,
         reply: reply.slice(0, 60),
       });
     } catch (error) {
@@ -931,8 +1041,8 @@ async function createServer() {
   });
 
   app.post('/api/town/hire', async (req: Request, res: Response) => {
-    const { baseUrl, modelName, apiKey } = resolveProviderConfig(req);
-    if (!apiKey) {
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
       res.status(400).json({
         error: 'Missing AI API key. Open AI Providers settings (gear icon) to enter your API key.',
         code: 'MISSING_API_KEY',
@@ -1018,12 +1128,7 @@ async function createServer() {
     };
 
     try {
-      let result = await callChatCompletions(baseUrl, apiKey, payload);
-      if ('errorText' in result && result.errorText && result.status === 400) {
-        const fallback = { ...payload };
-        delete fallback.response_format;
-        result = await callChatCompletions(baseUrl, apiKey, fallback);
-      }
+      const result = await callChatCompletionsWithKeyPool(baseUrl, apiKeys, payload, true);
 
       if ('errorText' in result && result.errorText) {
         res.status(result.status >= 400 ? result.status : 502).json({
@@ -1066,6 +1171,7 @@ async function createServer() {
       res.json({
         workers: sanitized,
         modelUsed: result.modelUsed || modelName,
+        keyAttemptIndex: result.keyAttemptIndex,
       });
     } catch (error) {
       res.status(502).json({
@@ -1075,8 +1181,8 @@ async function createServer() {
   });
 
   app.post('/api/town/turn', async (req: Request, res: Response) => {
-    const { baseUrl, modelName, apiKey } = resolveProviderConfig(req);
-    if (!apiKey) {
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
       res.status(400).json({
         error: 'Missing AI API key. Open AI Providers settings (gear icon) to enter your API key.',
         code: 'MISSING_API_KEY',
@@ -1284,13 +1390,12 @@ async function createServer() {
     };
 
     try {
-      let result = await callChatCompletions(baseUrl, apiKey, payloadWithFormat);
-
-      if ('errorText' in result && result.errorText && result.status === 400) {
-        const fallbackPayload = { ...payloadWithFormat };
-        delete fallbackPayload.response_format;
-        result = await callChatCompletions(baseUrl, apiKey, fallbackPayload);
-      }
+      const result = await callChatCompletionsWithKeyPool(
+        baseUrl,
+        apiKeys,
+        payloadWithFormat,
+        true,
+      );
 
       if ('errorText' in result && result.errorText) {
         res.status(result.status >= 400 ? result.status : 502).json({
@@ -1319,12 +1424,401 @@ async function createServer() {
       res.json({
         turnResult: sanitized,
         modelUsed: result.modelUsed || modelName,
+        keyAttemptIndex: result.keyAttemptIndex,
       });
     } catch (error) {
       res.status(502).json({
         error: error instanceof Error ? error.message : 'Failed to process AI turn.',
       });
     }
+  });
+
+  // ============================================================================
+  // The Signal Relay — External CLI Agent REST API (OpenCode, agy, Freepuff, Hermes)
+  // ============================================================================
+  const VALID_RELAY_ACTIONS = new Set([
+    'god_decree',
+    'villager_speak',
+    'assign_task',
+    'hire_worker',
+    'set_weather',
+    'set_theme',
+    'trigger_train',
+    'build_structure',
+    'build_plot',
+  ]);
+
+  interface QueuedRelayCommand {
+    id: string;
+    type: string;
+    value?: string;
+    payload?: Record<string, unknown> | string;
+    source: string;
+    status: 'pending';
+    createdAtMs: number;
+  }
+
+  interface RelayAgentActivity {
+    agentName: string;
+    lastAction: string;
+    summary: string;
+    lastSeenMs: number;
+  }
+
+  interface TownRelayBucket {
+    townId: string;
+    secret: string;
+    stateSnapshot: Record<string, unknown> | null;
+    pendingCommands: QueuedRelayCommand[];
+    recentAgents: RelayAgentActivity[];
+    updatedAtMs: number;
+  }
+
+  const MAX_RELAY_TOWNS = 25;
+  const MAX_PENDING_PER_TOWN = 30;
+  const townRelayStore = new Map<string, TownRelayBucket>();
+
+  let cachedFirebaseConfig: { projectId: string; firestoreDatabaseId: string } | null = null;
+  function getFirebaseRestConfig(): { projectId: string; firestoreDatabaseId: string } | null {
+    if (cachedFirebaseConfig) return cachedFirebaseConfig;
+    try {
+      const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+      if (!fs.existsSync(cfgPath)) return null;
+      const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
+        projectId?: string;
+        firestoreDatabaseId?: string;
+      };
+      if (parsed.projectId) {
+        cachedFirebaseConfig = {
+          projectId: parsed.projectId,
+          firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
+        };
+        return cachedFirebaseConfig;
+      }
+    } catch {
+      // Ignore missing or unreadable config
+    }
+    return null;
+  }
+
+  function sanitizeTownId(raw: unknown): string | null {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  function getOrCreateRelayBucket(townId: string): TownRelayBucket {
+    const existing = townRelayStore.get(townId);
+    if (existing) return existing;
+    if (townRelayStore.size >= MAX_RELAY_TOWNS) {
+      let oldestKey: string | null = null;
+      let oldestTime = Infinity;
+      for (const [k, v] of townRelayStore.entries()) {
+        if (v.updatedAtMs < oldestTime) {
+          oldestTime = v.updatedAtMs;
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) townRelayStore.delete(oldestKey);
+    }
+    const created: TownRelayBucket = {
+      townId,
+      secret: '',
+      stateSnapshot: null,
+      pendingCommands: [],
+      recentAgents: [],
+      updatedAtMs: Date.now(),
+    };
+    townRelayStore.set(townId, created);
+    return created;
+  }
+
+  function verifyRelaySecret(req: Request, bucket: TownRelayBucket): boolean {
+    const expected = (bucket.secret || process.env.TOWN_AGENT_SECRET || '').trim();
+    if (!expected) return true;
+    const provided = String(req.header('x-town-secret') ?? '').trim();
+    if (!provided) return false;
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(provided, 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  }
+
+  function recordRelayActivity(
+    bucket: TownRelayBucket,
+    agentName: string,
+    action: string,
+    summary: string,
+  ): void {
+    const cleanAgent = agentName.trim().slice(0, 40) || 'cli_agent';
+    const nextEntry: RelayAgentActivity = {
+      agentName: cleanAgent,
+      lastAction: action,
+      summary: summary.slice(0, 140),
+      lastSeenMs: Date.now(),
+    };
+    bucket.recentAgents = [
+      nextEntry,
+      ...bucket.recentAgents.filter((a) => a.agentName.toLowerCase() !== cleanAgent.toLowerCase()),
+    ].slice(0, 15);
+  }
+
+  // Browser -> Server compact snapshot sync (keeps GET /api/town/:townId/state fast & live)
+  app.post('/api/town/:townId/sync', (req: Request, res: Response) => {
+    const townId = sanitizeTownId(req.params.townId);
+    if (!townId) {
+      res.status(400).json({ error: 'Invalid townId.' });
+      return;
+    }
+    const body = (req.body ?? {}) as {
+      secret?: unknown;
+      state?: Record<string, unknown>;
+    };
+    const bucket = getOrCreateRelayBucket(townId);
+    if (typeof body.secret === 'string') {
+      bucket.secret = body.secret.trim().slice(0, 128);
+    }
+    if (body.state && typeof body.state === 'object') {
+      bucket.stateSnapshot = body.state;
+    }
+    bucket.updatedAtMs = Date.now();
+    res.json({
+      ok: true,
+      townId,
+      pendingCount: bucket.pendingCommands.length,
+      recentAgents: bucket.recentAgents,
+    });
+  });
+
+  // Browser poll -> drains queued CLI commands for immediate live execution
+  app.get('/api/town/:townId/commands', (req: Request, res: Response) => {
+    const townId = sanitizeTownId(req.params.townId);
+    if (!townId) {
+      res.status(400).json({ error: 'Invalid townId.' });
+      return;
+    }
+    const bucket = townRelayStore.get(townId);
+    if (!bucket) {
+      res.json({ ok: true, commands: [], recentAgents: [] });
+      return;
+    }
+    if (!verifyRelaySecret(req, bucket)) {
+      res.status(401).json({ error: 'Invalid or missing x-town-secret header.' });
+      return;
+    }
+    const commands = bucket.pendingCommands.splice(0, bucket.pendingCommands.length);
+    res.json({
+      ok: true,
+      commands,
+      recentAgents: bucket.recentAgents,
+    });
+  });
+
+  // External CLI Agent -> Read compact town snapshot
+  app.get('/api/town/:townId/state', (req: Request, res: Response) => {
+    const townId = sanitizeTownId(req.params.townId);
+    if (!townId) {
+      res.status(400).json({ error: 'Invalid townId. Use letters, numbers, dashes, or underscores.' });
+      return;
+    }
+    const bucket = getOrCreateRelayBucket(townId);
+    if (!verifyRelaySecret(req, bucket)) {
+      res.status(401).json({ error: 'Unauthorized: invalid or missing x-town-secret header.' });
+      return;
+    }
+
+    if (!bucket.stateSnapshot) {
+      res.json({
+        ok: true,
+        synced: false,
+        townId,
+        weather: 'summer',
+        season: 'Summer Meadow',
+        theme: 'meadow',
+        timeOfDay: 'day',
+        turnCount: 0,
+        activeDecree: '',
+        pulse: { prosperity: 68, order: 74, morale: 72 },
+        resources: { population: 5, maxPopulation: MAX_TOWN_AGENTS, completedBuildings: 0, totalPlots: 8 },
+        buildings: [],
+        villagers: [],
+        lastLogs: [],
+        recentAgents: bucket.recentAgents,
+        note: 'Open Alderbrook AI Town in the browser to stream live villager state into this relay.',
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      synced: true,
+      townId,
+      ...bucket.stateSnapshot,
+      recentAgents: bucket.recentAgents,
+      updatedAt: new Date(bucket.updatedAtMs).toISOString(),
+    });
+  });
+
+  // External CLI Agent -> Post town action (queues for live town + optionally writes Firestore REST if Bearer token provided)
+  app.post('/api/town/:townId/act', async (req: Request, res: Response) => {
+    const townId = sanitizeTownId(req.params.townId);
+    if (!townId) {
+      res.status(400).json({ error: 'Invalid townId.' });
+      return;
+    }
+    const bucket = getOrCreateRelayBucket(townId);
+    if (!verifyRelaySecret(req, bucket)) {
+      res.status(401).json({ error: 'Unauthorized: invalid or missing x-town-secret header.' });
+      return;
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawAction = String(body.action ?? body.type ?? '').trim().toLowerCase();
+    if (!VALID_RELAY_ACTIONS.has(rawAction)) {
+      res.status(400).json({
+        error: `Unsupported action "${rawAction || 'empty'}". Supported: ${Array.from(VALID_RELAY_ACTIONS).join(', ')}.`,
+      });
+      return;
+    }
+
+    const agentName = String(body.agentName ?? body.source ?? 'cli_agent').trim().slice(0, 40) || 'cli_agent';
+    const commandId = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    let primaryValue = '';
+    let payloadObj: Record<string, unknown> | undefined;
+    let summary = rawAction;
+
+    if (rawAction === 'god_decree') {
+      primaryValue = String(body.decree ?? body.value ?? body.message ?? '').trim().slice(0, 220);
+      if (!primaryValue) {
+        res.status(400).json({ error: 'god_decree requires a non-empty "decree" or "value" field.' });
+        return;
+      }
+      summary = primaryValue;
+    } else if (rawAction === 'villager_speak') {
+      const dialogue = String(body.dialogue ?? body.message ?? body.value ?? '').trim().slice(0, 220);
+      if (!dialogue) {
+        res.status(400).json({ error: 'villager_speak requires a non-empty "dialogue" field.' });
+        return;
+      }
+      const villagerId = String(body.villagerId ?? body.agentId ?? body.villager ?? '').trim().slice(0, 60);
+      const location = String(body.location ?? '').trim().slice(0, 32);
+      const targetAgent = String(body.targetAgent ?? '').trim().slice(0, 60);
+      primaryValue = dialogue;
+      payloadObj = {
+        villagerId: villagerId || undefined,
+        dialogue,
+        location: location || undefined,
+        targetAgent: targetAgent || undefined,
+        thought: typeof body.thought === 'string' ? body.thought.trim().slice(0, 240) : undefined,
+      };
+      summary = `${villagerId || 'villager'}: "${dialogue}"`;
+    } else if (rawAction === 'assign_task') {
+      const task = String(body.task ?? body.value ?? body.instruction ?? '').trim().slice(0, 220);
+      if (!task) {
+        res.status(400).json({ error: 'assign_task requires a non-empty "task" field.' });
+        return;
+      }
+      const villagerId = String(body.villagerId ?? body.agentId ?? body.villager ?? '').trim().slice(0, 60);
+      const location = String(body.location ?? '').trim().slice(0, 32);
+      primaryValue = task;
+      payloadObj = {
+        villagerId: villagerId || undefined,
+        task,
+        location: location || undefined,
+      };
+      summary = `${villagerId || 'villager'} -> ${task}`;
+    } else if (rawAction === 'hire_worker') {
+      primaryValue = String(body.prompt ?? body.value ?? 'Hire a helpful town artisan').trim().slice(0, 200);
+      summary = primaryValue;
+    } else if (rawAction === 'set_weather') {
+      primaryValue = String(body.weather ?? body.value ?? 'summer').trim().toLowerCase().slice(0, 24);
+      summary = `Weather -> ${primaryValue}`;
+    } else if (rawAction === 'set_theme') {
+      primaryValue = String(body.theme ?? body.value ?? 'meadow').trim().toLowerCase().slice(0, 32);
+      summary = `Theme -> ${primaryValue}`;
+    } else if (rawAction === 'trigger_train') {
+      primaryValue = String(body.value ?? 'Express train summoned').trim().slice(0, 120);
+      summary = 'Summoned Express Train to station';
+    } else {
+      primaryValue = String(body.value ?? body.structure ?? body.plotId ?? '').trim().slice(0, 240);
+      if (body.payload && typeof body.payload === 'object') {
+        payloadObj = body.payload as Record<string, unknown>;
+      }
+      summary = `${rawAction} ${primaryValue}`.trim();
+    }
+
+    const queued: QueuedRelayCommand = {
+      id: commandId,
+      type: rawAction,
+      value: primaryValue,
+      payload: payloadObj,
+      source: agentName,
+      status: 'pending',
+      createdAtMs: Date.now(),
+    };
+
+    bucket.pendingCommands.push(queued);
+    if (bucket.pendingCommands.length > MAX_PENDING_PER_TOWN) {
+      bucket.pendingCommands.splice(0, bucket.pendingCommands.length - MAX_PENDING_PER_TOWN);
+    }
+    bucket.updatedAtMs = Date.now();
+    recordRelayActivity(bucket, agentName, rawAction, summary);
+
+    // Optional Firestore REST forwarding when caller supplies a Firebase Auth ID token
+    let firestoreForwarded = false;
+    const authHeader = req.header('authorization') ?? '';
+    if (authHeader.startsWith('Bearer ')) {
+      const idToken = authHeader.slice(7).trim();
+      const fbCfg = getFirebaseRestConfig();
+      if (idToken && fbCfg) {
+        try {
+          const fsUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+            fbCfg.projectId,
+          )}/databases/${encodeURIComponent(
+            fbCfg.firestoreDatabaseId,
+          )}/documents/towns/${encodeURIComponent(townId)}/remoteCommands?documentId=${encodeURIComponent(
+            commandId,
+          )}`;
+          const payloadStr = payloadObj ? JSON.stringify(payloadObj).slice(0, 400) : '';
+          const fsRes = await fetch(fsUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              fields: {
+                ownerId: { stringValue: townId },
+                type: { stringValue: rawAction },
+                value: { stringValue: primaryValue.slice(0, 400) },
+                ...(payloadStr ? { payload: { stringValue: payloadStr } } : {}),
+                source: { stringValue: agentName.slice(0, 60) },
+                status: { stringValue: 'pending' },
+              },
+            }),
+          });
+          firestoreForwarded = fsRes.ok;
+        } catch {
+          // Non-fatal: in-memory relay queue already accepted the command
+        }
+      }
+    }
+
+    res.json({
+      ok: true,
+      commandId,
+      townId,
+      action: rawAction,
+      agentName,
+      queued: true,
+      firestoreForwarded,
+      summary,
+      message: `Signal accepted for ${rawAction} from ${agentName}.`,
+    });
   });
 
   if (process.env.NODE_ENV !== 'production') {

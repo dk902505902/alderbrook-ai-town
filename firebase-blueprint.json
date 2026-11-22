@@ -402,7 +402,7 @@
         "type": {
           "type": "string",
           "description": "Remote command action type.",
-          "enum": ["set_weather", "hire_worker", "god_decree", "build_structure", "build_plot"],
+          "enum": ["set_weather", "hire_worker", "god_decree", "build_structure", "build_plot", "villager_speak", "assign_task", "set_theme", "trigger_train"],
           "maxLength": 24
         },
         "value": {

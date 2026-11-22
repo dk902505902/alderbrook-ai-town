@@ -40,11 +40,15 @@ interface TownViewportProps {
     | { type: 'agent'; id: AgentId; nonce: number }
     | { type: 'location'; id: LocationId; nonce: number }
     | { type: 'plot'; id: PlotId; nonce: number }
+    | { type: 'signal_relay'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null;
+  signalRelayPulseNonce?: number;
+  triggerTrainNonce?: number;
   onSelectAgent: (agentId: AgentId) => void;
   onSelectLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
+  onSelectSignalRelay?: () => void;
   onDismissPlot: () => void;
   onWhisperBuildPlot: (plotId: PlotId, isUpgrade: boolean) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
@@ -64,9 +68,12 @@ export function TownViewport({
   followActive,
   communicationEvent,
   focusRequest,
+  signalRelayPulseNonce = 0,
+  triggerTrainNonce = 0,
   onSelectAgent,
   onSelectLocation,
   onSelectPlot,
+  onSelectSignalRelay,
   onDismissPlot,
   onWhisperBuildPlot,
   onMinimapUpdate,
@@ -79,6 +86,7 @@ export function TownViewport({
     onSelectAgent,
     onSelectLocation,
     onSelectPlot,
+    onSelectSignalRelay,
     onMinimapUpdate,
     onUserOrbitStart,
   });
@@ -86,6 +94,7 @@ export function TownViewport({
     onSelectAgent,
     onSelectLocation,
     onSelectPlot,
+    onSelectSignalRelay,
     onMinimapUpdate,
     onUserOrbitStart,
   };
@@ -100,6 +109,7 @@ export function TownViewport({
       onSelectAgent: (id) => callbacksRef.current.onSelectAgent(id),
       onSelectLocation: (id) => callbacksRef.current.onSelectLocation(id),
       onSelectPlot: (id) => callbacksRef.current.onSelectPlot(id),
+      onSelectSignalRelay: () => callbacksRef.current.onSelectSignalRelay?.(),
       onContextLost: () => setContextLost(true),
       onContextRestored: () => setContextLost(false),
       onMinimapUpdate: (coords) => callbacksRef.current.onMinimapUpdate?.(coords),
@@ -164,6 +174,18 @@ export function TownViewport({
   }, [communicationEvent]);
 
   useEffect(() => {
+    if (signalRelayPulseNonce > 0) {
+      controllerRef.current?.pulseSignalRelay(8);
+    }
+  }, [signalRelayPulseNonce]);
+
+  useEffect(() => {
+    if (triggerTrainNonce > 0) {
+      controllerRef.current?.triggerTrain();
+    }
+  }, [triggerTrainNonce]);
+
+  useEffect(() => {
     if (!focusRequest || !controllerRef.current) return;
     if (focusRequest.type === 'agent') {
       controllerRef.current.focusAgent(focusRequest.id);
@@ -171,6 +193,8 @@ export function TownViewport({
       controllerRef.current.focusLocation(focusRequest.id);
     } else if (focusRequest.type === 'plot') {
       controllerRef.current.focusPlot(focusRequest.id);
+    } else if (focusRequest.type === 'signal_relay') {
+      controllerRef.current.focusSignalRelay();
     } else {
       controllerRef.current.resetCamera();
     }

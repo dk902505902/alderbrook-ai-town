@@ -28,9 +28,18 @@ import { DecreePanel } from './components/DecreePanel.tsx';
 import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
+import { SignalRelayModal } from './components/SignalRelayModal.tsx';
 import { TownLogPanel } from './components/TownLogPanel.tsx';
 import { TownMinimap } from './components/TownMinimap.tsx';
 import { TownViewport } from './components/TownViewport.tsx';
+import {
+  advanceProviderKeyCursor,
+  buildInferenceHeaders,
+  computeActualKeySlot,
+  countCharacterOverrides,
+  resolveInferenceConfig,
+  sanitizeProviderConfig,
+} from './lib/aiRouting.ts';
 import { auth, googleAuthProvider } from './lib/firebase.ts';
 import { soundscape } from './lib/soundscape.ts';
 import {
@@ -39,6 +48,7 @@ import {
   markRemoteCommandStatus,
   persistAgentNote,
   persistAgentTurn,
+  persistCliAgentUpdate,
   persistEnvironmentSettings,
   persistGodDecree,
   persistHiredWorkers,
@@ -57,6 +67,7 @@ import {
   createInitialLogs,
   DEFAULT_PROVIDER_CONFIG,
   DEFAULT_REMOTE_BRIDGE_CONFIG,
+  DEFAULT_SIGNAL_RELAY_CONFIG,
   DEFAULT_TOWN_METRICS,
   detectDefaultGraphicsQuality,
   getWeatherSeasonEffect,
@@ -71,6 +82,7 @@ import {
   type AgentRecord,
   type AgentTurnResponse,
   type AIProviderConfig,
+  type CliAgentActivity,
   type GraphicsQuality,
   type HiredWorkerSpec,
   type LocationId,
@@ -78,6 +90,7 @@ import {
   type RemoteBridgeConfig,
   type RemoteCommandRecord,
   type RemoteCommandType,
+  type SignalRelayConfig,
   type StructureType,
   type TimeOfDay,
   type TownLogItem,
@@ -89,6 +102,8 @@ import {
 
 const PROVIDER_STORAGE_KEY = 'ai_town_provider_settings';
 const REMOTE_BRIDGE_STORAGE_KEY = 'alderbrook_remote_bridge_v1';
+const SIGNAL_RELAY_STORAGE_KEY = 'alderbrook_signal_relay_v1';
+const LOCAL_TOWN_ID_STORAGE_KEY = 'alderbrook_local_town_id';
 const LOCAL_TOWN_STORAGE_KEY = 'alderbrook_local_town_v2';
 const GRAPHICS_QUALITY_STORAGE_KEY = 'alderbrook_graphics_quality';
 
@@ -153,17 +168,87 @@ function createWeatherShiftLog(
 function loadProviderConfig(): AIProviderConfig {
   try {
     const raw = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
-    if (!raw) return DEFAULT_PROVIDER_CONFIG;
-    const parsed = JSON.parse(raw) as Partial<AIProviderConfig>;
+    if (!raw) return sanitizeProviderConfig(DEFAULT_PROVIDER_CONFIG);
+    return sanitizeProviderConfig(JSON.parse(raw));
+  } catch {
+    return sanitizeProviderConfig(DEFAULT_PROVIDER_CONFIG);
+  }
+}
+
+function loadSignalRelayConfig(): SignalRelayConfig {
+  try {
+    const raw = window.localStorage.getItem(SIGNAL_RELAY_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_SIGNAL_RELAY_CONFIG };
+    const parsed = JSON.parse(raw) as Partial<SignalRelayConfig>;
     return {
-      preset: parsed.preset || DEFAULT_PROVIDER_CONFIG.preset,
-      baseUrl: parsed.baseUrl || DEFAULT_PROVIDER_CONFIG.baseUrl,
-      modelName: parsed.modelName || DEFAULT_PROVIDER_CONFIG.modelName,
-      apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
+      baseUrl: typeof parsed.baseUrl === 'string' ? parsed.baseUrl : '',
+      customTownId: typeof parsed.customTownId === 'string' ? parsed.customTownId : '',
+      agentSecret: typeof parsed.agentSecret === 'string' ? parsed.agentSecret : '',
     };
   } catch {
-    return DEFAULT_PROVIDER_CONFIG;
+    return { ...DEFAULT_SIGNAL_RELAY_CONFIG };
   }
+}
+
+function loadOrCreateLocalTownId(): string {
+  try {
+    const saved = window.localStorage.getItem(LOCAL_TOWN_ID_STORAGE_KEY);
+    if (saved && /^[a-zA-Z0-9_-]{4,64}$/.test(saved)) {
+      return saved;
+    }
+    const generated = `alderbrook_${Math.random().toString(36).slice(2, 8)}`;
+    window.localStorage.setItem(LOCAL_TOWN_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return 'alderbrook_local';
+  }
+}
+
+function parseRemotePayloadObject(cmd: RemoteCommandRecord): Record<string, unknown> {
+  if (cmd.payload && typeof cmd.payload === 'object') {
+    return cmd.payload as Record<string, unknown>;
+  }
+  if (typeof cmd.payload === 'string') {
+    const trimmed = cmd.payload.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (parsed && typeof parsed === 'object') {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Ignore non-JSON string payloads
+      }
+    }
+  }
+  return {};
+}
+
+function parseRemoteLocation(raw: unknown): LocationId | null {
+  const val = String(raw ?? '').trim().toLowerCase();
+  if (val === 'town_hall' || val === 'workshop' || val === 'market' || val === 'park') {
+    return val;
+  }
+  return null;
+}
+
+function resolveTargetVillager(
+  agents: AgentRecord[],
+  hintRaw: unknown,
+): AgentRecord {
+  const hint = String(hintRaw ?? '').trim().toLowerCase();
+  if (hint) {
+    const exactId = agents.find((a) => a.id.toLowerCase() === hint);
+    if (exactId) return exactId;
+    const byName = agents.find(
+      (a) =>
+        a.name.toLowerCase() === hint ||
+        a.name.toLowerCase().includes(hint) ||
+        a.role.toLowerCase().includes(hint),
+    );
+    if (byName) return byName;
+  }
+  return agents.find((a) => a.id === 'mayor_sterling') ?? agents[0];
 }
 
 function loadRemoteBridgeConfig(): RemoteBridgeConfig {
@@ -362,6 +447,7 @@ export default function App() {
     | { type: 'agent'; id: AgentId; nonce: number }
     | { type: 'location'; id: LocationId; nonce: number }
     | { type: 'plot'; id: PlotId; nonce: number }
+    | { type: 'signal_relay'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null
   >(null);
@@ -373,15 +459,24 @@ export default function App() {
   // Mobile bottom drawer state
   const [mobileTab, setMobileTab] = useState<MobileTab | null>(null);
 
-  // AI Provider & Remote Bridge settings
+  // AI Provider, Remote Bridge & Signal Relay (CLI Hub) settings
   const [providerConfig, setProviderConfig] = useState<AIProviderConfig>(() => loadProviderConfig());
   const [remoteBridgeConfig, setRemoteBridgeConfig] = useState<RemoteBridgeConfig>(() =>
     loadRemoteBridgeConfig(),
   );
+  const [signalRelayConfig, setSignalRelayConfig] = useState<SignalRelayConfig>(() =>
+    loadSignalRelayConfig(),
+  );
+  const [localTownId] = useState<string>(() => loadOrCreateLocalTownId());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
+  const [signalRelayOpen, setSignalRelayOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [remoteExecutedCount, setRemoteExecutedCount] = useState(0);
+  const [signalRelayPulseNonce, setSignalRelayPulseNonce] = useState(0);
+  const [triggerTrainNonce, setTriggerTrainNonce] = useState(0);
+  const [recentCliAgents, setRecentCliAgents] = useState<CliAgentActivity[]>([]);
+  const [relayServerOnline, setRelayServerOnline] = useState(false);
   const [hasServerDefaultKey, setHasServerDefaultKey] = useState(false);
 
   // Firebase Auth & Cloud Sync state
@@ -393,6 +488,11 @@ export default function App() {
     throw asyncError;
   }
 
+  const effectiveBaseUrl =
+    typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+  const effectiveTownId =
+    signalRelayConfig.customTownId.trim() || user?.uid || localTownId;
+
   const activeAgent = agents[activeAgentIndex % agents.length];
   const activeAgentId = activeAgent?.id ?? 'mayor_sterling';
   const inFlightRef = useRef(false);
@@ -400,12 +500,16 @@ export default function App() {
 
   useEffect(() => {
     fetch('/api/health')
-      .then((res) => res.json())
+      .then((res) => {
+        if (res.ok) setRelayServerOnline(true);
+        return res.json();
+      })
       .then((data: { hasDefaultKey?: boolean }) => {
         setHasServerDefaultKey(Boolean(data.hasDefaultKey));
       })
       .catch(() => {
         setHasServerDefaultKey(false);
+        setRelayServerOnline(false);
       });
 
     return () => {
@@ -545,15 +649,41 @@ export default function App() {
       return;
     }
 
+    const resolvedInference = resolveInferenceConfig(snap.providerConfig, currentAgent.id);
+
+    // Zero-token External CLI Agent mode: skip LLM API calls completely for this villager
+    if (resolvedInference.isExternalCli) {
+      const nextIndex = (snap.activeAgentIndex + 1) % snap.agents.length;
+      const now = Date.now();
+      const cliWaitLog: TownLogItem = {
+        id: `cli-wait-${currentAgent.id}-${now}`,
+        turnNumber: snap.turnCount,
+        agentId: currentAgent.id,
+        agentName: currentAgent.name,
+        rank: currentAgent.rank,
+        location: currentAgent.location,
+        targetAgent: null,
+        thought: 'Assigned to External CLI Agent — skipped in-app LLM call (0 API tokens spent).',
+        dialogue: 'Listening on The Signal Relay for external CLI orders.',
+        newTask: currentAgent.currentTask,
+        modelUsed: 'External CLI (0 tokens)',
+        providerLabel: 'Signal Relay',
+        timestampMs: now,
+      };
+      setActiveAgentIndex(nextIndex);
+      setLogs((prev) => [cliWaitLog, ...prev].slice(0, 50));
+      setSecondsLeft(snap.turnIntervalSeconds);
+      inFlightRef.current = false;
+      setIsThinking(false);
+      return;
+    }
+
+    advanceProviderKeyCursor(resolvedInference);
+
     try {
       const res = await fetch('/api/town/turn', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-ai-base-url': snap.providerConfig.baseUrl.trim(),
-          'x-ai-model-name': snap.providerConfig.modelName.trim(),
-          'x-ai-api-key': snap.providerConfig.apiKey.trim(),
-        },
+        headers: buildInferenceHeaders(resolvedInference),
         body: JSON.stringify({
           activeAgentId: currentAgent.id,
           agents: snap.agents,
@@ -569,6 +699,8 @@ export default function App() {
 
       const payload = (await res.json()) as {
         turnResult?: AgentTurnResponse;
+        modelUsed?: string;
+        keyAttemptIndex?: number;
         error?: string;
         code?: string;
       };
@@ -578,11 +710,16 @@ export default function App() {
           setIsPlaying(false);
           setSettingsOpen(true);
         }
-        setErrorBanner(payload.error || 'Failed to advance simulation turn.');
+        const prefix = resolvedInference.isOverride
+          ? `${currentAgent.name} (${resolvedInference.providerLabel}): `
+          : '';
+        setErrorBanner(`${prefix}${payload.error || 'Failed to advance simulation turn.'}`);
         return;
       }
 
       const result = payload.turnResult;
+      const actualModelUsed = payload.modelUsed?.trim() || resolvedInference.modelName;
+      const actualKeySlot = computeActualKeySlot(resolvedInference, payload.keyAttemptIndex);
       const nextTurnNumber = snap.turnCount + 1;
       const now = Date.now();
 
@@ -764,6 +901,10 @@ export default function App() {
         dialogue: result.dialogue,
         newTask: result.new_task,
         timestampMs: now,
+        modelUsed: actualModelUsed,
+        providerUsed: resolvedInference.providerId,
+        providerLabel: resolvedInference.providerLabel,
+        keySlot: actualKeySlot,
       };
 
       // Cycle season naturally every 12 turns and log the weather shift
@@ -798,6 +939,10 @@ export default function App() {
           dialogue: newWorker.dialogue,
           newTask: newWorker.currentTask,
           timestampMs: now + 2,
+          modelUsed: actualModelUsed,
+          providerUsed: resolvedInference.providerId,
+          providerLabel: resolvedInference.providerLabel,
+          keySlot: actualKeySlot,
         };
         hiredPayload = { workers: [newWorker], logs: [hireLog] };
         playBuildFanfare = true;
@@ -919,10 +1064,11 @@ export default function App() {
   };
 
   const handleSaveProvider = (nextConfig: AIProviderConfig, nextWebhookUrl: string) => {
-    setProviderConfig(nextConfig);
+    const cleanConfig = sanitizeProviderConfig(nextConfig);
+    setProviderConfig(cleanConfig);
     setErrorBanner(null);
     try {
-      window.localStorage.setItem(PROVIDER_STORAGE_KEY, JSON.stringify(nextConfig));
+      window.localStorage.setItem(PROVIDER_STORAGE_KEY, JSON.stringify(cleanConfig));
     } catch {
       // Ignore localStorage failures
     }
@@ -995,15 +1141,13 @@ export default function App() {
     setIsHiring(true);
     setErrorBanner(null);
 
+    const resolvedInference = resolveInferenceConfig(snap.providerConfig, null);
+    advanceProviderKeyCursor(resolvedInference);
+
     try {
       const res = await fetch('/api/town/hire', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-ai-base-url': snap.providerConfig.baseUrl.trim(),
-          'x-ai-model-name': snap.providerConfig.modelName.trim(),
-          'x-ai-api-key': snap.providerConfig.apiKey.trim(),
-        },
+        headers: buildInferenceHeaders(resolvedInference),
         body: JSON.stringify({
           prompt: cleaned,
           agents: snap.agents,
@@ -1015,6 +1159,8 @@ export default function App() {
 
       const payload = (await res.json()) as {
         workers?: HiredWorkerSpec[];
+        modelUsed?: string;
+        keyAttemptIndex?: number;
         error?: string;
         code?: string;
       };
@@ -1027,6 +1173,8 @@ export default function App() {
         return null;
       }
 
+      const hireModelUsed = payload.modelUsed?.trim() || resolvedInference.modelName;
+      const hireKeySlot = computeActualKeySlot(resolvedInference, payload.keyAttemptIndex);
       const slotsLeft = MAX_TOWN_AGENTS - snap.agents.length;
       const existingIds = new Set(snap.agents.map((a) => a.id));
       const now = Date.now();
@@ -1046,6 +1194,10 @@ export default function App() {
         dialogue: w.dialogue,
         newTask: w.currentTask,
         timestampMs: now + idx,
+        modelUsed: hireModelUsed,
+        providerUsed: resolvedInference.providerId,
+        providerLabel: resolvedInference.providerLabel,
+        keySlot: hireKeySlot,
       }));
 
       setAgents((prev) => [...prev, ...newWorkers].slice(0, MAX_TOWN_AGENTS));
@@ -1086,13 +1238,14 @@ export default function App() {
     }
   };
 
-  const handleChangeTownTheme = async (nextTheme: TownTheme) => {
+  const handleChangeTownTheme = useCallback(async (nextTheme: TownTheme) => {
     const preferredTod = TOWN_THEME_META[nextTheme].preferredTimeOfDay;
     setTownTheme(nextTheme);
     setTimeOfDay(preferredTod);
-    if (user) {
+    const activeUser = stateRef.current.user;
+    if (activeUser) {
       try {
-        await persistEnvironmentSettings(user.uid, {
+        await persistEnvironmentSettings(activeUser.uid, {
           theme: nextTheme,
           timeOfDay: preferredTod,
         });
@@ -1100,7 +1253,7 @@ export default function App() {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
     }
-  };
+  }, []);
 
   const handleCycleTownTheme = () => {
     const idx = ALL_TOWN_THEMES.indexOf(townTheme);
@@ -1129,23 +1282,39 @@ export default function App() {
     [dispatchBridgeNotification],
   );
 
-  // Real-time Firestore Remote Command Listener (onSnapshot)
-  useEffect(() => {
-    if (!user) return;
+  const recordLocalCliActivity = useCallback(
+    (agentName: string, lastAction: string, summary: string) => {
+      const cleanName = agentName.trim().slice(0, 40) || 'cli_agent';
+      const entry: CliAgentActivity = {
+        agentName: cleanName,
+        lastAction,
+        summary: summary.slice(0, 140),
+        lastSeenMs: Date.now(),
+      };
+      setRecentCliAgents((prev) =>
+        [
+          entry,
+          ...prev.filter((item) => item.agentName.toLowerCase() !== cleanName.toLowerCase()),
+        ].slice(0, 15),
+      );
+    },
+    [],
+  );
 
-    const executeRemoteCommand = async (cmd: RemoteCommandRecord) => {
+  // Unified Remote & External CLI Command Executor (Firestore onSnapshot + Signal Relay REST + Test Signal)
+  const executeRemoteCommand = useCallback(
+    async (cmd: RemoteCommandRecord, origin: 'firestore' | 'relay' | 'local_test') => {
       const snap = stateRef.current;
       const now = Date.now();
-      const sourceLabel = cmd.source?.trim() || 'Telegram / Agent';
+      const sourceLabel = cmd.source?.trim() || (origin === 'firestore' ? 'Telegram / Agent' : 'cli_agent');
+      const payloadObj = parseRemotePayloadObject(cmd);
       let execStatus: 'executed' | 'failed' = 'executed';
       let resultMessage = '';
+      let handledOwnLog = false;
 
       try {
         if (cmd.type === 'set_weather') {
-          const rawWeather =
-            typeof cmd.payload === 'object' && cmd.payload
-              ? (cmd.payload as Record<string, unknown>).weather ?? (cmd.payload as Record<string, unknown>).value
-              : cmd.value ?? cmd.payload;
+          const rawWeather = payloadObj.weather ?? payloadObj.value ?? cmd.value ?? cmd.payload;
           const nextWeather = parseRemoteWeatherInput(rawWeather);
           if (!nextWeather) {
             execStatus = 'failed';
@@ -1154,11 +1323,136 @@ export default function App() {
             await handleChangeWeather(nextWeather);
             resultMessage = `Weather set to ${nextWeather.toUpperCase()} via ${sourceLabel}.`;
           }
+        } else if (cmd.type === 'set_theme') {
+          const rawTheme = String(payloadObj.theme ?? payloadObj.value ?? cmd.value ?? '').trim().toLowerCase();
+          const mappedTheme: TownTheme =
+            rawTheme === 'fantasy' || rawTheme === 'fantasy_night'
+              ? 'fantasy_night'
+              : rawTheme === 'solarpunk' || rawTheme === 'solarpunk_oasis'
+                ? 'solarpunk_oasis'
+                : normalizeTownTheme(rawTheme);
+          await handleChangeTownTheme(mappedTheme);
+          resultMessage = `Theme switched to ${TOWN_THEME_META[mappedTheme].label} via ${sourceLabel}.`;
+        } else if (cmd.type === 'trigger_train') {
+          setTriggerTrainNonce(now);
+          soundscape.playAgentChime(1);
+          resultMessage = `Express Train summoned to Alderbrook Station by ${sourceLabel}.`;
+        } else if (cmd.type === 'villager_speak') {
+          const dialogue = String(
+            payloadObj.dialogue ?? payloadObj.message ?? cmd.value ?? '',
+          )
+            .trim()
+            .slice(0, 220);
+          if (!dialogue) {
+            execStatus = 'failed';
+            resultMessage = 'villager_speak command required a non-empty dialogue string.';
+          } else {
+            const targetVillager = resolveTargetVillager(
+              snap.agents,
+              payloadObj.villagerId ?? payloadObj.agentId ?? payloadObj.villager ?? payloadObj.villagerName,
+            );
+            const nextLoc = parseRemoteLocation(payloadObj.location) ?? targetVillager.location;
+            const targetAgentName =
+              typeof payloadObj.targetAgent === 'string' && payloadObj.targetAgent.trim()
+                ? payloadObj.targetAgent.trim().slice(0, 60)
+                : null;
+            const thoughtText =
+              typeof payloadObj.thought === 'string' && payloadObj.thought.trim()
+                ? payloadObj.thought.trim().slice(0, 240)
+                : `External CLI agent (${sourceLabel}) spoke via The Signal Relay (0 API tokens).`;
+
+            const updatedAgent: AgentRecord = {
+              ...targetVillager,
+              location: nextLoc,
+              targetAgent: targetAgentName,
+              thought: thoughtText,
+              dialogue,
+            };
+
+            const cliLog: TownLogItem = {
+              id: `cli-speak-${targetVillager.id}-${now}`,
+              turnNumber: snap.turnCount,
+              agentId: targetVillager.id,
+              agentName: `${targetVillager.name} [CLI:${sourceLabel}]`.slice(0, 60),
+              rank: targetVillager.rank,
+              location: nextLoc,
+              targetAgent: targetAgentName,
+              thought: thoughtText,
+              dialogue,
+              newTask: targetVillager.currentTask,
+              modelUsed: `CLI · ${sourceLabel}`,
+              providerLabel: 'Signal Relay',
+              timestampMs: now,
+            };
+
+            setAgents((prev) => prev.map((a) => (a.id === updatedAgent.id ? updatedAgent : a)));
+            setLogs((prev) => [cliLog, ...prev].slice(0, 50));
+            setSelectedAgentId(updatedAgent.id);
+            setCommunicationEvent({
+              speakerId: updatedAgent.id,
+              targetAgentName,
+              accentColor: updatedAgent.accentColor,
+              nonce: now,
+            });
+            soundscape.playAgentChime(updatedAgent.rank);
+            if (snap.user) {
+              await persistCliAgentUpdate(snap.user.uid, updatedAgent, cliLog);
+            }
+            handledOwnLog = true;
+            resultMessage = `${updatedAgent.name} (${sourceLabel}): "${dialogue}"`;
+          }
+        } else if (cmd.type === 'assign_task') {
+          const taskText = String(
+            payloadObj.task ?? payloadObj.instruction ?? cmd.value ?? '',
+          )
+            .trim()
+            .slice(0, 220);
+          if (!taskText) {
+            execStatus = 'failed';
+            resultMessage = 'assign_task command required a non-empty task string.';
+          } else {
+            const targetVillager = resolveTargetVillager(
+              snap.agents,
+              payloadObj.villagerId ?? payloadObj.agentId ?? payloadObj.villager ?? payloadObj.villagerName,
+            );
+            const nextLoc = parseRemoteLocation(payloadObj.location) ?? targetVillager.location;
+            const updatedAgent: AgentRecord = {
+              ...targetVillager,
+              location: nextLoc,
+              currentTask: taskText,
+              userNote: `CLI (${sourceLabel}): ${taskText}`.slice(0, 180),
+              thought: `Task assigned via Signal Relay by ${sourceLabel}.`,
+              dialogue: `Copy that, ${sourceLabel} — on it!`,
+            };
+
+            const cliLog: TownLogItem = {
+              id: `cli-task-${targetVillager.id}-${now}`,
+              turnNumber: snap.turnCount,
+              agentId: targetVillager.id,
+              agentName: `${targetVillager.name} [CLI:${sourceLabel}]`.slice(0, 60),
+              rank: targetVillager.rank,
+              location: nextLoc,
+              targetAgent: null,
+              thought: `Assigned task via ${sourceLabel} (0 API tokens).`,
+              dialogue: `New task from ${sourceLabel}: ${taskText}`.slice(0, 280),
+              newTask: taskText,
+              modelUsed: `CLI · ${sourceLabel}`,
+              providerLabel: 'Signal Relay',
+              timestampMs: now,
+            };
+
+            setAgents((prev) => prev.map((a) => (a.id === updatedAgent.id ? updatedAgent : a)));
+            setLogs((prev) => [cliLog, ...prev].slice(0, 50));
+            setSelectedAgentId(updatedAgent.id);
+            soundscape.playAgentChime(updatedAgent.rank);
+            if (snap.user) {
+              await persistCliAgentUpdate(snap.user.uid, updatedAgent, cliLog);
+            }
+            handledOwnLog = true;
+            resultMessage = `Assigned ${updatedAgent.name} (${sourceLabel}): ${taskText}`;
+          }
         } else if (cmd.type === 'god_decree') {
-          const rawDecree =
-            typeof cmd.payload === 'object' && cmd.payload
-              ? String((cmd.payload as Record<string, unknown>).decree ?? (cmd.payload as Record<string, unknown>).value ?? '')
-              : String(cmd.value ?? cmd.payload ?? '');
+          const rawDecree = String(payloadObj.decree ?? payloadObj.value ?? cmd.value ?? cmd.payload ?? '');
           const decreeText = rawDecree.trim().slice(0, 260);
           if (!decreeText) {
             execStatus = 'failed';
@@ -1168,10 +1462,7 @@ export default function App() {
             resultMessage = `Issued Civic Decree: "${decreeText}"`;
           }
         } else if (cmd.type === 'hire_worker') {
-          const rawHire =
-            typeof cmd.payload === 'object' && cmd.payload
-              ? String((cmd.payload as Record<string, unknown>).prompt ?? (cmd.payload as Record<string, unknown>).value ?? '')
-              : String(cmd.value ?? cmd.payload ?? '');
+          const rawHire = String(payloadObj.prompt ?? payloadObj.value ?? cmd.value ?? cmd.payload ?? '');
           const hirePrompt = rawHire.trim().slice(0, 220);
           if (!hirePrompt) {
             execStatus = 'failed';
@@ -1210,7 +1501,9 @@ export default function App() {
               setSelectedPlotId(created.plotId);
               setFocusRequest({ type: 'plot', id: created.plotId, nonce: now });
               soundscape.playAgentChime(2);
-              await persistRemoteStructureAction(user.uid, 'create', created);
+              if (snap.user) {
+                await persistRemoteStructureAction(snap.user.uid, 'create', created);
+              }
               resultMessage = `Staked ${label} on ${plotLabel} (${target.plotId}) at 25%.`;
             } else if (existing.status === 'building') {
               const nextProgress = Math.min(100, existing.progress + 50);
@@ -1237,7 +1530,9 @@ export default function App() {
               } else {
                 soundscape.playAgentChime(3);
               }
-              await persistRemoteStructureAction(user.uid, 'progress', progressed);
+              if (snap.user) {
+                await persistRemoteStructureAction(snap.user.uid, 'progress', progressed);
+              }
               resultMessage = finished
                 ? `Completed ${label} on ${plotLabel}!`
                 : `Advanced ${label} on ${plotLabel} to ${nextProgress}%.`;
@@ -1261,7 +1556,9 @@ export default function App() {
                   `Remote upgrade elevated ${label} on ${plotLabel} to Tier 3.`,
                 );
               }
-              await persistRemoteStructureAction(user.uid, 'upgrade', upgraded);
+              if (snap.user) {
+                await persistRemoteStructureAction(snap.user.uid, 'upgrade', upgraded);
+              }
               resultMessage = `Upgraded ${label} on ${plotLabel} to Tier ${upgraded.tier}.`;
             } else {
               resultMessage = `${label} on ${plotLabel} is already Tier 3.`;
@@ -1273,46 +1570,69 @@ export default function App() {
         resultMessage = err instanceof Error ? err.message : 'Remote command failed.';
       }
 
-      const remoteLog: TownLogItem = {
-        id: `remote-${cmd.id.slice(0, 16)}-${now}`,
-        turnNumber: stateRef.current.turnCount,
-        agentId: 'remote_command',
-        agentName: '[Remote Command] · Telegram / Agent',
-        rank: 0,
-        location: 'plaza',
-        targetAgent: null,
-        thought: `Source: ${sourceLabel} · Action: ${cmd.type} (${cmd.value || (typeof cmd.payload === 'string' ? cmd.payload : 'payload')})`,
-        dialogue: resultMessage,
-        newTask: `Status: ${execStatus}`,
-        timestampMs: now,
-      };
+      const remoteLog: TownLogItem | null = handledOwnLog
+        ? null
+        : {
+            id: `remote-${cmd.id.slice(0, 16)}-${now}`,
+            turnNumber: stateRef.current.turnCount,
+            agentId: 'remote_command',
+            agentName: `[Signal Relay · ${sourceLabel}]`.slice(0, 60),
+            rank: 0,
+            location: 'plaza',
+            targetAgent: null,
+            thought: `Source: ${sourceLabel} · Action: ${cmd.type} (${cmd.value || (typeof cmd.payload === 'string' ? cmd.payload : 'payload')})`,
+            dialogue: resultMessage,
+            newTask: `Status: ${execStatus}`,
+            modelUsed: `CLI · ${sourceLabel}`,
+            providerLabel: 'Signal Relay',
+            timestampMs: now,
+          };
 
-      setLogs((prev) => [remoteLog, ...prev].slice(0, 50));
+      if (remoteLog) {
+        setLogs((prev) => [remoteLog, ...prev].slice(0, 50));
+      }
+
       if (execStatus === 'executed') {
         setRemoteExecutedCount((c) => c + 1);
+        setSignalRelayPulseNonce(now);
+        recordLocalCliActivity(sourceLabel, cmd.type, resultMessage);
         dispatchBridgeNotification(
           'remote_command',
-          `Remote Command Executed (${cmd.type})`,
+          `Signal Relay Executed (${cmd.type})`,
           resultMessage,
         );
       }
 
-      try {
-        await markRemoteCommandStatus(user.uid, cmd.id, execStatus, resultMessage, remoteLog);
-      } catch (err) {
-        setErrorBanner(
-          err instanceof Error ? err.message : 'Failed to update remote command status in Firestore.',
-        );
+      if (origin === 'firestore' && snap.user) {
+        try {
+          await markRemoteCommandStatus(snap.user.uid, cmd.id, execStatus, resultMessage, remoteLog);
+        } catch (err) {
+          setErrorBanner(
+            err instanceof Error ? err.message : 'Failed to update remote command status in Firestore.',
+          );
+        }
       }
-    };
+    },
+    [
+      handleChangeWeather,
+      handleChangeTownTheme,
+      handleIssueDecree,
+      handleHireWorker,
+      dispatchBridgeNotification,
+      recordLocalCliActivity,
+    ],
+  );
 
+  // Real-time Firestore Remote Command Listener (onSnapshot)
+  useEffect(() => {
+    if (!user) return;
     const unsub = subscribePendingRemoteCommands(
       user.uid,
       (pendingCommands) => {
         for (const cmd of pendingCommands) {
           if (processingCommandIdsRef.current.has(cmd.id)) continue;
           processingCommandIdsRef.current.add(cmd.id);
-          void executeRemoteCommand(cmd);
+          void executeRemoteCommand(cmd, 'firestore');
         }
       },
       (err) => {
@@ -1323,7 +1643,229 @@ export default function App() {
     return () => {
       unsub();
     };
-  }, [user, handleChangeWeather, handleIssueDecree, handleHireWorker, dispatchBridgeNotification]);
+  }, [user, executeRemoteCommand]);
+
+  // Sync compact town state to Signal Relay REST endpoint (debounced, fails silently on static hosts)
+  useEffect(() => {
+    const townId = effectiveTownId;
+    if (!townId) return;
+    const timer = window.setTimeout(() => {
+      const eff = getWeatherSeasonEffect(weather, structures);
+      const compactState = {
+        weather,
+        season: eff.label,
+        theme: townTheme,
+        timeOfDay,
+        turnCount,
+        activeDecree,
+        pulse: {
+          prosperity: metrics.prosperity,
+          order: metrics.orderLevel,
+          morale: metrics.morale,
+        },
+        resources: {
+          population: agents.length,
+          maxPopulation: MAX_TOWN_AGENTS,
+          completedBuildings: structures.filter((s) => s.status === 'complete').length,
+          totalPlots: ALL_PLOT_IDS.length,
+        },
+        buildings: structures.map((s) => ({
+          plotId: s.plotId,
+          type: s.structureType,
+          label: STRUCTURE_META[s.structureType].label,
+          status: s.status,
+          progress: s.progress,
+          tier: s.tier,
+        })),
+        villagers: agents.map((a) => ({
+          id: a.id,
+          name: a.name,
+          rank: a.rank,
+          role: a.role,
+          location: a.location,
+          currentTask: a.currentTask,
+          dialogue: a.dialogue,
+        })),
+        lastLogs: logs.slice(0, 5).map((l) => ({
+          turn: l.turnNumber,
+          agent: l.agentName,
+          dialogue: l.dialogue,
+          task: l.newTask,
+          timestampMs: l.timestampMs,
+        })),
+      };
+
+      fetch(`/api/town/${encodeURIComponent(townId)}/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret: signalRelayConfig.agentSecret.trim(),
+          state: compactState,
+        }),
+      })
+        .then((res) => {
+          if (res.ok) setRelayServerOnline(true);
+        })
+        .catch(() => {
+          // Static hosting (e.g., Hugging Face Spaces) — silent no-op
+        });
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    effectiveTownId,
+    signalRelayConfig.agentSecret,
+    weather,
+    townTheme,
+    timeOfDay,
+    turnCount,
+    activeDecree,
+    metrics,
+    agents,
+    structures,
+    logs,
+  ]);
+
+  // Lightweight Signal Relay command poller (2.5s when tab is visible)
+  useEffect(() => {
+    const townId = effectiveTownId;
+    if (!townId) return;
+    let cancelled = false;
+
+    const pollRelay = async () => {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      try {
+        const headers: Record<string, string> = {};
+        if (signalRelayConfig.agentSecret.trim()) {
+          headers['x-town-secret'] = signalRelayConfig.agentSecret.trim();
+        }
+        const res = await fetch(`/api/town/${encodeURIComponent(townId)}/commands`, {
+          headers,
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          commands?: RemoteCommandRecord[];
+          recentAgents?: CliAgentActivity[];
+        };
+        if (cancelled) return;
+        setRelayServerOnline(true);
+        if (Array.isArray(data.recentAgents) && data.recentAgents.length > 0) {
+          setRecentCliAgents((prev) => {
+            const merged = new Map<string, CliAgentActivity>();
+            for (const item of [...data.recentAgents!, ...prev]) {
+              const key = item.agentName.toLowerCase();
+              const existing = merged.get(key);
+              if (!existing || item.lastSeenMs > existing.lastSeenMs) {
+                merged.set(key, item);
+              }
+            }
+            return Array.from(merged.values())
+              .sort((a, b) => b.lastSeenMs - a.lastSeenMs)
+              .slice(0, 15);
+          });
+        }
+        if (Array.isArray(data.commands)) {
+          for (const cmd of data.commands) {
+            if (processingCommandIdsRef.current.has(cmd.id)) continue;
+            processingCommandIdsRef.current.add(cmd.id);
+            void executeRemoteCommand(cmd, 'relay');
+          }
+        }
+      } catch {
+        // Silent on static hosting
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void pollRelay();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [effectiveTownId, signalRelayConfig.agentSecret, executeRemoteCommand]);
+
+  const handleUpdateSignalRelayConfig = (next: SignalRelayConfig) => {
+    setSignalRelayConfig(next);
+    try {
+      window.localStorage.setItem(SIGNAL_RELAY_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore storage failures
+    }
+  };
+
+  const handleSelectSignalRelay = () => {
+    setSelectedPlotId(null);
+    setFollowActive(false);
+    setMobileTab(null);
+    setFocusRequest({ type: 'signal_relay', nonce: Date.now() });
+    setSignalRelayOpen(true);
+  };
+
+  const handleTestSignalRelay = async (): Promise<{ ok: boolean; message: string }> => {
+    const pingDialogue = 'Signal Relay online — ready for external CLI agents!';
+    const secret = signalRelayConfig.agentSecret.trim();
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (secret) headers['x-town-secret'] = secret;
+      const res = await fetch(`/api/town/${encodeURIComponent(effectiveTownId)}/act`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          action: 'villager_speak',
+          agentName: 'signal_test',
+          villagerId: 'mayor_sterling',
+          dialogue: pingDialogue,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { commandId?: string };
+        const cmdId = data.commandId || `local_ping_${Date.now()}`;
+        if (!processingCommandIdsRef.current.has(cmdId)) {
+          processingCommandIdsRef.current.add(cmdId);
+          await executeRemoteCommand(
+            {
+              id: cmdId,
+              type: 'villager_speak',
+              value: pingDialogue,
+              payload: { villagerId: 'mayor_sterling', dialogue: pingDialogue },
+              source: 'signal_test',
+              status: 'pending',
+              createdAtMs: Date.now(),
+            },
+            'relay',
+          );
+        }
+        return {
+          ok: true,
+          message: 'Live Signal Relay ping accepted! Beacon pulsed and Town Log updated.',
+        };
+      }
+    } catch {
+      // Fallback for static hosting below
+    }
+
+    const fallbackId = `local_ping_${Date.now()}`;
+    processingCommandIdsRef.current.add(fallbackId);
+    await executeRemoteCommand(
+      {
+        id: fallbackId,
+        type: 'villager_speak',
+        value: pingDialogue,
+        payload: { villagerId: 'mayor_sterling', dialogue: pingDialogue },
+        source: 'signal_test',
+        status: 'pending',
+        createdAtMs: Date.now(),
+      },
+      'local_test',
+    );
+    return {
+      ok: true,
+      message: 'Simulated CLI ping executed locally! Beacon pulsed and Town Log updated.',
+    };
+  };
 
   const handleChangeTurnInterval = (seconds: number) => {
     setTurnIntervalSeconds(seconds);
@@ -1457,12 +1999,15 @@ export default function App() {
         followActive={followActive}
         communicationEvent={communicationEvent}
         focusRequest={focusRequest}
+        signalRelayPulseNonce={signalRelayPulseNonce}
+        triggerTrainNonce={triggerTrainNonce}
         onSelectAgent={handleSelectAgent}
         onSelectLocation={(loc) => {
           handleFocusLocation(loc);
           setErrorBanner(null);
         }}
         onSelectPlot={handleSelectPlot}
+        onSelectSignalRelay={handleSelectSignalRelay}
         onDismissPlot={() => setSelectedPlotId(null)}
         onWhisperBuildPlot={handleWhisperBuildPlot}
         onMinimapUpdate={setMinimapCoords}
@@ -1644,6 +2189,7 @@ export default function App() {
             onSelectAgent={handleSelectAgent}
             onFocusLocation={handleFocusLocation}
             onSelectPlot={handleSelectPlot}
+            onSelectSignalRelay={handleSelectSignalRelay}
           />
         )}
         <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-950/90 p-1 shadow-xl">
@@ -1737,6 +2283,7 @@ export default function App() {
                 structures={structures}
                 metrics={metrics}
                 weather={weather}
+                providerConfig={providerConfig}
                 activeAgentId={activeAgentId}
                 selectedAgentId={selectedAgentId}
                 isHiring={isHiring}
@@ -1745,6 +2292,7 @@ export default function App() {
                 onHireWorker={handleHireWorker}
                 onFocusLocation={handleFocusLocation}
                 onSelectPlot={handleSelectPlot}
+                onSelectSignalRelay={handleSelectSignalRelay}
                 onResetCamera={() => {
                   setFollowActive(false);
                   setSelectedPlotId(null);
@@ -1776,7 +2324,11 @@ export default function App() {
                   Town Log & Decrees
                 </h2>
                 <p className="text-xs text-slate-400">
-                  {providerConfig.modelName} · Turn {turnCount}
+                  {providerConfig.modelName}
+                  {countCharacterOverrides(providerConfig) > 0
+                    ? ` (+${countCharacterOverrides(providerConfig)} custom)`
+                    : ''}{' '}
+                  · Turn {turnCount}
                 </p>
               </div>
               <button
@@ -1864,6 +2416,7 @@ export default function App() {
                   structures={structures}
                   metrics={metrics}
                   weather={weather}
+                  providerConfig={providerConfig}
                   activeAgentId={activeAgentId}
                   selectedAgentId={selectedAgentId}
                   isHiring={isHiring}
@@ -1878,6 +2431,7 @@ export default function App() {
                     handleSelectPlot(plotId);
                     setMobileTab(null);
                   }}
+                  onSelectSignalRelay={handleSelectSignalRelay}
                   onResetCamera={() => {
                     setFollowActive(false);
                     setSelectedPlotId(null);
@@ -1962,6 +2516,7 @@ export default function App() {
       <AIProvidersModal
         isOpen={settingsOpen}
         config={providerConfig}
+        agents={agents}
         webhookUrl={remoteBridgeConfig.webhookUrl}
         hasServerDefaultKey={hasServerDefaultKey}
         onClose={() => setSettingsOpen(false)}
@@ -1984,11 +2539,26 @@ export default function App() {
         }}
       />
 
+      {/* The Signal Relay (CLI Agent Hub) Building Modal */}
+      <SignalRelayModal
+        isOpen={signalRelayOpen}
+        config={signalRelayConfig}
+        effectiveBaseUrl={effectiveBaseUrl}
+        effectiveTownId={effectiveTownId}
+        agents={agents}
+        recentCliAgents={recentCliAgents}
+        relayServerOnline={relayServerOnline}
+        onClose={() => setSignalRelayOpen(false)}
+        onUpdateConfig={handleUpdateSignalRelayConfig}
+        onTestSignal={handleTestSignalRelay}
+        onOpenAIProviders={() => setSettingsOpen(true)}
+      />
+
       {/* Help & AI Integration Guide Modal */}
       <HelpGuideModal
         isOpen={helpOpen}
         uid={user?.uid ?? null}
-        appOrigin={typeof window !== 'undefined' ? window.location.origin : 'https://localhost:3000'}
+        appOrigin={effectiveBaseUrl}
         onClose={() => setHelpOpen(false)}
         onOpenRemoteBridge={() => setBridgeOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}

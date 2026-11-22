@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { CloudRain, Compass, MapPin, Send, Snowflake, Sun, UserPlus } from 'lucide-react';
+import { CloudRain, Compass, Cpu, MapPin, Radio, Send, Snowflake, Sun, UserPlus } from 'lucide-react';
+import { formatCompactModelName, resolveInferenceConfig } from '../lib/aiRouting.ts';
 import {
   getWeatherSeasonEffect,
   LOCATION_LABELS,
@@ -8,6 +9,7 @@ import {
   STRUCTURE_META,
   type AgentId,
   type AgentRecord,
+  type AIProviderConfig,
   type LocationId,
   type PlotId,
   type TownMetrics,
@@ -20,6 +22,7 @@ interface HierarchyPanelProps {
   structures: TownStructure[];
   metrics: TownMetrics;
   weather: WeatherMode;
+  providerConfig: AIProviderConfig;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
   isHiring: boolean;
@@ -28,6 +31,7 @@ interface HierarchyPanelProps {
   onHireWorker: (prompt: string) => void;
   onFocusLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
+  onSelectSignalRelay?: () => void;
   onResetCamera: () => void;
 }
 
@@ -55,6 +59,7 @@ export function HierarchyPanel({
   structures,
   metrics,
   weather,
+  providerConfig,
   activeAgentId,
   selectedAgentId,
   isHiring,
@@ -63,6 +68,7 @@ export function HierarchyPanel({
   onHireWorker,
   onFocusLocation,
   onSelectPlot,
+  onSelectSignalRelay,
   onResetCamera,
 }: HierarchyPanelProps) {
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
@@ -211,6 +217,8 @@ export function HierarchyPanel({
             ? `${PLOT_META[agent.activePlotId].shortLabel} Plot`
             : LOCATION_LABELS[agent.location];
           const shortName = agent.name.split(' ').slice(-1)[0] || agent.name;
+          const resolvedModel = resolveInferenceConfig(providerConfig, agent.id);
+          const compactModel = formatCompactModelName(resolvedModel.modelName);
 
           return (
             <div
@@ -267,10 +275,68 @@ export function HierarchyPanel({
                 <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-200">
                   {agent.currentTask}
                 </p>
+
+                {resolvedModel.isOverride && !isSelected && (
+                  <div
+                    className={`mt-1.5 inline-flex max-w-full items-center gap-1 font-mono text-[10px] ${
+                      resolvedModel.isExternalCli ? 'text-cyan-300' : 'text-amber-300/90'
+                    }`}
+                    title={
+                      resolvedModel.isExternalCli
+                        ? 'Controlled by external CLI agent (0 API tokens)'
+                        : `Custom AI override: ${resolvedModel.providerLabel} · ${resolvedModel.modelName}`
+                    }
+                  >
+                    {resolvedModel.isExternalCli ? (
+                      <Radio className="h-3 w-3 shrink-0" />
+                    ) : (
+                      <Cpu className="h-3 w-3 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {resolvedModel.isExternalCli ? 'External CLI · 0 tokens' : compactModel}
+                    </span>
+                  </div>
+                )}
               </button>
 
               {isSelected && (
                 <div className="border-t border-white/10 px-3 pt-2.5 pb-3 text-xs leading-relaxed text-slate-300">
+                  <div
+                    className="mb-1.5 flex items-center justify-between gap-2 text-[11px]"
+                    title={
+                      resolvedModel.isExternalCli
+                        ? 'External CLI Agent mode — skips in-app LLM API calls (0 tokens)'
+                        : `${resolvedModel.providerLabel}${
+                            resolvedModel.keyCount > 1 ? ` (${resolvedModel.keyCount} keys)` : ''
+                          } · ${resolvedModel.modelName}${
+                            resolvedModel.isOverride ? ' (Per-character override)' : ' (Global default)'
+                          }`
+                    }
+                  >
+                    <span className="inline-flex items-center gap-1 text-slate-400">
+                      {resolvedModel.isExternalCli ? (
+                        <Radio className="h-3 w-3 shrink-0 text-cyan-300" />
+                      ) : (
+                        <Cpu className="h-3 w-3 shrink-0 text-slate-400" />
+                      )}
+                      <span>Model</span>
+                    </span>
+                    <span
+                      className={`truncate font-mono text-[11px] ${
+                        resolvedModel.isExternalCli
+                          ? 'text-cyan-300'
+                          : resolvedModel.isOverride
+                            ? 'text-amber-300'
+                            : 'text-slate-300'
+                      }`}
+                    >
+                      {resolvedModel.isExternalCli
+                        ? 'External CLI · 0 tokens'
+                        : `${compactModel}${
+                            resolvedModel.isOverride ? ` · ${resolvedModel.providerLabel}` : ' · Default'
+                          }`}
+                    </span>
+                  </div>
                   {agent.personality && (
                     <p className="mb-1 text-slate-400">
                       Trait: <span className="text-emerald-300">{agent.personality}</span>
@@ -357,6 +423,16 @@ export function HierarchyPanel({
               {loc.label}
             </button>
           ))}
+          {onSelectSignalRelay && (
+            <button
+              type="button"
+              onClick={onSelectSignalRelay}
+              className="col-span-2 inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl border border-cyan-400/35 bg-cyan-950/35 px-3 text-xs font-semibold text-cyan-200 transition-colors hover:border-cyan-400/60 hover:bg-cyan-900/40"
+            >
+              <Radio className="h-3.5 w-3.5 text-cyan-300" />
+              <span>The Signal Relay (CLI Agent Hub)</span>
+            </button>
+          )}
         </div>
       </div>
     </div>
