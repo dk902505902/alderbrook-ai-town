@@ -73,6 +73,10 @@ service cloud.firestore {
       return w in ['summer', 'rain', 'winter', 'clear', 'fireflies'];
     }
 
+    function isValidTownTheme(t) {
+      return t in ['meadow', 'fantasy_night', 'solarpunk_oasis'];
+    }
+
     function isValidScore(val) {
       return val is int && val >= 0 && val <= 100;
     }
@@ -87,7 +91,7 @@ service cloud.firestore {
 
     function isValidTownState(data) {
       return data.keys().hasAll(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'createdAt', 'updatedAt'])
         && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
         && data.turnCount is int && data.turnCount >= 0 && data.turnCount <= 1000000
         && data.activeAgentIndex is int && data.activeAgentIndex >= 0 && data.activeAgentIndex <= 14
@@ -95,8 +99,9 @@ service cloud.firestore {
         && isValidScore(data.prosperity)
         && isValidScore(data.orderLevel)
         && isValidScore(data.morale)
-        && data.timeOfDay is string && isValidTimeOfDay(data.timeOfDay)
-        && data.weather is string && isValidWeather(data.weather)
+        && data.timeOfDay is string && data.timeOfDay.size() <= 16 && isValidTimeOfDay(data.timeOfDay)
+        && data.weather is string && data.weather.size() <= 16 && isValidWeather(data.weather)
+        && (!('theme' in data) || (data.theme is string && data.theme.size() <= 24 && isValidTownTheme(data.theme)))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -197,7 +202,11 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['activeDecree', 'turnCount', 'activeAgentIndex', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['timeOfDay', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['weather', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'timeOfDay', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt'])
         );
       allow delete: if isValidId(townId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
 

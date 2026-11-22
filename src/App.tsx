@@ -11,6 +11,7 @@ import {
   LogOut,
   Map as MapIcon,
   MessageSquareText,
+  Palette,
   Pause,
   Play,
   Radio,
@@ -50,6 +51,7 @@ import type { AgentWorldCoord } from './three/townScene.ts';
 import {
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
+  ALL_TOWN_THEMES,
   createHiredAgentRecord,
   createInitialAgents,
   createInitialLogs,
@@ -60,9 +62,11 @@ import {
   getWeatherSeasonEffect,
   LOCATION_LABELS,
   MAX_TOWN_AGENTS,
+  normalizeTownTheme,
   normalizeWeatherMode,
   PLOT_META,
   STRUCTURE_META,
+  TOWN_THEME_META,
   type AgentId,
   type AgentRecord,
   type AgentTurnResponse,
@@ -79,6 +83,7 @@ import {
   type TownLogItem,
   type TownMetrics,
   type TownStructure,
+  type TownTheme,
   type WeatherMode,
 } from './types/town.ts';
 
@@ -110,6 +115,7 @@ interface LocalTownSnapshot {
   metrics: TownMetrics;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
+  theme: TownTheme;
   agents: AgentRecord[];
   structures: TownStructure[];
   logs: TownLogItem[];
@@ -269,6 +275,7 @@ function loadLocalTown(): LocalTownSnapshot {
         metrics: { ...DEFAULT_TOWN_METRICS },
         timeOfDay: 'day',
         weather: 'summer',
+        theme: 'meadow',
         agents: createInitialAgents(),
         structures: [],
         logs: createInitialLogs(),
@@ -290,6 +297,7 @@ function loadLocalTown(): LocalTownSnapshot {
       metrics: parsed.metrics || { ...DEFAULT_TOWN_METRICS },
       timeOfDay: parsed.timeOfDay || 'day',
       weather: normalizeWeatherMode(parsed.weather),
+      theme: normalizeTownTheme(parsed.theme),
       agents: restoredAgents,
       structures: Array.isArray(parsed.structures) ? parsed.structures : [],
       logs: Array.isArray(parsed.logs) && parsed.logs.length > 0 ? parsed.logs : createInitialLogs(),
@@ -302,6 +310,7 @@ function loadLocalTown(): LocalTownSnapshot {
       metrics: { ...DEFAULT_TOWN_METRICS },
       timeOfDay: 'day',
       weather: 'summer',
+      theme: 'meadow',
       agents: createInitialAgents(),
       structures: [],
       logs: createInitialLogs(),
@@ -324,6 +333,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<TownMetrics>(initialLocal.current.metrics);
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>(initialLocal.current.timeOfDay);
   const [weather, setWeather] = useState<WeatherMode>(initialLocal.current.weather);
+  const [townTheme, setTownTheme] = useState<TownTheme>(initialLocal.current.theme);
   const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>(() =>
     loadGraphicsQuality(),
   );
@@ -413,6 +423,7 @@ export default function App() {
         metrics,
         timeOfDay,
         weather,
+        theme: townTheme,
         agents,
         structures,
         logs: logs.slice(0, 40),
@@ -421,7 +432,7 @@ export default function App() {
     } catch {
       // Ignore storage quota errors
     }
-  }, [user, turnCount, activeAgentIndex, activeDecree, metrics, timeOfDay, weather, agents, structures, logs]);
+  }, [user, turnCount, activeAgentIndex, activeDecree, metrics, timeOfDay, weather, townTheme, agents, structures, logs]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (nextUser) => {
@@ -435,6 +446,7 @@ export default function App() {
         setMetrics(cloudState.metrics);
         setTimeOfDay(cloudState.timeOfDay);
         setWeather(cloudState.weather);
+        setTownTheme(cloudState.theme);
         setAgents(cloudState.agents);
         setStructures(cloudState.structures);
         setLogs(cloudState.logs);
@@ -1074,6 +1086,28 @@ export default function App() {
     }
   };
 
+  const handleChangeTownTheme = async (nextTheme: TownTheme) => {
+    const preferredTod = TOWN_THEME_META[nextTheme].preferredTimeOfDay;
+    setTownTheme(nextTheme);
+    setTimeOfDay(preferredTod);
+    if (user) {
+      try {
+        await persistEnvironmentSettings(user.uid, {
+          theme: nextTheme,
+          timeOfDay: preferredTod,
+        });
+      } catch (err) {
+        setAsyncError(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+  };
+
+  const handleCycleTownTheme = () => {
+    const idx = ALL_TOWN_THEMES.indexOf(townTheme);
+    const nextTheme = ALL_TOWN_THEMES[(idx + 1) % ALL_TOWN_THEMES.length];
+    void handleChangeTownTheme(nextTheme);
+  };
+
   const handleChangeWeather = useCallback(
     async (w: WeatherMode) => {
       const snap = stateRef.current;
@@ -1327,6 +1361,7 @@ export default function App() {
         setMetrics(fresh.metrics);
         setTimeOfDay(fresh.timeOfDay);
         setWeather(fresh.weather);
+        setTownTheme(fresh.theme);
         setAgents(fresh.agents);
         setStructures(fresh.structures);
         setLogs(fresh.logs);
@@ -1340,6 +1375,7 @@ export default function App() {
       setMetrics({ ...DEFAULT_TOWN_METRICS });
       setTimeOfDay('day');
       setWeather('summer');
+      setTownTheme('meadow');
       setAgents(createInitialAgents());
       setStructures([]);
       setLogs(createInitialLogs());
@@ -1416,6 +1452,7 @@ export default function App() {
         selectedPlotId={selectedPlotId}
         timeOfDay={timeOfDay}
         weather={weather}
+        townTheme={townTheme}
         graphicsQuality={graphicsQuality}
         followActive={followActive}
         communicationEvent={communicationEvent}
@@ -1637,6 +1674,16 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={handleCycleTownTheme}
+            title={`World Theme: ${TOWN_THEME_META[townTheme].label} (tap to switch)`}
+            aria-label={`World Theme: ${TOWN_THEME_META[townTheme].label}. Tap to switch theme`}
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Palette className="h-4 w-4 text-amber-300" />
+            <span>{TOWN_THEME_META[townTheme].shortLabel}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleCycleGraphicsQuality}
             title={`Graphics Quality: ${graphicsQuality} (tap to cycle)`}
             aria-label={`Graphics Quality: ${graphicsQuality}. Tap to cycle Low, Medium, High`}
@@ -1751,11 +1798,13 @@ export default function App() {
                 activeDecree={activeDecree}
                 timeOfDay={timeOfDay}
                 weather={weather}
+                townTheme={townTheme}
                 graphicsQuality={graphicsQuality}
                 turnIntervalSeconds={turnIntervalSeconds}
                 onIssueDecree={handleIssueDecree}
                 onChangeTimeOfDay={handleChangeTimeOfDay}
                 onChangeWeather={handleChangeWeather}
+                onChangeTownTheme={handleChangeTownTheme}
                 onChangeGraphicsQuality={handleChangeGraphicsQuality}
                 onChangeTurnInterval={handleChangeTurnInterval}
                 onResetTown={handleResetTown}
@@ -1843,6 +1892,7 @@ export default function App() {
                   activeDecree={activeDecree}
                   timeOfDay={timeOfDay}
                   weather={weather}
+                  townTheme={townTheme}
                   graphicsQuality={graphicsQuality}
                   turnIntervalSeconds={turnIntervalSeconds}
                   onIssueDecree={(text) => {
@@ -1851,6 +1901,7 @@ export default function App() {
                   }}
                   onChangeTimeOfDay={handleChangeTimeOfDay}
                   onChangeWeather={handleChangeWeather}
+                  onChangeTownTheme={handleChangeTownTheme}
                   onChangeGraphicsQuality={handleChangeGraphicsQuality}
                   onChangeTurnInterval={handleChangeTurnInterval}
                   onResetTown={() => {

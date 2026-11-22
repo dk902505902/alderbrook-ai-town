@@ -13,6 +13,7 @@ import {
   type PlotId,
   type TimeOfDay,
   type TownStructure,
+  type TownTheme,
   type WeatherMode,
 } from '../types/town.ts';
 import {
@@ -29,6 +30,14 @@ import {
   buildScaffoldingMesh,
   disposeStructureGroup,
 } from './townStructures.ts';
+import {
+  applyThemeToMaterial,
+  applyThemeToObjectTree,
+  createThemedAwningTexture,
+  getThemeAtmosphere,
+  tagThemeMaterial,
+  TREE_CANOPY_PALETTES,
+} from './townThemes.ts';
 
 export interface ProjectedLabel {
   x: number;
@@ -107,69 +116,7 @@ function getAgentSlotOffset(agentId: AgentId, index: number, out: THREE.Vector3)
   return out.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
 }
 
-interface AtmospherePreset {
-  skyHex: number;
-  hemiSkyHex: number;
-  hemiGroundHex: number;
-  hemiIntensity: number;
-  sunHex: number;
-  sunIntensity: number;
-  sunPos: THREE.Vector3;
-  rimHex: number;
-  rimIntensity: number;
-  lanternEmissive: number;
-}
-
-const ATMOSPHERE_PRESETS: Record<TimeOfDay, AtmospherePreset> = {
-  dawn: {
-    skyHex: 0xf6cbb8,
-    hemiSkyHex: 0xfde2e4,
-    hemiGroundHex: 0x626b7a,
-    hemiIntensity: 0.85,
-    sunHex: 0xfdba74,
-    sunIntensity: 1.5,
-    sunPos: new THREE.Vector3(24, 9.5, 12),
-    rimHex: 0xa5b4fc,
-    rimIntensity: 0.65,
-    lanternEmissive: 0.72,
-  },
-  day: {
-    skyHex: 0xdcebf7,
-    hemiSkyHex: 0xbae6fd,
-    hemiGroundHex: 0x5c7252,
-    hemiIntensity: 0.92,
-    sunHex: 0xfff3d6,
-    sunIntensity: 1.72,
-    sunPos: new THREE.Vector3(18, 26, 14),
-    rimHex: 0xc7d2fe,
-    rimIntensity: 0.6,
-    lanternEmissive: 0.22,
-  },
-  twilight: {
-    skyHex: 0x4c406e,
-    hemiSkyHex: 0x818cf8,
-    hemiGroundHex: 0x4b3348,
-    hemiIntensity: 0.68,
-    sunHex: 0xfb923c,
-    sunIntensity: 1.45,
-    sunPos: new THREE.Vector3(-24, 6.5, -14),
-    rimHex: 0x6366f1,
-    rimIntensity: 0.78,
-    lanternEmissive: 1.75,
-  },
-  night: {
-    skyHex: 0x0f172e,
-    hemiSkyHex: 0x3b4d7a,
-    hemiGroundHex: 0x161f33,
-    hemiIntensity: 0.52,
-    sunHex: 0x93c5fd,
-    sunIntensity: 0.62,
-    sunPos: new THREE.Vector3(-12, 22, -16),
-    rimHex: 0x38bdf8,
-    rimIntensity: 0.55,
-    lanternEmissive: 2.35,
-  },
-};
+// Atmosphere presets are resolved dynamically via getThemeAtmosphere(theme, timeOfDay, weather)
 
 interface CharacterRig {
   id: AgentId;
@@ -364,24 +311,7 @@ function createContactShadowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-function createAwningStripeTexture(maxAnisotropy: number): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
-    const stripes = 8;
-    const w = canvas.width / stripes;
-    for (let i = 0; i < stripes; i++) {
-      ctx.fillStyle = i % 2 === 0 ? '#c2410c' : '#fef3c7';
-      ctx.fillRect(i * w, 0, w, canvas.height);
-    }
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = maxAnisotropy;
-  return tex;
-}
+// Themed market awning textures are generated via createThemedAwningTexture() in townThemes.ts
 
 function createCobbleTexture(maxAnisotropy: number): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -445,17 +375,35 @@ function buildTownHall(
   group.name = 'landmark:town_hall';
   group.userData = { locationId: 'town_hall' };
 
-  const stoneMat = new THREE.MeshStandardMaterial({ color: 0xe2dcd0, roughness: 0.85, metalness: 0.05 });
-  const trimMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.65, metalness: 0.1 });
-  const roofMat = new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.55, metalness: 0.18 });
-  const goldMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.22, metalness: 0.88 });
-  const doorMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.72, metalness: 0.05 });
-  const clockMat = new THREE.MeshStandardMaterial({
-    color: 0xfef3c7,
-    emissive: 0xfde68a,
-    emissiveIntensity: 0.35,
-    roughness: 0.3,
-  });
+  const stoneMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xe2dcd0, roughness: 0.85, metalness: 0.05 }),
+    'wall',
+  );
+  const trimMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.65, metalness: 0.1 }),
+    'trim',
+  );
+  const roofMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.55, metalness: 0.18 }),
+    'roofPrimary',
+  );
+  const goldMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.22, metalness: 0.88 }),
+    'gold',
+  );
+  const doorMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.72, metalness: 0.05 }),
+    'wood',
+  );
+  const clockMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfef3c7,
+      emissive: 0xfde68a,
+      emissiveIntensity: 0.35,
+      roughness: 0.3,
+    }),
+    'window',
+  );
   lanternMats.push(clockMat);
 
   addContactShadow(group, shadowTex, 3.8, 3.0);
@@ -513,23 +461,38 @@ function buildWorkshop(
   group.name = 'landmark:workshop';
   group.userData = { locationId: 'workshop' };
 
-  const brickMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.88, metalness: 0.04 });
-  const timberMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.78, metalness: 0.05 });
-  const roofMat = new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.58, metalness: 0.15 });
-  const ironMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.32, metalness: 0.85 });
-  const glowMat = new THREE.MeshStandardMaterial({
-    color: 0xfef08a,
-    emissive: 0xf59e0b,
-    emissiveIntensity: 0.65,
-    roughness: 0.3,
-  });
+  const brickMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.88, metalness: 0.04 }),
+    'brick',
+  );
+  const timberMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.78, metalness: 0.05 }),
+    'wood',
+  );
+  const roofMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.58, metalness: 0.15 }),
+    'roofSecondary',
+  );
+  const ironMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.32, metalness: 0.85 }),
+    'metal',
+  );
+  const glowMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfef08a,
+      emissive: 0xf59e0b,
+      emissiveIntensity: 0.65,
+      roughness: 0.3,
+    }),
+    'window',
+  );
   lanternMats.push(glowMat);
 
   addContactShadow(group, shadowTex, 3.2, 2.8);
 
   const base = new THREE.Mesh(
     new THREE.BoxGeometry(4.6, 0.3, 3.6),
-    new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.9 }),
+    tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.9 }), 'stone'),
   );
   base.position.y = 0.15;
   group.add(base);
@@ -585,22 +548,34 @@ function buildMarket(
   shadowTex: THREE.CanvasTexture,
   awningTex: THREE.CanvasTexture,
   lanternMats: THREE.MeshStandardMaterial[],
-): THREE.Group {
+): { group: THREE.Group; awningMat: THREE.MeshStandardMaterial } {
   const group = new THREE.Group();
   group.name = 'landmark:market';
   group.userData = { locationId: 'market' };
 
-  const woodMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.78, metalness: 0.04 });
-  const darkWoodMat = new THREE.MeshStandardMaterial({ color: 0x5c2b0c, roughness: 0.84, metalness: 0.04 });
+  const woodMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.78, metalness: 0.04 }),
+    'wood',
+  );
+  const darkWoodMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x5c2b0c, roughness: 0.84, metalness: 0.04 }),
+    'darkWood',
+  );
   const awningMat = new THREE.MeshStandardMaterial({ map: awningTex, roughness: 0.65, metalness: 0.02 });
-  const crateMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.72, metalness: 0.05 });
-  const lanternMat = new THREE.MeshStandardMaterial({
-    color: 0xfef08a,
-    emissive: 0xf59e0b,
-    emissiveIntensity: 0.35,
-    roughness: 0.25,
-    metalness: 0.35,
-  });
+  const crateMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.72, metalness: 0.05 }),
+    'crate',
+  );
+  const lanternMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfef08a,
+      emissive: 0xf59e0b,
+      emissiveIntensity: 0.35,
+      roughness: 0.25,
+      metalness: 0.35,
+    }),
+    'lantern',
+  );
   lanternMats.push(lanternMat);
 
   addContactShadow(group, shadowTex, 3.2, 2.8);
@@ -650,28 +625,46 @@ function buildMarket(
   lantern.position.set(1.85, 2.25, 1.5);
   group.add(lantern);
 
-  return group;
+  return { group, awningMat };
 }
 
 function buildPark(
   shadowTex: THREE.CanvasTexture,
   lanternMats: THREE.MeshStandardMaterial[],
   waterUniforms: WaterUniforms,
-): { group: THREE.Group; waterMesh: THREE.Mesh; waterJet: THREE.Mesh } {
+): {
+  group: THREE.Group;
+  waterMesh: THREE.Mesh;
+  waterMat: THREE.MeshPhysicalMaterial;
+  waterJet: THREE.Mesh;
+  waterJetMat: THREE.MeshBasicMaterial;
+} {
   const group = new THREE.Group();
   group.name = 'landmark:park';
   group.userData = { locationId: 'park' };
 
-  const stoneMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.78, metalness: 0.08 });
+  const stoneMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.78, metalness: 0.08 }),
+    'stone',
+  );
   const waterMat = createRipplingWaterMaterial(waterUniforms);
-  const woodMat = new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.76 });
-  const ironMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.35, metalness: 0.8 });
-  const lampGlowMat = new THREE.MeshStandardMaterial({
-    color: 0xfef9c3,
-    emissive: 0xfbbf24,
-    emissiveIntensity: 0.35,
-    roughness: 0.25,
-  });
+  const woodMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.76 }),
+    'wood',
+  );
+  const ironMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.35, metalness: 0.8 }),
+    'metal',
+  );
+  const lampGlowMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfef9c3,
+      emissive: 0xfbbf24,
+      emissiveIntensity: 0.35,
+      roughness: 0.25,
+    }),
+    'lantern',
+  );
   lanternMats.push(lampGlowMat);
 
   addContactShadow(group, shadowTex, 3.0, 3.0, 0.65);
@@ -703,13 +696,14 @@ function buildPark(
   finial.position.y = 1.8;
   group.add(finial);
 
+  const waterJetMat = new THREE.MeshBasicMaterial({
+    color: 0xe0f2fe,
+    transparent: true,
+    opacity: 0.68,
+  });
   const waterJet = new THREE.Mesh(
     new THREE.ConeGeometry(0.22, 0.58, 10),
-    new THREE.MeshBasicMaterial({
-      color: 0xe0f2fe,
-      transparent: true,
-      opacity: 0.68,
-    }),
+    waterJetMat,
   );
   waterJet.position.y = 2.15;
   group.add(waterJet);
@@ -743,7 +737,7 @@ function buildPark(
     group.add(post, globe);
   });
 
-  return { group, waterMesh, waterJet };
+  return { group, waterMesh, waterMat, waterJet, waterJetMat };
 }
 
 function buildCharacter(
@@ -1044,6 +1038,15 @@ export class TownSceneController {
   private groundMat!: THREE.MeshStandardMaterial;
   private foliageMat!: THREE.MeshStandardMaterial;
   private hillMat!: THREE.MeshStandardMaterial;
+  private plazaMat!: THREE.MeshStandardMaterial;
+  private pathMat!: THREE.MeshStandardMaterial;
+  private envThemeMaterials: THREE.MeshStandardMaterial[] = [];
+  private treeFoliageMesh!: THREE.InstancedMesh;
+  private treeCount = 0;
+  private landmarkGroups: THREE.Group[] = [];
+  private marketAwningMat: THREE.MeshStandardMaterial | null = null;
+  private awningTextures = new Map<TownTheme, THREE.CanvasTexture>();
+  private townTheme: TownTheme = 'meadow';
   private timeOfDay: TimeOfDay = 'day';
   private graphicsQuality: GraphicsQuality = 'medium';
 
@@ -1092,7 +1095,9 @@ export class TownSceneController {
   private pointer = new THREE.Vector2();
   private clock = new THREE.Clock();
   private waterMesh: THREE.Mesh | null = null;
+  private waterMat: THREE.MeshPhysicalMaterial | null = null;
   private waterJet: THREE.Mesh | null = null;
+  private waterJetMat: THREE.MeshBasicMaterial | null = null;
   private selectedAgentId: AgentId | null = null;
   private activeAgentId: AgentId | null = null;
   private followActive = false;
@@ -1108,19 +1113,22 @@ export class TownSceneController {
     initialAgents: AgentRecord[],
     callbacks: TownSceneCallbacks,
     initialQuality: GraphicsQuality = 'medium',
+    initialTheme: TownTheme = 'meadow',
   ) {
     this.container = container;
     this.callbacks = callbacks;
     this.graphicsQuality = initialQuality;
+    this.townTheme = initialTheme;
     this.isSoftwareGl = detectSoftwareWebGL();
 
     const width = Math.max(container.clientWidth, 1);
     const height = Math.max(container.clientHeight, 1);
 
+    const initialAtmo = getThemeAtmosphere(initialTheme, 'day', 'summer');
     this.scene = new THREE.Scene();
-    const skyColor = new THREE.Color(ATMOSPHERE_PRESETS.day.skyHex);
+    const skyColor = new THREE.Color(initialAtmo.skyHex);
     this.scene.background = skyColor;
-    this.scene.fog = new THREE.FogExp2(ATMOSPHERE_PRESETS.day.skyHex, 0.015);
+    this.scene.fog = new THREE.FogExp2(initialAtmo.skyHex, initialAtmo.fogDensity);
 
     this.camera = new THREE.PerspectiveCamera(46, width / height, 0.5, 160);
     this.camera.position.set(16, 13.5, 19.5);
@@ -1208,6 +1216,7 @@ export class TownSceneController {
     this.buildAgents(initialAgents);
     this.buildParticlesAndArc();
     this.setGraphicsQuality(initialQuality);
+    this.setTheme(initialTheme);
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
@@ -1233,7 +1242,7 @@ export class TownSceneController {
     ground.receiveShadow = true;
     this.scene.add(ground);
 
-    const plazaMat = new THREE.MeshStandardMaterial({
+    this.plazaMat = new THREE.MeshStandardMaterial({
       map: cobbleTex,
       roughness: 0.88,
       metalness: 0.04,
@@ -1241,30 +1250,38 @@ export class TownSceneController {
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     });
-    const plaza = new THREE.Mesh(new THREE.CircleGeometry(4.8, 32), plazaMat);
+    const plaza = new THREE.Mesh(new THREE.CircleGeometry(4.8, 32), this.plazaMat);
     plaza.rotation.x = -Math.PI / 2;
     plaza.position.y = 0.02;
     plaza.receiveShadow = true;
     this.scene.add(plaza);
 
-    const pathMat = new THREE.MeshStandardMaterial({
+    this.pathMat = new THREE.MeshStandardMaterial({
       color: 0xb6bec8,
       roughness: 0.9,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     });
-    const nsPath = new THREE.Mesh(new THREE.PlaneGeometry(2.3, 18.5), pathMat);
+    const nsPath = new THREE.Mesh(new THREE.PlaneGeometry(2.3, 18.5), this.pathMat);
     nsPath.rotation.x = -Math.PI / 2;
     nsPath.position.y = 0.018;
     nsPath.receiveShadow = true;
-    const ewPath = new THREE.Mesh(new THREE.PlaneGeometry(18.5, 2.3), pathMat);
+    const ewPath = new THREE.Mesh(new THREE.PlaneGeometry(18.5, 2.3), this.pathMat);
     ewPath.rotation.x = -Math.PI / 2;
     ewPath.position.set(0, 0.018, -0.5);
     ewPath.receiveShadow = true;
     this.scene.add(nsPath, ewPath);
 
-    const monumentMat = new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.7, metalness: 0.1 });
+    const monumentMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.7, metalness: 0.1 }),
+      'trim',
+    );
+    const orbMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.22, metalness: 0.88 }),
+      'gold',
+    );
+    this.envThemeMaterials.push(monumentMat, orbMat);
     const base = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 1.05, 0.25, 12), monumentMat);
     base.position.y = 0.125;
     base.castShadow = true;
@@ -1272,10 +1289,7 @@ export class TownSceneController {
     const obelisk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.32, 1.1, 8), monumentMat);
     obelisk.position.y = 0.78;
     obelisk.castShadow = true;
-    const orb = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.22, 0),
-      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.22, metalness: 0.88 }),
-    );
+    const orb = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), orbMat);
     orb.position.y = 1.5;
     orb.castShadow = true;
     this.scene.add(base, obelisk, orb);
@@ -1286,9 +1300,14 @@ export class TownSceneController {
       const dist = 17.5 + (i % 3) * 3.8;
       treePositions.push([Math.cos(angle) * dist, Math.sin(angle) * dist]);
     }
+    this.treeCount = treePositions.length;
 
     const trunkGeo = new THREE.CylinderGeometry(0.18, 0.24, 1.4, 7);
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.88 });
+    const trunkMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.88 }),
+      'darkWood',
+    );
+    this.envThemeMaterials.push(trunkMat);
     const foliageGeo = new THREE.ConeGeometry(1.15, 2.6, 7);
     this.foliageMat = createWindSwayMaterial(
       { color: 0xffffff, roughness: 0.85 },
@@ -1298,6 +1317,7 @@ export class TownSceneController {
 
     const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treePositions.length);
     const foliage = new THREE.InstancedMesh(foliageGeo, this.foliageMat, treePositions.length);
+    this.treeFoliageMesh = foliage;
     trunks.castShadow = true;
     foliage.castShadow = true;
     const dummy = new THREE.Object3D();
@@ -1315,8 +1335,8 @@ export class TownSceneController {
       dummy.updateMatrix();
       foliage.setMatrixAt(idx, dummy.matrix);
 
-      const shade = idx % 3 === 0 ? 0x3f6e42 : idx % 3 === 1 ? 0x4d7c4a : 0x355e3b;
-      tint.setHex(shade);
+      const pal = TREE_CANOPY_PALETTES.meadow;
+      tint.setHex(pal[idx % pal.length]);
       foliage.setColorAt(idx, tint);
     });
 
@@ -1344,11 +1364,20 @@ export class TownSceneController {
     this.disposables.push(this.detailsHandle);
   }
 
+  private getOrCreateAwningTexture(theme: TownTheme): THREE.CanvasTexture {
+    const existing = this.awningTextures.get(theme);
+    if (existing) return existing;
+    const tex = createThemedAwningTexture(theme, this.renderer.capabilities.getMaxAnisotropy());
+    this.awningTextures.set(theme, tex);
+    this.disposables.push(tex);
+    return tex;
+  }
+
   private buildLandmarks(): void {
     const shadowTex = createContactShadowTexture();
     this.sharedShadowTex = shadowTex;
-    const awningTex = createAwningStripeTexture(this.renderer.capabilities.getMaxAnisotropy());
-    this.disposables.push(shadowTex, awningTex);
+    const awningTex = this.getOrCreateAwningTexture(this.townTheme);
+    this.disposables.push(shadowTex);
 
     const townHall = buildTownHall(shadowTex, this.lanternMaterials);
     townHall.position.copy(LANDMARKS.town_hall.center);
@@ -1359,6 +1388,7 @@ export class TownSceneController {
       }
     });
     this.scene.add(townHall);
+    this.landmarkGroups.push(townHall);
     this.clickableObjects.push(townHall);
 
     const workshop = buildWorkshop(shadowTex, this.lanternMaterials);
@@ -1371,25 +1401,31 @@ export class TownSceneController {
       }
     });
     this.scene.add(workshop);
+    this.landmarkGroups.push(workshop);
     this.clickableObjects.push(workshop);
 
-    const market = buildMarket(shadowTex, awningTex, this.lanternMaterials);
-    market.position.copy(LANDMARKS.market.center);
-    market.rotation.y = Math.PI / 2;
-    market.traverse((obj) => {
+    const marketBuilt = buildMarket(shadowTex, awningTex, this.lanternMaterials);
+    this.marketAwningMat = marketBuilt.awningMat;
+    marketBuilt.group.position.copy(LANDMARKS.market.center);
+    marketBuilt.group.rotation.y = Math.PI / 2;
+    marketBuilt.group.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh && !((obj as THREE.Mesh).material as THREE.Material).transparent) {
         obj.castShadow = true;
         obj.receiveShadow = true;
       }
     });
-    this.scene.add(market);
-    this.clickableObjects.push(market);
+    this.scene.add(marketBuilt.group);
+    this.landmarkGroups.push(marketBuilt.group);
+    this.clickableObjects.push(marketBuilt.group);
 
     const parkBuilt = buildPark(shadowTex, this.lanternMaterials, this.waterUniforms);
     parkBuilt.group.position.copy(LANDMARKS.park.center);
     this.waterMesh = parkBuilt.waterMesh;
+    this.waterMat = parkBuilt.waterMat;
     this.waterJet = parkBuilt.waterJet;
+    this.waterJetMat = parkBuilt.waterJetMat;
     this.scene.add(parkBuilt.group);
+    this.landmarkGroups.push(parkBuilt.group);
     this.clickableObjects.push(parkBuilt.group);
   }
 
@@ -1517,25 +1553,71 @@ export class TownSceneController {
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
   }
 
+  public setTheme(theme: TownTheme): void {
+    this.townTheme = theme;
+
+    for (const mat of this.envThemeMaterials) {
+      applyThemeToMaterial(mat, theme);
+    }
+    for (const grp of this.landmarkGroups) {
+      applyThemeToObjectTree(grp, theme);
+    }
+    this.plotGroups.forEach((grp) => {
+      applyThemeToObjectTree(grp, theme);
+    });
+    this.detailsHandle?.applyTheme(theme);
+
+    if (this.treeFoliageMesh) {
+      const pal = TREE_CANOPY_PALETTES[theme];
+      for (let i = 0; i < this.treeCount; i++) {
+        _targetColor.setHex(pal[i % pal.length]);
+        this.treeFoliageMesh.setColorAt(i, _targetColor);
+      }
+      if (this.treeFoliageMesh.instanceColor) {
+        this.treeFoliageMesh.instanceColor.needsUpdate = true;
+      }
+    }
+
+    if (this.marketAwningMat) {
+      this.marketAwningMat.map = this.getOrCreateAwningTexture(theme);
+      this.marketAwningMat.needsUpdate = true;
+    }
+
+    this.setAtmosphere(this.timeOfDay, this.weatherMode);
+  }
+
   public setAtmosphere(timeOfDay: TimeOfDay, weather: WeatherMode): void {
     this.timeOfDay = timeOfDay;
     this.weatherMode = weather;
 
     if (weather === 'rain') {
       this.weatherPoints.visible = true;
-      this.weatherMat.color.setHex(0xbae6fd);
+      this.weatherMat.color.setHex(
+        this.townTheme === 'fantasy_night' ? 0xc4b5fd : 0xbae6fd,
+      );
       this.weatherMat.size = 0.14;
       this.weatherMat.opacity = 0.78;
     } else if (weather === 'winter') {
       this.weatherPoints.visible = true;
-      this.weatherMat.color.setHex(0xf8fafc);
+      this.weatherMat.color.setHex(
+        this.townTheme === 'fantasy_night' ? 0xe0e7ff : 0xf8fafc,
+      );
       this.weatherMat.size = 0.22;
       this.weatherMat.opacity = 0.88;
     } else {
-      // Summer: crisp clear sky by day, gentle fireflies at dusk/night
-      const evening = timeOfDay === 'twilight' || timeOfDay === 'night';
-      this.weatherPoints.visible = evening;
-      this.weatherMat.color.setHex(0xfde047);
+      // Summer: crisp clear sky by day, gentle fireflies at dusk/night or in Fantasy Night / Solarpunk
+      const showMotes =
+        this.townTheme === 'fantasy_night' ||
+        timeOfDay === 'twilight' ||
+        timeOfDay === 'night';
+      this.weatherPoints.visible = showMotes;
+      this.weatherMat.color.setHex(
+        this.townTheme === 'fantasy_night'
+          ? 0xd8b4fe
+          : this.townTheme === 'solarpunk_oasis'
+            ? 0x67e8f9
+            : 0xfde047,
+      );
       this.weatherMat.size = 0.22;
       this.weatherMat.opacity = 0.88;
     }
@@ -1606,9 +1688,9 @@ export class TownSceneController {
       const meta = PLOT_META[plotId];
       let nextGroup: THREE.Group;
       if (!s) {
-        nextGroup = buildEmptyPlotMesh(plotId, isSelected);
+        nextGroup = buildEmptyPlotMesh(plotId, isSelected, this.townTheme);
       } else if (s.status === 'building') {
-        nextGroup = buildScaffoldingMesh(s, this.sharedShadowTex, isSelected);
+        nextGroup = buildScaffoldingMesh(s, this.sharedShadowTex, isSelected, this.townTheme);
       } else {
         nextGroup = buildCompletedStructureMesh(
           s,
@@ -1616,6 +1698,7 @@ export class TownSceneController {
           this.lanternMaterials,
           isSelected,
           this.windUniforms,
+          this.townTheme,
         );
       }
 
@@ -1861,90 +1944,95 @@ export class TownSceneController {
         1 - Math.exp(-2.5 * delta),
       );
 
-      const preset = ATMOSPHERE_PRESETS[this.timeOfDay];
-      const atmoLerp = 1 - Math.exp(-2.8 * delta);
+      const spec = getThemeAtmosphere(this.townTheme, this.timeOfDay, this.weatherMode);
+      const atmoLerp = 1 - Math.exp(-3.2 * delta);
 
-      _targetColor.setHex(preset.skyHex);
+      _targetColor.setHex(spec.skyHex);
       if (this.scene.background instanceof THREE.Color) {
         this.scene.background.lerp(_targetColor, atmoLerp);
       }
       if (this.scene.fog instanceof THREE.FogExp2) {
         this.scene.fog.color.lerp(_targetColor, atmoLerp);
+        this.scene.fog.density = THREE.MathUtils.lerp(
+          this.scene.fog.density,
+          spec.fogDensity,
+          atmoLerp,
+        );
       }
 
-      _targetColor.setHex(preset.hemiSkyHex);
+      _targetColor.setHex(spec.hemiSkyHex);
       this.hemiLight.color.lerp(_targetColor, atmoLerp);
-      _targetColor.setHex(preset.hemiGroundHex);
+      _targetColor.setHex(spec.hemiGroundHex);
       this.hemiLight.groundColor.lerp(_targetColor, atmoLerp);
-      this.hemiLight.intensity = THREE.MathUtils.lerp(this.hemiLight.intensity, preset.hemiIntensity, atmoLerp);
-
-      _targetColor.setHex(preset.sunHex);
-      this.sunLight.color.lerp(_targetColor, atmoLerp);
-      const sunStormDim = this.weatherMode === 'rain' ? 0.72 : 1.0;
-      this.sunLight.intensity = THREE.MathUtils.lerp(
-        this.sunLight.intensity,
-        preset.sunIntensity * sunStormDim,
+      this.hemiLight.intensity = THREE.MathUtils.lerp(
+        this.hemiLight.intensity,
+        spec.hemiIntensity,
         atmoLerp,
       );
-      this.sunLight.position.lerp(preset.sunPos, atmoLerp);
 
-      _targetColor.setHex(preset.rimHex);
+      _targetColor.setHex(spec.sunHex);
+      this.sunLight.color.lerp(_targetColor, atmoLerp);
+      this.sunLight.intensity = THREE.MathUtils.lerp(
+        this.sunLight.intensity,
+        spec.sunIntensity,
+        atmoLerp,
+      );
+      this.sunLight.position.lerp(spec.sunPos, atmoLerp);
+
+      _targetColor.setHex(spec.rimHex);
       this.rimLight.color.lerp(_targetColor, atmoLerp);
-      this.rimLight.intensity = THREE.MathUtils.lerp(this.rimLight.intensity, preset.rimIntensity, atmoLerp);
+      this.rimLight.intensity = THREE.MathUtils.lerp(
+        this.rimLight.intensity,
+        spec.rimIntensity,
+        atmoLerp,
+      );
 
-      // Automatically brighten glowing windows, street lanterns & torches at dusk, night, or storms
-      const stormEmissive = this.weatherMode === 'rain' ? 1.5 : this.weatherMode === 'winter' ? 1.3 : 0;
-      const targetEmissive = Math.max(preset.lanternEmissive, stormEmissive);
+      // Smoothly modulate glowing windows, street lanterns & torches for active theme & lighting
       for (const mat of this.lanternMaterials) {
-        mat.emissiveIntensity = THREE.MathUtils.lerp(mat.emissiveIntensity, targetEmissive, atmoLerp);
+        const isWindow = mat.userData.themeRole === 'window';
+        const goalEmissive = isWindow ? spec.windowEmissive : spec.lanternEmissive;
+        mat.emissiveIntensity = THREE.MathUtils.lerp(mat.emissiveIntensity, goalEmissive, atmoLerp);
       }
 
-      const isNightOrDusk = this.timeOfDay === 'twilight' || this.timeOfDay === 'night';
-      const isStorm = this.weatherMode === 'rain' || this.weatherMode === 'winter';
       const baseWarmGoal =
-        this.graphicsQuality === 'low'
-          ? 0
-          : isNightOrDusk
-            ? 2.7
-            : isStorm
-              ? 1.9
-              : this.timeOfDay === 'dawn'
-                ? 0.65
-                : 0;
+        this.graphicsQuality === 'low' ? 0 : spec.pointLightBaseIntensity;
       for (let i = 0; i < this.warmLights.length; i++) {
         const pt = this.warmLights[i];
         const allowedForQuality = this.graphicsQuality === 'high' || i < 2;
         const flicker = 1 + Math.sin(elapsed * 5.2 + i * 1.9) * 0.05;
         const goal = allowedForQuality ? baseWarmGoal * flicker : 0;
         pt.intensity = THREE.MathUtils.lerp(pt.intensity, goal, atmoLerp);
+        _targetColor.setHex(spec.pointLightColors[i % spec.pointLightColors.length]);
+        pt.color.lerp(_targetColor, atmoLerp);
       }
 
-      // 1b. Seasonal Ground & Foliage Palette Shift (Summer / Rain / Winter)
-      const groundTarget =
-        this.weatherMode === 'winter'
-          ? 0xcbd5e1
-          : this.weatherMode === 'rain'
-            ? 0x557548
-            : 0x739558;
-      const foliageTarget =
-        this.weatherMode === 'winter'
-          ? 0xdbeafe
-          : this.weatherMode === 'rain'
-            ? 0xdbeee4
-            : 0xffffff;
-      const hillTarget =
-        this.weatherMode === 'winter'
-          ? 0xb4c6d9
-          : this.weatherMode === 'rain'
-            ? 0x476640
-            : 0x5c7c48;
-
-      _targetColor.setHex(groundTarget);
+      // 1b. Theme & Seasonal Ground, Foliage, Hills, Plaza, Paths, and Fountain Water
+      _targetColor.setHex(spec.groundHex);
       this.groundMat.color.lerp(_targetColor, atmoLerp);
-      _targetColor.setHex(foliageTarget);
+      _targetColor.setHex(spec.foliageTintHex);
       this.foliageMat.color.lerp(_targetColor, atmoLerp);
-      _targetColor.setHex(hillTarget);
+      _targetColor.setHex(spec.hillHex);
       this.hillMat.color.lerp(_targetColor, atmoLerp);
+      _targetColor.setHex(spec.plazaTintHex);
+      this.plazaMat.color.lerp(_targetColor, atmoLerp);
+      _targetColor.setHex(spec.pathHex);
+      this.pathMat.color.lerp(_targetColor, atmoLerp);
+
+      if (this.waterMat) {
+        _targetColor.setHex(spec.waterColorHex);
+        this.waterMat.color.lerp(_targetColor, atmoLerp);
+        _targetColor.setHex(spec.waterEmissiveHex);
+        this.waterMat.emissive.lerp(_targetColor, atmoLerp);
+        this.waterMat.emissiveIntensity = THREE.MathUtils.lerp(
+          this.waterMat.emissiveIntensity,
+          spec.waterEmissiveIntensity,
+          atmoLerp,
+        );
+      }
+      if (this.waterJetMat) {
+        _targetColor.setHex(spec.waterJetHex);
+        this.waterJetMat.color.lerp(_targetColor, atmoLerp);
+      }
 
       // 2. Smooth camera tracking (Follow Mode or Focus Goal)
       if (this.followActive && this.activeAgentId) {

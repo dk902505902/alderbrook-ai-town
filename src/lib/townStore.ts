@@ -23,6 +23,7 @@ import {
   createInitialLogs,
   DEFAULT_TOWN_METRICS,
   MAX_TOWN_AGENTS,
+  normalizeTownTheme,
   normalizeWeatherMode,
   type AgentId,
   type AgentRecord,
@@ -37,6 +38,7 @@ import {
   type TownLogItem,
   type TownMetrics,
   type TownStructure,
+  type TownTheme,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -47,6 +49,7 @@ export interface LoadedTownState {
   metrics: TownMetrics;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
+  theme: TownTheme;
   agents: AgentRecord[];
   structures: TownStructure[];
   logs: TownLogItem[];
@@ -150,6 +153,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
       morale: DEFAULT_TOWN_METRICS.morale,
       timeOfDay: 'day',
       weather: 'summer',
+      theme: 'meadow',
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -188,6 +192,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
       metrics: { ...DEFAULT_TOWN_METRICS },
       timeOfDay: 'day',
       weather: 'summer',
+      theme: 'meadow',
       agents: initialAgents,
       structures: [],
       logs: initialLogs,
@@ -293,7 +298,8 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
     townData.orderLevel === undefined ||
     townData.morale === undefined ||
     townData.timeOfDay === undefined ||
-    townData.weather === undefined;
+    townData.weather === undefined ||
+    townData.theme === undefined;
 
   if (needsTownBackfill || agentsNeedingBackfill.length > 0) {
     const migrationBatch = writeBatch(db);
@@ -304,6 +310,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
         morale: clampScore(townData.morale, DEFAULT_TOWN_METRICS.morale),
         timeOfDay: (townData.timeOfDay as TimeOfDay) || 'day',
         weather: normalizeWeatherMode(townData.weather),
+        theme: normalizeTownTheme(townData.theme),
         updatedAt: serverTimestamp(),
       });
     }
@@ -372,6 +379,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
     },
     timeOfDay: (townData.timeOfDay as TimeOfDay) || 'day',
     weather: normalizeWeatherMode(townData.weather),
+    theme: normalizeTownTheme(townData.theme),
     agents: orderedAgents,
     structures,
     logs: logs.length > 0 ? logs : createInitialLogs(),
@@ -638,7 +646,7 @@ export async function persistWeatherShift(
 
 export async function persistEnvironmentSettings(
   uid: string,
-  updates: { timeOfDay?: TimeOfDay; weather?: WeatherMode },
+  updates: { timeOfDay?: TimeOfDay; weather?: WeatherMode; theme?: TownTheme },
 ): Promise<void> {
   const path = `towns/${uid}`;
   try {
@@ -877,6 +885,7 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
     morale: DEFAULT_TOWN_METRICS.morale,
     timeOfDay: 'day',
     weather: 'summer',
+    theme: 'meadow',
     updatedAt: serverTimestamp(),
   });
 
@@ -922,6 +931,7 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
     metrics: { ...DEFAULT_TOWN_METRICS },
     timeOfDay: 'day',
     weather: 'summer',
+    theme: 'meadow',
     agents: initialAgents,
     structures: [],
     logs: initialLogs,

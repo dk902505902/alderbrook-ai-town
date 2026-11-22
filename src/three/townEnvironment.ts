@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import { ALL_PLOT_IDS, PLOT_META } from '../types/town.ts';
+import { ALL_PLOT_IDS, PLOT_META, type TownTheme } from '../types/town.ts';
+import {
+  applyThemeToMaterial,
+  COBBLE_PALETTES,
+  GRASS_TUFT_PALETTES,
+  tagThemeMaterial,
+  WILDFLOWER_PALETTES,
+} from './townThemes.ts';
 
 export interface WindUniforms {
   uTime: { value: number };
@@ -14,6 +21,7 @@ export interface TownDetailsHandle {
   windUniforms: WindUniforms;
   setDensityFactor: (factor: number) => void;
   setLanternShadows: (enabled: boolean) => void;
+  applyTheme: (theme: TownTheme) => void;
   dispose: () => void;
 }
 
@@ -306,10 +314,13 @@ export function buildScatteredTownDetails(
   // -------------------------------------------------------------------------
   const stemGeo = new THREE.CylinderGeometry(0.018, 0.024, 0.24, 5);
   stemGeo.translate(0, 0.12, 0);
-  const stemMat = createWindSwayMaterial(
-    { color: 0x4d7c0f, roughness: 0.85 },
-    windUniforms,
-    { swayScale: 0.08, heightMin: 0.0, heightRange: 0.28 },
+  const stemMat = tagThemeMaterial(
+    createWindSwayMaterial(
+      { color: 0x4d7c0f, roughness: 0.85 },
+      windUniforms,
+      { swayScale: 0.08, heightMin: 0.0, heightRange: 0.28 },
+    ),
+    'foliage',
   );
   const bloomGeo = new THREE.DodecahedronGeometry(0.075, 0);
   bloomGeo.translate(0, 0.25, 0);
@@ -372,7 +383,10 @@ export function buildScatteredTownDetails(
   railTop.dispose();
   railMid.dispose();
 
-  const fenceMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.85 });
+  const fenceMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.85 }),
+    'wood',
+  );
   disposables.push(fenceGeo, fenceMat);
 
   const fencePlacements: Array<[number, number, number]> = [];
@@ -423,19 +437,25 @@ export function buildScatteredTownDetails(
   lPole.dispose();
   lCap.dispose();
 
-  const lanternFrameMat = new THREE.MeshStandardMaterial({
-    color: 0x1e293b,
-    roughness: 0.42,
-    metalness: 0.75,
-  });
+  const lanternFrameMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.42,
+      metalness: 0.75,
+    }),
+    'metal',
+  );
   const lanternBulbGeo = new THREE.OctahedronGeometry(0.16, 0);
   lanternBulbGeo.translate(0, 2.13, 0);
-  const lanternBulbMat = new THREE.MeshStandardMaterial({
-    color: 0xfef3c7,
-    emissive: 0xf59e0b,
-    emissiveIntensity: 0.35,
-    roughness: 0.22,
-  });
+  const lanternBulbMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfef3c7,
+      emissive: 0xf59e0b,
+      emissiveIntensity: 0.35,
+      roughness: 0.22,
+    }),
+    'lantern',
+  );
   lanternMaterials.push(lanternBulbMat);
   disposables.push(lanternFrameGeo, lanternFrameMat, lanternBulbGeo, lanternBulbMat);
 
@@ -493,12 +513,15 @@ export function buildScatteredTownDetails(
 
   const torchFlameGeo = new THREE.ConeGeometry(0.14, 0.34, 6);
   torchFlameGeo.translate(0, 1.15, 0);
-  const torchFlameMat = new THREE.MeshStandardMaterial({
-    color: 0xfde047,
-    emissive: 0xf97316,
-    emissiveIntensity: 0.45,
-    roughness: 0.25,
-  });
+  const torchFlameMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: 0xfde047,
+      emissive: 0xf97316,
+      emissiveIntensity: 0.45,
+      roughness: 0.25,
+    }),
+    'torchFlame',
+  );
   lanternMaterials.push(torchFlameMat);
   disposables.push(torchStandGeo, torchFlameGeo, torchFlameMat);
 
@@ -557,6 +580,34 @@ export function buildScatteredTownDetails(
       fenceMesh.castShadow = enabled;
       lanternFrameMesh.castShadow = enabled;
       torchStandMesh.castShadow = enabled;
+    },
+    applyTheme: (theme: TownTheme) => {
+      const cPal = COBBLE_PALETTES[theme];
+      for (let i = 0; i < cobbleMax; i++) {
+        color.setHex(cPal[i % cPal.length]);
+        cobbleMesh.setColorAt(i, color);
+      }
+      if (cobbleMesh.instanceColor) cobbleMesh.instanceColor.needsUpdate = true;
+
+      const gPal = GRASS_TUFT_PALETTES[theme];
+      for (let i = 0; i < totalGrass; i++) {
+        color.setHex(gPal[i % gPal.length]);
+        grassMesh.setColorAt(i, color);
+      }
+      if (grassMesh.instanceColor) grassMesh.instanceColor.needsUpdate = true;
+
+      const fPal = WILDFLOWER_PALETTES[theme];
+      for (let i = 0; i < totalFlowers; i++) {
+        color.setHex(fPal[i % fPal.length]);
+        bloomMesh.setColorAt(i, color);
+      }
+      if (bloomMesh.instanceColor) bloomMesh.instanceColor.needsUpdate = true;
+
+      applyThemeToMaterial(stemMat, theme);
+      applyThemeToMaterial(fenceMat, theme);
+      applyThemeToMaterial(lanternFrameMat, theme);
+      applyThemeToMaterial(lanternBulbMat, theme);
+      applyThemeToMaterial(torchFlameMat, theme);
     },
     dispose: () => {
       for (const mat of [lanternBulbMat, torchFlameMat]) {

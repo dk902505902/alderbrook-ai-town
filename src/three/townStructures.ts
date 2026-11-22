@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import type { PlotId, StructureType, TownStructure } from '../types/town.ts';
+import type { PlotId, StructureType, TownStructure, TownTheme } from '../types/town.ts';
 import { createWindSwayMaterial, type WindUniforms } from './townEnvironment.ts';
+import { applyThemeToObjectTree, tagThemeMaterial, type ThemeMaterialRole } from './townThemes.ts';
 
 function addPart(
   parent: THREE.Group,
@@ -45,13 +46,17 @@ function createWindowMat(
   lanternMaterials: THREE.MeshStandardMaterial[],
   tint = 0xfef3c7,
   emissive = 0xf59e0b,
+  role: ThemeMaterialRole = 'window',
 ): THREE.MeshStandardMaterial {
-  const mat = new THREE.MeshStandardMaterial({
-    color: tint,
-    emissive,
-    emissiveIntensity: 0.25,
-    roughness: 0.28,
-  });
+  const mat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: tint,
+      emissive,
+      emissiveIntensity: 0.25,
+      roughness: 0.28,
+    }),
+    role,
+  );
   lanternMaterials.push(mat);
   return mat;
 }
@@ -59,24 +64,31 @@ function createWindowMat(
 export function buildEmptyPlotMesh(
   plotId: PlotId,
   isSelected: boolean,
+  theme: TownTheme = 'meadow',
 ): THREE.Group {
   const group = new THREE.Group();
   group.userData.plotId = plotId;
 
-  const padMat = new THREE.MeshStandardMaterial({
-    color: isSelected ? 0xc2b280 : 0x9ca3af,
-    roughness: 0.95,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
-  });
+  const padMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: isSelected ? 0xc2b280 : 0x9ca3af,
+      roughness: 0.95,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    }),
+    'stone',
+  );
   const pad = addPart(group, new THREE.CylinderGeometry(1.85, 1.95, 0.05, 8), padMat, 0, 0.025, 0);
   pad.rotation.y = Math.PI / 8;
 
-  const stakeMat = new THREE.MeshStandardMaterial({
-    color: isSelected ? 0xf59e0b : 0x78350f,
-    roughness: 0.85,
-  });
+  const stakeMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({
+      color: isSelected ? 0xf59e0b : 0x78350f,
+      roughness: 0.85,
+    }),
+    isSelected ? 'gold' : 'wood',
+  );
   const offsets: Array<[number, number]> = [
     [-1.15, -1.15],
     [1.15, -1.15],
@@ -111,6 +123,9 @@ export function buildEmptyPlotMesh(
   );
   hitProxy.userData.plotId = plotId;
 
+  if (theme !== 'meadow') {
+    applyThemeToObjectTree(group, theme);
+  }
   return group;
 }
 
@@ -118,14 +133,15 @@ export function buildScaffoldingMesh(
   structure: TownStructure,
   shadowTex: THREE.Texture,
   isSelected: boolean,
+  theme: TownTheme = 'meadow',
 ): THREE.Group {
   const group = new THREE.Group();
   group.userData.plotId = structure.plotId;
   addContactShadow(group, shadowTex, 4.4);
 
-  const stoneMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.88 });
-  const timberMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.84 });
-  const coreMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.8 });
+  const stoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.88 }), 'stone');
+  const timberMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.84 }), 'wood');
+  const coreMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.8 }), 'wall');
 
   // Foundation plinth
   addPart(group, new THREE.BoxGeometry(2.6, 0.24, 2.6), stoneMat, 0, 0.12, 0);
@@ -171,6 +187,9 @@ export function buildScaffoldingMesh(
     ring.rotation.x = -Math.PI / 2;
   }
 
+  if (theme !== 'meadow') {
+    applyThemeToObjectTree(group, theme);
+  }
   return group;
 }
 
@@ -180,21 +199,22 @@ export function buildCompletedStructureMesh(
   lanternMaterials: THREE.MeshStandardMaterial[],
   isSelected: boolean,
   windUniforms?: WindUniforms,
+  theme: TownTheme = 'meadow',
 ): THREE.Group {
   const group = new THREE.Group();
   group.userData.plotId = structure.plotId;
   addContactShadow(group, shadowTex, 4.8);
 
-  const plinthMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 });
-  const woodMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.82 });
+  const plinthMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 }), 'stone');
+  const woodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.82 }), 'wood');
   const winMat = createWindowMat(lanternMaterials);
 
   const type: StructureType = structure.structureType;
 
   if (type === 'bakery') {
-    const brickMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.78 });
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.65 });
-    const awningMat = new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.6 });
+    const brickMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.78 }), 'wall');
+    const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.65 }), 'roofPrimary');
+    const awningMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.6 }), 'banner');
 
     addPart(group, new THREE.BoxGeometry(2.6, 0.24, 2.4), plinthMat, 0, 0.12, 0);
     addPart(group, new THREE.BoxGeometry(2.3, 1.55, 2.0), brickMat, 0, 1.01, 0);
@@ -206,9 +226,9 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.BoxGeometry(0.58, 0.52, 0.08), winMat, 0.48, 0.95, 1.02);
     addPart(group, new THREE.BoxGeometry(0.48, 0.44, 0.08), winMat, 1.16, 1.0, 0.1);
   } else if (type === 'watchtower') {
-    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.84 });
-    const slateMat = new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.58, metalness: 0.12 });
-    const beaconMat = createWindowMat(lanternMaterials, 0xfef08a, 0xfacc15);
+    const stoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.84 }), 'stone');
+    const slateMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.58, metalness: 0.12 }), 'roofPrimary');
+    const beaconMat = createWindowMat(lanternMaterials, 0xfef08a, 0xfacc15, 'lantern');
 
     addPart(group, new THREE.CylinderGeometry(1.45, 1.65, 0.35, 8), stoneMat, 0, 0.175, 0);
     addPart(group, new THREE.CylinderGeometry(0.92, 1.18, 2.55, 8), stoneMat, 0, 1.6, 0);
@@ -217,21 +237,27 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.SphereGeometry(0.22, 8, 6), beaconMat, 0, 3.3, 0);
     addPart(group, new THREE.BoxGeometry(0.46, 0.82, 0.1), woodMat, 0, 0.76, 1.06);
   } else if (type === 'greenhouse') {
-    const ironMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.4, metalness: 0.55 });
-    const glassMat = new THREE.MeshStandardMaterial({
-      color: 0xa7f3d0,
-      roughness: 0.15,
-      metalness: 0.1,
-      transparent: true,
-      opacity: 0.62,
-    });
-    const foliageMat = windUniforms
-      ? createWindSwayMaterial({ color: 0x16a34a, roughness: 0.85 }, windUniforms, {
-          swayScale: 0.06,
-          heightMin: 0.0,
-          heightRange: 0.5,
-        })
-      : new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.85 });
+    const ironMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.4, metalness: 0.55 }), 'metal');
+    const glassMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({
+        color: 0xa7f3d0,
+        roughness: 0.15,
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.62,
+      }),
+      'glass',
+    );
+    const foliageMat = tagThemeMaterial(
+      windUniforms
+        ? createWindSwayMaterial({ color: 0x16a34a, roughness: 0.85 }, windUniforms, {
+            swayScale: 0.06,
+            heightMin: 0.0,
+            heightRange: 0.5,
+          })
+        : new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.85 }),
+      'foliage',
+    );
 
     addPart(group, new THREE.BoxGeometry(2.7, 0.45, 2.3), plinthMat, 0, 0.225, 0);
     addPart(group, new THREE.BoxGeometry(2.45, 1.25, 2.05), glassMat, 0, 1.08, 0);
@@ -246,16 +272,19 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.ConeGeometry(0.16, 0.45, 5), foliageMat, 1.12, 0.28, 1.32);
     addPart(group, new THREE.BoxGeometry(0.32, 0.36, 0.08), winMat, 0, 1.15, 1.04);
   } else if (type === 'windmill') {
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.8 });
-    const capMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.65 });
-    const sailMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.72 });
-    const wheatMat = windUniforms
-      ? createWindSwayMaterial({ color: 0xeab308, roughness: 0.82 }, windUniforms, {
-          swayScale: 0.09,
-          heightMin: 0.0,
-          heightRange: 0.45,
-        })
-      : new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.82 });
+    const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.8 }), 'wall');
+    const capMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.65 }), 'roofPrimary');
+    const sailMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.72 }), 'trim');
+    const wheatMat = tagThemeMaterial(
+      windUniforms
+        ? createWindSwayMaterial({ color: 0xeab308, roughness: 0.82 }, windUniforms, {
+            swayScale: 0.09,
+            heightMin: 0.0,
+            heightRange: 0.45,
+          })
+        : new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.82 }),
+      'crop',
+    );
 
     addPart(group, new THREE.CylinderGeometry(1.35, 1.55, 0.32, 10), plinthMat, 0, 0.16, 0);
     addPart(group, new THREE.CylinderGeometry(0.88, 1.18, 2.65, 10), wallMat, 0, 1.64, 0);
@@ -281,8 +310,8 @@ export function buildCompletedStructureMesh(
     group.add(rotor);
     group.userData.windmillRotor = rotor;
   } else if (type === 'library') {
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.78 });
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.62 });
+    const wallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.78 }), 'wall');
+    const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.62 }), 'roofPrimary');
 
     addPart(group, new THREE.BoxGeometry(2.8, 0.28, 2.4), plinthMat, 0, 0.14, 0);
     addPart(group, new THREE.BoxGeometry(2.4, 1.65, 1.95), wallMat, 0, 1.1, 0);
@@ -293,15 +322,18 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.BoxGeometry(0.42, 0.6, 0.08), winMat, -0.82, 1.15, 0.99);
     addPart(group, new THREE.BoxGeometry(0.42, 0.6, 0.08), winMat, 0.82, 1.15, 0.99);
   } else if (type === 'granary') {
-    const timberMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.8 });
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.7 });
-    const crateMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.82 });
+    const timberMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.8 }), 'wood');
+    const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.7 }), 'roofPrimary');
+    const crateMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.82 }), 'crate');
     const cropMat = windUniforms
-      ? createWindSwayMaterial({ color: 0xd97706, roughness: 0.85 }, windUniforms, {
-          swayScale: 0.08,
-          heightMin: 0.0,
-          heightRange: 0.42,
-        })
+      ? tagThemeMaterial(
+          createWindSwayMaterial({ color: 0xd97706, roughness: 0.85 }, windUniforms, {
+            swayScale: 0.08,
+            heightMin: 0.0,
+            heightRange: 0.42,
+          }),
+          'crop',
+        )
       : crateMat;
 
     // Stilts + raised floor
@@ -317,9 +349,9 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.ConeGeometry(0.14, 0.42, 5), cropMat, -1.35, 0.21, 0.95);
     addPart(group, new THREE.ConeGeometry(0.14, 0.38, 5), cropMat, -1.1, 0.19, 1.15);
   } else if (type === 'pavilion') {
-    const pillarMat = new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.78 });
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.55 });
-    const lampMat = createWindowMat(lanternMaterials, 0xfef3c7, 0xf59e0b);
+    const pillarMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.78 }), 'wood');
+    const roofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.55 }), 'roofSecondary');
+    const lampMat = createWindowMat(lanternMaterials, 0xfef3c7, 0xf59e0b, 'lantern');
 
     addPart(group, new THREE.CylinderGeometry(1.7, 1.85, 0.26, 6), plinthMat, 0, 0.13, 0);
     for (let i = 0; i < 6; i++) {
@@ -331,10 +363,10 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.SphereGeometry(0.24, 8, 6), lampMat, 0, 1.55, 0);
   } else {
     // clock_tower
-    const brickMat = new THREE.MeshStandardMaterial({ color: 0x9f1239, roughness: 0.76 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65 });
-    const spireMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.42, metalness: 0.45 });
-    const faceMat = createWindowMat(lanternMaterials, 0xfef9c3, 0xfde047);
+    const brickMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9f1239, roughness: 0.76 }), 'brick');
+    const trimMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65 }), 'trim');
+    const spireMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.42, metalness: 0.45 }), 'roofPrimary');
+    const faceMat = createWindowMat(lanternMaterials, 0xfef9c3, 0xfde047, 'window');
 
     addPart(group, new THREE.BoxGeometry(2.2, 0.32, 2.2), plinthMat, 0, 0.16, 0);
     addPart(group, new THREE.BoxGeometry(1.48, 2.8, 1.48), brickMat, 0, 1.72, 0);
@@ -348,17 +380,17 @@ export function buildCompletedStructureMesh(
 
   // Tier 2 Enhancement: Banner & Side Alcove
   if (structure.tier >= 2) {
-    const bannerMat = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.55 });
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.35, metalness: 0.6 });
+    const bannerMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.55 }), 'banner');
+    const poleMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.35, metalness: 0.6 }), 'gold');
     addPart(group, new THREE.CylinderGeometry(0.04, 0.04, 1.4, 6), poleMat, -1.42, 0.7, 1.18);
     addPart(group, new THREE.BoxGeometry(0.42, 0.62, 0.05), bannerMat, -1.42, 1.12, 1.21);
   }
 
   // Tier 3 Enhancement: Gilded Crest & Courtyard Lantern Post
   if (structure.tier >= 3) {
-    const goldMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.22, metalness: 0.85 });
-    const postMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5, metalness: 0.5 });
-    const globeMat = createWindowMat(lanternMaterials, 0xfef3c7, 0xf59e0b);
+    const goldMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.22, metalness: 0.85 }), 'gold');
+    const postMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5, metalness: 0.5 }), 'metal');
+    const globeMat = createWindowMat(lanternMaterials, 0xfef3c7, 0xf59e0b, 'lantern');
     addPart(group, new THREE.OctahedronGeometry(0.22, 0), goldMat, 0, 3.65, 0);
     addPart(group, new THREE.CylinderGeometry(0.05, 0.06, 1.45, 6), postMat, 1.45, 0.72, 1.18);
     addPart(group, new THREE.SphereGeometry(0.16, 8, 6), globeMat, 1.45, 1.5, 1.18);
@@ -377,6 +409,9 @@ export function buildCompletedStructureMesh(
     ring.rotation.x = -Math.PI / 2;
   }
 
+  if (theme !== 'meadow') {
+    applyThemeToObjectTree(group, theme);
+  }
   return group;
 }
 

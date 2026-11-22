@@ -49,6 +49,12 @@
           "enum": ["summer", "rain", "winter", "clear", "fireflies"],
           "maxLength": 16
         },
+        "theme": {
+          "type": "string",
+          "description": "Active 3D architectural and lighting visual theme.",
+          "enum": ["meadow", "fantasy_night", "solarpunk_oasis"],
+          "maxLength": 24
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

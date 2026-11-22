@@ -28,6 +28,52 @@ export type TimeOfDay = 'dawn' | 'day' | 'twilight' | 'night';
 
 export type WeatherMode = 'summer' | 'rain' | 'winter';
 
+export type TownTheme = 'meadow' | 'fantasy_night' | 'solarpunk_oasis';
+
+export const ALL_TOWN_THEMES: TownTheme[] = ['meadow', 'fantasy_night', 'solarpunk_oasis'];
+
+export function normalizeTownTheme(val: unknown): TownTheme {
+  if (val === 'fantasy_night') return 'fantasy_night';
+  if (val === 'solarpunk_oasis') return 'solarpunk_oasis';
+  return 'meadow';
+}
+
+export interface TownThemeMeta {
+  id: TownTheme;
+  label: string;
+  shortLabel: string;
+  summary: string;
+  preferredTimeOfDay: TimeOfDay;
+  swatches: [string, string, string];
+}
+
+export const TOWN_THEME_META: Record<TownTheme, TownThemeMeta> = {
+  meadow: {
+    id: 'meadow',
+    label: 'Alderbrook Meadow',
+    shortLabel: 'Meadow',
+    summary: 'Sunlit pastoral hills, warm oak timber, and classic slate roofs',
+    preferredTimeOfDay: 'day',
+    swatches: ['#739558', '#d97706', '#312e81'],
+  },
+  fantasy_night: {
+    id: 'fantasy_night',
+    label: 'Fantasy Night',
+    shortLabel: 'Fantasy',
+    summary: 'Silver moonlit stone, arcane violet lanterns, and glowing windows',
+    preferredTimeOfDay: 'night',
+    swatches: ['#0b1029', '#a855f7', '#fbbf24'],
+  },
+  solarpunk_oasis: {
+    id: 'solarpunk_oasis',
+    label: 'Solarpunk Oasis',
+    shortLabel: 'Solarpunk',
+    summary: 'Golden-hour sandstone, terracotta terraces, and cyan solar waters',
+    preferredTimeOfDay: 'day',
+    swatches: ['#e6c79c', '#0d9488', '#22d3ee'],
+  },
+};
+
 export type GraphicsQuality = 'low' | 'medium' | 'high';
 
 export function detectDefaultGraphicsQuality(): GraphicsQuality {

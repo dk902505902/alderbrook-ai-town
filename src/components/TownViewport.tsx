@@ -15,6 +15,7 @@ import {
   type PlotId,
   type TimeOfDay,
   type TownStructure,
+  type TownTheme,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -26,6 +27,7 @@ interface TownViewportProps {
   selectedPlotId: PlotId | null;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
+  townTheme: TownTheme;
   graphicsQuality: GraphicsQuality;
   followActive: boolean;
   communicationEvent: {
@@ -57,6 +59,7 @@ export function TownViewport({
   selectedPlotId,
   timeOfDay,
   weather,
+  townTheme,
   graphicsQuality,
   followActive,
   communicationEvent,
@@ -115,7 +118,7 @@ export function TownViewport({
           }
         }
       },
-    }, graphicsQuality);
+    }, graphicsQuality, townTheme);
 
     controllerRef.current = controller;
 
@@ -138,6 +141,10 @@ export function TownViewport({
   useEffect(() => {
     controllerRef.current?.setAtmosphere(timeOfDay, weather);
   }, [timeOfDay, weather]);
+
+  useEffect(() => {
+    controllerRef.current?.setTheme(townTheme);
+  }, [townTheme]);
 
   useEffect(() => {
     controllerRef.current?.setGraphicsQuality(graphicsQuality);

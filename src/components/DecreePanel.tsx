@@ -1,16 +1,25 @@
 import { useState } from 'react';
-import { CloudRain, Clock, Gauge, Moon, RotateCcw, Send, Snowflake, Sun, Sunrise, Sunset } from 'lucide-react';
-import type { GraphicsQuality, TimeOfDay, WeatherMode } from '../types/town.ts';
+import { CloudRain, Clock, Gauge, Moon, Palette, RotateCcw, Send, Snowflake, Sun, Sunrise, Sunset } from 'lucide-react';
+import {
+  ALL_TOWN_THEMES,
+  TOWN_THEME_META,
+  type GraphicsQuality,
+  type TimeOfDay,
+  type TownTheme,
+  type WeatherMode,
+} from '../types/town.ts';
 
 interface DecreePanelProps {
   activeDecree: string;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
+  townTheme: TownTheme;
   graphicsQuality: GraphicsQuality;
   turnIntervalSeconds: number;
   onIssueDecree: (text: string) => void;
   onChangeTimeOfDay: (tod: TimeOfDay) => void;
   onChangeWeather: (w: WeatherMode) => void;
+  onChangeTownTheme: (theme: TownTheme) => void;
   onChangeGraphicsQuality: (q: GraphicsQuality) => void;
   onChangeTurnInterval: (seconds: number) => void;
   onResetTown: () => void;
@@ -47,11 +56,13 @@ export function DecreePanel({
   activeDecree,
   timeOfDay,
   weather,
+  townTheme,
   graphicsQuality,
   turnIntervalSeconds,
   onIssueDecree,
   onChangeTimeOfDay,
   onChangeWeather,
+  onChangeTownTheme,
   onChangeGraphicsQuality,
   onChangeTurnInterval,
   onResetTown,
@@ -117,6 +128,51 @@ export function DecreePanel({
 
       {/* Atmosphere & Turn Pacing Controls */}
       <div className="space-y-2.5 border-t border-white/10 pt-2.5">
+        <div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1 text-[11px] font-medium text-slate-400">
+              <Palette className="h-3 w-3" />
+              <span>World Theme</span>
+            </span>
+            <span className="text-[11px] text-slate-400">
+              {TOWN_THEME_META[townTheme].label}
+            </span>
+          </div>
+          <div className="mt-1 grid grid-cols-3 gap-1">
+            {ALL_TOWN_THEMES.map((id) => {
+              const meta = TOWN_THEME_META[id];
+              const isSelected = townTheme === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => onChangeTownTheme(id)}
+                  aria-pressed={isSelected}
+                  className={`flex min-h-[44px] flex-col items-center justify-center gap-1 rounded-lg border px-1.5 py-1 text-xs font-medium transition-colors ${
+                    isSelected
+                      ? 'border-amber-400/60 bg-amber-500/15 text-amber-200'
+                      : 'border-white/10 bg-slate-900/70 text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <span className="flex items-center gap-1" aria-hidden="true">
+                    {meta.swatches.map((hex) => (
+                      <span
+                        key={hex}
+                        className="h-2 w-2 rounded-full border border-white/25"
+                        style={{ backgroundColor: hex }}
+                      />
+                    ))}
+                  </span>
+                  <span className="leading-none">{meta.shortLabel}</span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-1 text-[11px] leading-snug text-slate-400">
+            {TOWN_THEME_META[townTheme].summary}
+          </p>
+        </div>
+
         <div>
           <span className="block text-[11px] font-medium text-slate-400">Time of Day</span>
           <div className="mt-1 grid grid-cols-4 gap-1">
