@@ -1193,12 +1193,23 @@ async function createServer() {
     const body = (req.body ?? {}) as {
       message?: unknown;
       history?: Array<{ role?: string; text?: string }>;
+      townName?: unknown;
       weather?: unknown;
       timeOfDay?: unknown;
       activeDecree?: unknown;
+      unlockedBiomes?: unknown;
+      roads?: unknown;
+      railSpurBuilt?: unknown;
+      autoMode?: unknown;
       metrics?: { prosperity?: number; orderLevel?: number; morale?: number };
       agents?: Array<{ name?: string; role?: string; currentTask?: string; location?: string }>;
-      structures?: Array<{ plotId?: string; structureType?: string; status?: string; tier?: number }>;
+      structures?: Array<{
+        plotId?: string;
+        structureType?: string;
+        customLabel?: string;
+        status?: string;
+        tier?: number;
+      }>;
       recentLogs?: Array<{ agentName?: string; dialogue?: string }>;
       webResults?: Array<{ title?: string; url?: string; snippet?: string; source?: string }>;
     };
@@ -1209,30 +1220,44 @@ async function createServer() {
       return;
     }
 
+    const townName = String(body.townName ?? 'Alderbrook').trim().slice(0, 60) || 'Alderbrook';
     const weather = normalizeWeatherMode(body.weather);
     const agentsList = Array.isArray(body.agents) ? body.agents.slice(0, MAX_TOWN_AGENTS) : [];
-    const structsList = Array.isArray(body.structures) ? body.structures.slice(0, 8) : [];
+    const structsList = Array.isArray(body.structures) ? body.structures.slice(0, 14) : [];
     const logsList = Array.isArray(body.recentLogs) ? body.recentLogs.slice(0, 4) : [];
     const historyList = Array.isArray(body.history) ? body.history.slice(-4) : [];
     const webResultsList = Array.isArray(body.webResults) ? body.webResults.slice(0, 5) : [];
+    const unlockedBiomes = Array.isArray(body.unlockedBiomes)
+      ? body.unlockedBiomes
+          .map((b) => String(b).toLowerCase())
+          .filter((b) => b === 'forest' || b === 'desert' || b === 'cave')
+      : [];
+    const roadsCount = Array.isArray(body.roads) ? body.roads.length : 0;
+    const railSpurBuilt = Boolean(body.railSpurBuilt);
+    const autoMode = Boolean(body.autoMode);
 
     const systemPrompt =
       webResultsList.length > 0
         ? [
-            'You are Mayor Sterling, the warm, sharp Rank 1 leader of Alderbrook AI Town.',
+            `You are Mayor Sterling, the warm, sharp Rank 1 leader of ${townName} AI Town.`,
             'Your News Scout just delivered live internet search results below.',
             'Summarize the top findings clearly in character as a crisp numbered list (up to 5 concise bullet/numbered items, 1 short sentence each) while staying accurate to the search snippets.',
             'Return ONLY raw JSON matching: {"reply":"string (concise summary with numbered items)","action":{"type":"none"}}',
           ].join('\n')
         : [
-            'You are Mayor Sterling, the warm, decisive Rank 1 leader of Alderbrook AI Town.',
+            `You are Mayor Sterling, the warm, decisive Rank 1 leader of ${townName} AI Town.`,
             'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-            'Valid action.type values: "none", "build", "hire", "decree".',
-            '- Use "build" if the player asks to build/construct/open/upgrade a building (e.g. Cafe Shop, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name.',
-            '- Use "hire" if the player asks to hire/recruit workers (e.g. barista, baker, farmer, guard). Set action.workerPrompt to a crisp hiring request.',
-            '- Use "decree" if the player issues a town-wide announcement, festival, or civic order. Set action.decree to the decree text.',
+            'Valid action.type values: "none", "build", "hire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "toggle_auto".',
+            '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave") if a biome was specified.',
+            '- Use "hire" to recruit workers (e.g. researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
+            '- Use "decree" for town-wide announcements, festivals, or civic orders. Set action.decree.',
+            '- Use "create_town" when the player asks to create/start a NEW saved town or city (never overwrites existing towns). Set action.townName to the new town name.',
+            '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest" for Dense Forest, "desert" for Desert Dunes, "cave" for Crystal Mountain Cave). Set action.biome.',
+            '- Use "build_road" when asked to build/lay cobblestone roads to a building, plot, or outer biome. Set action.roadTarget.',
+            '- Use "extend_rail" when asked to extend the train track, railway spur, or outer Frontier Depot stop.',
+            '- Use "toggle_auto" when asked to turn Automatic City-Builder mode ON or OFF (e.g., "Mayor go automatic", "Stop automatic"). Set action.autoEnabled (boolean).',
             '- Otherwise set action.type to "none".',
-            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree","target":"optional","workerPrompt":"optional","decree":"optional"}}',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree|create_town|expand_biome|build_road|extend_rail|toggle_auto","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true}}',
           ].join('\n');
 
     const webResultsBlock =
@@ -1247,12 +1272,18 @@ async function createServer() {
         : '';
 
     const contextSummary = [
-      `Weather: ${weather}, Time: ${String(body.timeOfDay ?? 'day')}, Villagers: ${agentsList.length}/${MAX_TOWN_AGENTS}`,
+      `Town: ${townName} | Auto Mode: ${autoMode ? 'ON' : 'OFF'} | Weather: ${weather}, Time: ${String(body.timeOfDay ?? 'day')}, Villagers: ${agentsList.length}/${MAX_TOWN_AGENTS}`,
       `Pulse: Prosperity ${body.metrics?.prosperity ?? 68}, Order ${body.metrics?.orderLevel ?? 74}, Morale ${body.metrics?.morale ?? 72}`,
+      `Outer Biomes Unlocked: ${unlockedBiomes.length > 0 ? unlockedBiomes.join(', ') : 'None yet (available: forest, desert, cave)'} | Cobblestone Roads: ${roadsCount} | Rail Spur: ${railSpurBuilt ? 'Built' : 'Not built'}`,
       body.activeDecree ? `Active Decree: ${String(body.activeDecree).slice(0, 140)}` : 'Active Decree: None',
-      `Buildings (${structsList.length}/8): ${
+      `Buildings (${structsList.length}/${8 + unlockedBiomes.length * 2}): ${
         structsList.length > 0
-          ? structsList.map((s) => `${s.structureType}(${s.status},T${s.tier ?? 1})`).join(', ')
+          ? structsList
+              .map(
+                (s) =>
+                  `${s.customLabel || s.structureType}(${s.status},T${s.tier ?? 1})`,
+              )
+              .join(', ')
           : 'None yet'
       }`,
       `Active Tasks: ${agentsList
@@ -1287,7 +1318,7 @@ async function createServer() {
           model: modelName,
           messages,
           temperature: 0.65,
-          max_tokens: webResultsList.length > 0 ? 480 : 260,
+          max_tokens: webResultsList.length > 0 ? 480 : 280,
           response_format: { type: 'json_object' },
         },
         true,
@@ -1314,14 +1345,29 @@ async function createServer() {
           ? (parsed.action as Record<string, unknown>)
           : {};
       const rawType = String(rawAction.type ?? 'none').trim().toLowerCase();
-      const actionType =
-        rawType === 'build' || rawType === 'hire' || rawType === 'decree' ? rawType : 'none';
+      const allowedTypes = new Set([
+        'build',
+        'hire',
+        'decree',
+        'create_town',
+        'expand_biome',
+        'build_road',
+        'extend_rail',
+        'toggle_auto',
+      ]);
+      const actionType = allowedTypes.has(rawType) ? rawType : 'none';
+      const rawBiome = typeof rawAction.biome === 'string' ? rawAction.biome.trim().toLowerCase() : '';
+      const validBiome =
+        rawBiome === 'forest' || rawBiome === 'desert' || rawBiome === 'cave'
+          ? rawBiome
+          : undefined;
 
       res.json({
-        reply: reply || 'Consider it done — Alderbrook is already moving on your word.',
+        reply: reply || `Consider it done — ${townName} is already moving on your word.`,
         action: {
           type: actionType,
-          target: typeof rawAction.target === 'string' ? rawAction.target.trim().slice(0, 80) : undefined,
+          target:
+            typeof rawAction.target === 'string' ? rawAction.target.trim().slice(0, 80) : undefined,
           workerPrompt:
             typeof rawAction.workerPrompt === 'string'
               ? rawAction.workerPrompt.trim().slice(0, 180)
@@ -1330,6 +1376,17 @@ async function createServer() {
             typeof rawAction.decree === 'string'
               ? rawAction.decree.trim().slice(0, 220)
               : undefined,
+          townName:
+            typeof rawAction.townName === 'string'
+              ? rawAction.townName.trim().slice(0, 60)
+              : undefined,
+          biome: validBiome,
+          roadTarget:
+            typeof rawAction.roadTarget === 'string'
+              ? rawAction.roadTarget.trim().slice(0, 80)
+              : undefined,
+          autoEnabled:
+            typeof rawAction.autoEnabled === 'boolean' ? rawAction.autoEnabled : undefined,
         },
         modelUsed: result.modelUsed || modelName,
         keyAttemptIndex: result.keyAttemptIndex,

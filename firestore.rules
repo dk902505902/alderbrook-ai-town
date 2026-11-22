@@ -24,13 +24,14 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.email_verified == true;
     }
 
-    function isTownOwner(townId) {
-      return isSignedIn() && request.auth.uid == townId;
-    }
-
     function isParentOwner(townId) {
       return exists(/databases/$(database)/documents/towns/$(townId)) &&
         get(/databases/$(database)/documents/towns/$(townId)).data.ownerId == request.auth.uid;
+    }
+
+    function isParentOwnerAfter(townId) {
+      return existsAfter(/databases/$(database)/documents/towns/$(townId)) &&
+        getAfter(/databases/$(database)/documents/towns/$(townId)).data.ownerId == request.auth.uid;
     }
 
     function isValidLocation(loc) {
@@ -54,7 +55,13 @@ service cloud.firestore {
     }
 
     function isValidPlotId(plotId) {
-      return plotId in ['plot_nw', 'plot_ne', 'plot_sw', 'plot_se', 'plot_n_west', 'plot_n_east', 'plot_s_west', 'plot_s_east'];
+      return plotId in [
+        'plot_nw', 'plot_ne', 'plot_sw', 'plot_se',
+        'plot_n_west', 'plot_n_east', 'plot_s_west', 'plot_s_east',
+        'plot_forest_1', 'plot_forest_2',
+        'plot_desert_1', 'plot_desert_2',
+        'plot_cave_1', 'plot_cave_2'
+      ];
     }
 
     function isValidOptionalPlotId(plotId) {
@@ -62,7 +69,11 @@ service cloud.firestore {
     }
 
     function isValidStructureType(st) {
-      return st in ['bakery', 'watchtower', 'greenhouse', 'windmill', 'library', 'granary', 'pavilion', 'clock_tower'];
+      return st in ['bakery', 'watchtower', 'greenhouse', 'windmill', 'library', 'granary', 'pavilion', 'clock_tower', 'custom'];
+    }
+
+    function isValidCustomStyle(cs) {
+      return cs in ['lab', 'observatory', 'cafe', 'tavern', 'forge', 'guild', 'cabin', 'tower'];
     }
 
     function isValidTimeOfDay(tod) {
@@ -91,7 +102,7 @@ service cloud.firestore {
 
     function isValidTownState(data) {
       return data.keys().hasAll(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'createdAt', 'updatedAt'])
         && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
         && data.turnCount is int && data.turnCount >= 0 && data.turnCount <= 1000000
         && data.activeAgentIndex is int && data.activeAgentIndex >= 0 && data.activeAgentIndex <= 14
@@ -102,6 +113,11 @@ service cloud.firestore {
         && data.timeOfDay is string && data.timeOfDay.size() <= 16 && isValidTimeOfDay(data.timeOfDay)
         && data.weather is string && data.weather.size() <= 16 && isValidWeather(data.weather)
         && (!('theme' in data) || (data.theme is string && data.theme.size() <= 24 && isValidTownTheme(data.theme)))
+        && (!('townName' in data) || (data.townName is string && data.townName.size() >= 1 && data.townName.size() <= 60))
+        && (!('unlockedBiomes' in data) || (data.unlockedBiomes is list && data.unlockedBiomes.size() <= 3 && data.unlockedBiomes.hasOnly(['forest', 'desert', 'cave'])))
+        && (!('roads' in data) || (data.roads is list && data.roads.size() <= 24))
+        && (!('railSpurBuilt' in data) || data.railSpurBuilt is bool)
+        && (!('autoMode' in data) || data.autoMode is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -137,10 +153,12 @@ service cloud.firestore {
 
     function isValidTownStructure(data, plotId) {
       return data.keys().hasAll(['ownerId', 'plotId', 'structureType', 'status', 'progress', 'tier', 'proposedBy', 'lastBuilder', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'plotId', 'structureType', 'status', 'progress', 'tier', 'proposedBy', 'lastBuilder', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'plotId', 'structureType', 'customLabel', 'customStyle', 'status', 'progress', 'tier', 'proposedBy', 'lastBuilder', 'createdAt', 'updatedAt'])
         && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
         && data.plotId is string && data.plotId == plotId && isValidPlotId(data.plotId)
         && data.structureType is string && data.structureType.size() >= 1 && data.structureType.size() <= 24 && isValidStructureType(data.structureType)
+        && (!('customLabel' in data) || (data.customLabel is string && data.customLabel.size() <= 40))
+        && (!('customStyle' in data) || (data.customStyle is string && data.customStyle.size() <= 20 && isValidCustomStyle(data.customStyle)))
         && data.status is string && data.status in ['building', 'complete']
         && data.progress is int && data.progress >= 0 && data.progress <= 100
         && data.tier is int && data.tier >= 1 && data.tier <= 3
@@ -180,17 +198,17 @@ service cloud.firestore {
         && (!('executedAt' in data) || data.executedAt is timestamp);
     }
 
-    // Town State Root
+    // Town State Root (Supports /towns/{uid} main town + additional user-owned towns /towns/{townId})
     match /towns/{townId} {
-      allow get: if isValidId(townId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+      allow get: if isValidId(townId) && isSignedIn() && existing().ownerId == request.auth.uid;
       allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
       allow create: if isValidId(townId)
-        && isTownOwner(townId)
+        && isSignedIn()
         && isValidTownState(incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isValidId(townId)
-        && isTownOwner(townId)
+        && isSignedIn()
         && existing().ownerId == request.auth.uid
         && isValidTownState(incoming())
         && incoming().ownerId == existing().ownerId
@@ -204,25 +222,33 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['weather', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['theme', 'timeOfDay', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['townName', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['unlockedBiomes', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['roads', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['railSpurBuilt', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['autoMode', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['unlockedBiomes', 'roads', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'updatedAt'])
         );
-      allow delete: if isValidId(townId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+      allow delete: if isValidId(townId) && isSignedIn() && existing().ownerId == request.auth.uid;
 
       // Hierarchical Agents Subcollection (5 core council + up to 10 hired specialists)
       match /agents/{agentId} {
-        allow get: if isValidId(townId) && isValidAgentId(agentId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow get: if isValidId(townId) && isValidAgentId(agentId) && isSignedIn() && existing().ownerId == request.auth.uid;
         allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
         allow create: if isValidId(townId)
           && isValidAgentId(agentId)
-          && isTownOwner(townId)
+          && isSignedIn()
           && isValidAgentState(incoming(), agentId)
           && incoming().updatedAt == request.time
-          && (isParentOwner(townId) || existsAfter(/databases/$(database)/documents/towns/$(townId)));
+          && (isParentOwner(townId) || isParentOwnerAfter(townId));
         allow update: if isValidId(townId)
           && isValidAgentId(agentId)
-          && isTownOwner(townId)
+          && isSignedIn()
           && existing().ownerId == request.auth.uid
           && isValidAgentState(incoming(), agentId)
           && incoming().ownerId == existing().ownerId
@@ -234,23 +260,23 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'updatedAt']) ||
             incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'activePlotId', 'updatedAt'])
           );
-        allow delete: if isValidId(townId) && isValidAgentId(agentId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow delete: if isValidId(townId) && isValidAgentId(agentId) && isSignedIn() && existing().ownerId == request.auth.uid;
       }
 
-      // AI-Built Town Structures Subcollection (8 Perimeter Plots)
+      // AI-Built Town Structures Subcollection (8 Core Plots + 6 Outer Biome Plots)
       match /structures/{plotId} {
-        allow get: if isValidId(townId) && isValidId(plotId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow get: if isValidId(townId) && isValidId(plotId) && isSignedIn() && existing().ownerId == request.auth.uid;
         allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
         allow create: if isValidId(townId)
           && isValidId(plotId)
-          && isTownOwner(townId)
+          && isSignedIn()
           && isValidTownStructure(incoming(), plotId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
           && isParentOwner(townId);
         allow update: if isValidId(townId)
           && isValidId(plotId)
-          && isTownOwner(townId)
+          && isSignedIn()
           && existing().ownerId == request.auth.uid
           && isValidTownStructure(incoming(), plotId)
           && incoming().ownerId == existing().ownerId
@@ -264,33 +290,34 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'progress', 'lastBuilder', 'updatedAt']) ||
             incoming().diff(existing()).affectedKeys().hasOnly(['tier', 'lastBuilder', 'updatedAt'])
           );
-        allow delete: if isValidId(townId) && isValidId(plotId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow delete: if isValidId(townId) && isValidId(plotId) && isSignedIn() && existing().ownerId == request.auth.uid;
       }
 
       // Append-Only Town Logs Subcollection
       match /logs/{logId} {
-        allow get: if isValidId(townId) && isValidId(logId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow get: if isValidId(townId) && isValidId(logId) && isSignedIn() && existing().ownerId == request.auth.uid;
         allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
         allow create: if isValidId(townId)
           && isValidId(logId)
-          && isTownOwner(townId)
+          && isSignedIn()
           && isValidLogEntry(incoming())
           && incoming().createdAt == request.time
-          && (isParentOwner(townId) || existsAfter(/databases/$(database)/documents/towns/$(townId)));
+          && (isParentOwner(townId) || isParentOwnerAfter(townId));
         allow update: if false;
-        allow delete: if isValidId(townId) && isValidId(logId) && isTownOwner(townId) && existing().ownerId == request.auth.uid;
+        allow delete: if isValidId(townId) && isValidId(logId) && isSignedIn() && existing().ownerId == request.auth.uid;
       }
 
       // Real-Time Remote Commands Subcollection (/towns/{townId}/remoteCommands/{commandId})
       match /remoteCommands/{commandId} {
         allow get: if isValidId(townId)
           && isValidId(commandId)
-          && isTownOwner(townId)
+          && isSignedIn()
+          && isParentOwner(townId)
           && (!('ownerId' in existing()) || existing().ownerId == request.auth.uid);
-        allow list: if isTownOwner(townId) && existing().status == 'pending';
+        allow list: if isSignedIn() && isParentOwner(townId) && existing().status == 'pending';
         allow create: if isValidId(townId)
           && isValidId(commandId)
-          && isTownOwner(townId)
+          && isSignedIn()
           && isValidRemoteCommand(incoming())
           && incoming().ownerId == request.auth.uid
           && incoming().status == 'pending'
@@ -299,17 +326,18 @@ service cloud.firestore {
           && isParentOwner(townId);
         allow update: if isValidId(townId)
           && isValidId(commandId)
-          && isTownOwner(townId)
+          && isSignedIn()
+          && isParentOwner(townId)
           && (!('ownerId' in existing()) || existing().ownerId == request.auth.uid)
           && isValidRemoteCommand(incoming())
           && existing().status == 'pending'
           && incoming().status in ['executed', 'failed']
           && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'executedAt', 'resultMessage'])
-          && incoming().executedAt == request.time
-          && isParentOwner(townId);
+          && incoming().executedAt == request.time;
         allow delete: if isValidId(townId)
           && isValidId(commandId)
-          && isTownOwner(townId)
+          && isSignedIn()
+          && isParentOwner(townId)
           && (!('ownerId' in existing()) || existing().ownerId == request.auth.uid);
       }
     }

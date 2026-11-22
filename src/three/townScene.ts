@@ -3,10 +3,13 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ALL_PLOT_IDS,
+  BIOME_META,
+  getAvailablePlotIds,
   MAX_TOWN_AGENTS,
   PLOT_META,
   type AgentId,
   type AgentRecord,
+  type BiomeId,
   type GraphicsQuality,
   type HatStyle,
   type LocationId,
@@ -17,11 +20,13 @@ import {
   type WeatherMode,
 } from '../types/town.ts';
 import {
+  buildExpandableBiomesAndRoads,
   buildScatteredTownDetails,
   createClothWaveMaterial,
   createRipplingWaterMaterial,
   createWindSwayMaterial,
   type TownDetailsHandle,
+  type TownExpansionHandle,
   type WaterUniforms,
   type WindUniforms,
 } from './townEnvironment.ts';
@@ -1446,8 +1451,12 @@ export class TownSceneController {
     uTime: { value: 0 },
   };
   private detailsHandle!: TownDetailsHandle;
+  private expansionHandle!: TownExpansionHandle;
   private railwayHandle!: TownRailwayHandle;
   private signalRelayHandle: SignalRelayHandle | null = null;
+  private unlockedBiomes: BiomeId[] = [];
+  private lastStructures: TownStructure[] = [];
+  private lastSelectedPlotId: PlotId | null = null;
 
   // See-Inside Building Interiors (Roof Cutaway)
   private staticCutaways: CutawayEntry[] = [];
@@ -1529,7 +1538,7 @@ export class TownSceneController {
     this.scene.background = skyColor;
     this.scene.fog = new THREE.FogExp2(initialAtmo.skyHex, initialAtmo.fogDensity);
 
-    this.camera = new THREE.PerspectiveCamera(46, width / height, 0.5, 160);
+    this.camera = new THREE.PerspectiveCamera(46, width / height, 0.5, 220);
     this.camera.position.set(16, 13.5, 19.5);
 
     this.renderer = new THREE.WebGLRenderer({
@@ -1593,7 +1602,7 @@ export class TownSceneController {
     this.controls.enableDamping = !this.isSoftwareGl;
     this.controls.dampingFactor = 0.06;
     this.controls.minDistance = 5.5;
-    this.controls.maxDistance = 38;
+    this.controls.maxDistance = 74;
     this.controls.minPolarAngle = 0.28;
     this.controls.maxPolarAngle = Math.PI / 2.25;
     this.controls.target.set(0, 0.8, 0);
@@ -1630,7 +1639,7 @@ export class TownSceneController {
     const cobbleTex = createCobbleTexture(maxAniso);
     this.disposables.push(cobbleTex);
 
-    const groundGeo = new THREE.CircleGeometry(65, 48);
+    const groundGeo = new THREE.CircleGeometry(88, 48);
     this.groundMat = new THREE.MeshStandardMaterial({
       color: 0x739558,
       roughness: 0.94,
@@ -1764,8 +1773,10 @@ export class TownSceneController {
     this.hillMat = new THREE.MeshStandardMaterial({ color: 0x5c7c48, roughness: 0.95 });
     for (let i = 0; i < 8; i++) {
       const angle = (i / 8) * Math.PI * 2 + 0.2;
-      const hill = new THREE.Mesh(new THREE.ConeGeometry(12 + (i % 3) * 4, 6 + (i % 2) * 3, 7), this.hillMat);
-      hill.position.set(Math.cos(angle) * 44, 2.2, Math.sin(angle) * 44);
+      const hx = Math.cos(angle) * 58;
+      const hz = Math.sin(angle) * 58;
+      const hill = new THREE.Mesh(new THREE.ConeGeometry(13 + (i % 3) * 4, 7 + (i % 2) * 3, 7), this.hillMat);
+      hill.position.set(hx, 2.4, hz);
       hill.rotation.y = i;
       this.scene.add(hill);
     }
@@ -1776,6 +1787,23 @@ export class TownSceneController {
       this.windUniforms,
     );
     this.disposables.push(this.detailsHandle);
+
+    // Expandable Outer Biomes (Dense Forest, Desert Dunes, Crystal Cave) + Instanced Roads
+    this.expansionHandle = buildExpandableBiomesAndRoads(
+      this.scene,
+      this.lanternMaterials,
+      this.townTheme,
+    );
+    this.clickableObjects.push(this.expansionHandle.caveGroup);
+    this.staticCutaways.push({
+      id: 'biome:cave',
+      center: new THREE.Vector3(27.6, 2.2, -24.6),
+      triggerRadius: 16.5,
+      roofMaterials: this.expansionHandle.caveRoofMaterials,
+      fireMaterials: [],
+      currentOpacity: 1,
+    });
+    this.disposables.push(this.expansionHandle);
   }
 
   private getOrCreateAwningTexture(theme: TownTheme): THREE.CanvasTexture {
@@ -2083,6 +2111,7 @@ export class TownSceneController {
 
     this.detailsHandle?.setDensityFactor(quality === 'low' ? 0.5 : 1.0);
     this.detailsHandle?.setLanternShadows(enableShadows);
+    this.expansionHandle?.setGraphicsQuality(quality);
     this.railwayHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
@@ -2102,6 +2131,7 @@ export class TownSceneController {
       applyThemeToObjectTree(grp, theme);
     });
     this.detailsHandle?.applyTheme(theme);
+    this.expansionHandle?.applyTheme(theme);
     this.railwayHandle?.applyTheme(theme);
     this.signalRelayHandle?.applyTheme(theme);
 
@@ -2177,21 +2207,58 @@ export class TownSceneController {
     this.commArcLine.visible = true;
   }
 
+  public syncExpansion(
+    unlockedBiomes: BiomeId[],
+    roads: string[],
+    railSpurBuilt: boolean,
+  ): void {
+    const prevKey = this.unlockedBiomes.join(',');
+    const nextKey = unlockedBiomes.join(',');
+    this.unlockedBiomes = [...unlockedBiomes];
+    this.expansionHandle?.setUnlockedBiomes(unlockedBiomes);
+    this.expansionHandle?.setRoads(roads);
+    this.railwayHandle?.setRailSpurBuilt(railSpurBuilt);
+    if (prevKey !== nextKey) {
+      this.syncStructures(this.lastStructures, this.lastSelectedPlotId);
+    }
+  }
+
   public syncStructures(
     structures: TownStructure[],
     selectedPlotId: PlotId | null,
   ): void {
+    this.lastStructures = structures;
+    this.lastSelectedPlotId = selectedPlotId;
+
     const byPlot = new Map<PlotId, TownStructure>();
     for (const s of structures) {
       byPlot.set(s.plotId, s);
     }
 
+    const availablePlots = new Set<PlotId>(getAvailablePlotIds(this.unlockedBiomes));
+
     let rebuiltAny = false;
     for (const plotId of ALL_PLOT_IDS) {
       const s = byPlot.get(plotId);
+      const isVisiblePlot = availablePlots.has(plotId) || Boolean(s);
+
+      if (!isVisiblePlot) {
+        const oldLocked = this.plotGroups.get(plotId);
+        if (oldLocked) {
+          this.scene.remove(oldLocked);
+          const clickIdx = this.clickableObjects.indexOf(oldLocked);
+          if (clickIdx !== -1) this.clickableObjects.splice(clickIdx, 1);
+          disposeStructureGroup(oldLocked, this.lanternMaterials);
+          this.plotGroups.delete(plotId);
+          this.plotSignatures.delete(plotId);
+          rebuiltAny = true;
+        }
+        continue;
+      }
+
       const isSelected = selectedPlotId === plotId;
       const sig = s
-        ? `${s.structureType}:${s.status}:${s.progress}:${s.tier}:${isSelected}`
+        ? `${s.structureType}:${s.customLabel ?? ''}:${s.customStyle ?? ''}:${s.status}:${s.progress}:${s.tier}:${isSelected}`
         : `empty:${isSelected}`;
 
       if (this.plotSignatures.get(plotId) === sig) {
@@ -2419,6 +2486,22 @@ export class TownSceneController {
     this.cameraTargetGoal = SIGNAL_RELAY_POS.clone().setY(1.4);
   }
 
+  public focusBiome(biomeId: BiomeId): void {
+    const meta = BIOME_META[biomeId];
+    if (!meta) return;
+    this.followActive = false;
+    this.focusedCutawayId = biomeId === 'cave' ? 'biome:cave' : null;
+    this.cameraTargetGoal = new THREE.Vector3(meta.center.x, 1.4, meta.center.z);
+  }
+
+  public focusRailSpur(): void {
+    this.followActive = false;
+    this.focusedCutawayId = null;
+    if (this.railwayHandle) {
+      this.cameraTargetGoal = this.railwayHandle.frontierDepotFocusTarget.clone();
+    }
+  }
+
   public pulseSignalRelay(durationSec = 8): void {
     this.signalRelayHandle?.pulse(durationSec);
   }
@@ -2489,6 +2572,10 @@ export class TownSceneController {
         if (obj.userData?.signalRelay) {
           this.focusSignalRelay();
           this.callbacks.onSelectSignalRelay?.();
+          return;
+        }
+        if (obj.userData?.biomeCave) {
+          this.focusBiome('cave');
           return;
         }
         if (obj.userData?.stationId) {
@@ -2697,6 +2784,7 @@ export class TownSceneController {
       }
       this.railwayHandle?.update(delta, elapsed);
       this.signalRelayHandle?.update(delta, elapsed);
+      this.expansionHandle?.update(elapsed);
 
       // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom)
       const updateCutaway = (entry: CutawayEntry, idx: number) => {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Building2,
   Cpu,
   Crown,
   ExternalLink,
@@ -8,11 +9,13 @@ import {
   MicOff,
   Pause,
   Play,
+  Plus,
   Send,
   Settings,
   Volume2,
   VolumeX,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   advanceProviderKeyCursor,
@@ -28,16 +31,24 @@ import {
   type WebSearchResult,
 } from '../lib/webSearch.ts';
 import {
+  ALL_BIOME_IDS,
+  BIOME_META,
+  getAvailablePlotIds,
+  getStructureDisplayLabel,
   getWeatherSeasonEffect,
+  inferCustomBuildingSpec,
   MAX_TOWN_AGENTS,
   STRUCTURE_META,
   type AgentRecord,
   type AIProviderConfig,
+  type BiomeId,
+  type CustomBuildingStyle,
   type StructureType,
   type TimeOfDay,
   type TownLogItem,
   type TownMetrics,
   type TownStructure,
+  type TownSummary,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -55,6 +66,13 @@ export interface ResearchDispatchResult {
 interface MayorChatModalProps {
   isOpen: boolean;
   isPlaying: boolean;
+  townName: string;
+  activeTownId: string;
+  savedTowns: TownSummary[];
+  unlockedBiomes: BiomeId[];
+  roads: string[];
+  railSpurBuilt: boolean;
+  autoMode: boolean;
   agents: AgentRecord[];
   structures: TownStructure[];
   logs: TownLogItem[];
@@ -67,7 +85,18 @@ interface MayorChatModalProps {
   hasServerDefaultKey: boolean;
   onClose: () => void;
   onTogglePlay: () => void;
-  onBuildStructure: (structureType: StructureType, displayLabel?: string) => Promise<MayorBuildResult>;
+  onToggleAutoMode: (next?: boolean) => void;
+  onSwitchTown: (townId: string) => Promise<void>;
+  onCreateTown: (name: string) => Promise<MayorBuildResult>;
+  onExpandBiome: (biome: BiomeId) => Promise<MayorBuildResult>;
+  onBuildRoad: (targetHint?: string) => Promise<MayorBuildResult>;
+  onExtendRail: () => Promise<MayorBuildResult>;
+  onBuildStructure: (
+    structureType: StructureType,
+    displayLabel?: string,
+    customStyle?: CustomBuildingStyle,
+    preferredBiome?: BiomeId,
+  ) => Promise<MayorBuildResult>;
   onHireWorker: (prompt: string) => Promise<string | null>;
   onIssueDecree: (decree: string) => Promise<void>;
   onDispatchResearcher: (topic: string) => Promise<ResearchDispatchResult>;
@@ -87,10 +116,23 @@ interface ChatMessage {
 }
 
 interface MayorActionPlan {
-  type: 'none' | 'build' | 'hire' | 'decree';
+  type:
+    | 'none'
+    | 'build'
+    | 'hire'
+    | 'decree'
+    | 'create_town'
+    | 'expand_biome'
+    | 'build_road'
+    | 'extend_rail'
+    | 'toggle_auto';
   target?: string;
   workerPrompt?: string;
   decree?: string;
+  townName?: string;
+  biome?: BiomeId;
+  roadTarget?: string;
+  autoEnabled?: boolean;
 }
 
 interface BrowserSpeechRecognition {
@@ -105,9 +147,10 @@ interface BrowserSpeechRecognition {
 }
 
 const BASE_STARTER_CHIPS = [
-  "What's happening in town?",
-  'Build a Cafe Shop',
-  'Hire a worker',
+  'Build a Research Lab',
+  'Expand map to Cave',
+  'Build a road',
+  'Extend train track',
   'Status report',
 ];
 
@@ -124,70 +167,142 @@ function loadWebSearchEnabled(config: WebSearchConfig): boolean {
   return hasAnySearchApiKey(config);
 }
 
+function detectMentionedBiome(text: string): BiomeId | undefined {
+  const lower = text.toLowerCase();
+  if (/\b(cave|crystal|cavern|mine|mountain)\b/.test(lower)) return 'cave';
+  if (/\b(desert|dune|oasis|sand|cactus|canyon)\b/.test(lower)) return 'desert';
+  if (/\b(forest|woods|pine|timber|grove|jungle)\b/.test(lower)) return 'forest';
+  return undefined;
+}
+
+function extractBuildingName(rawText: string): string {
+  const cleaned = rawText
+    .replace(/^(mayor\s*,?\s*)/i, '')
+    .replace(
+      /^(please\s+)?(can you\s+)?(build|construct|erect|open|add|make|create|upgrade|put)\s+(me\s+)?(a|an|the|new)?\s*/i,
+      '',
+    )
+    .replace(/\b(in the|near the|at the|by the|inside the)\s+(forest|dense forest|desert|desert dunes|cave|crystal cave|mountain cave|town)\b.*$/i, '')
+    .replace(/[.!?]+$/g, '')
+    .trim();
+  return cleaned.slice(0, 36);
+}
+
 function mapBuildingRequest(rawText: string): {
   structureType: StructureType;
   displayLabel: string;
+  customStyle?: CustomBuildingStyle;
+  preferredBiome?: BiomeId;
 } {
   const lower = rawText.toLowerCase();
-  if (lower.includes('cafe') || lower.includes('coffee') || lower.includes('espresso') || lower.includes('tea')) {
-    return { structureType: 'bakery', displayLabel: 'Artisan Cafe' };
+  const preferredBiome = detectMentionedBiome(rawText);
+
+  // Explicit custom buildings (Research Lab, Observatory, Cafe Shop, Tavern, Forge, Guild, Cabin, etc.)
+  if (
+    /\b(research|lab|laboratory|science|academy|university|observatory|telescope|astro|planetarium|cafe|coffee|espresso|tea|bistro|tavern|inn|pub|forge|smith|foundry|smithy|workshop|guild|hall|clinic|hospital|museum|studio|cabin|lodge|outpost|camp)\b/.test(
+      lower,
+    )
+  ) {
+    const extracted = extractBuildingName(rawText) || rawText.trim();
+    const spec = inferCustomBuildingSpec(extracted);
+    return {
+      structureType: 'custom',
+      displayLabel: spec.label,
+      customStyle: spec.style,
+      preferredBiome,
+    };
   }
-  if (lower.includes('bakery') || lower.includes('bread') || lower.includes('pastry')) {
-    return { structureType: 'bakery', displayLabel: STRUCTURE_META.bakery.label };
+
+  if (/\b(bakery|bread|pastry)\b/.test(lower)) {
+    return { structureType: 'bakery', displayLabel: STRUCTURE_META.bakery.label, preferredBiome };
   }
-  if (lower.includes('watchtower') || lower.includes('tower') || lower.includes('guard') || lower.includes('fort')) {
-    return { structureType: 'watchtower', displayLabel: STRUCTURE_META.watchtower.label };
+  if (/\b(watchtower|guard tower|fort)\b/.test(lower)) {
+    return {
+      structureType: 'watchtower',
+      displayLabel: STRUCTURE_META.watchtower.label,
+      preferredBiome,
+    };
   }
-  if (lower.includes('greenhouse') || lower.includes('farm') || lower.includes('garden') || lower.includes('botanic')) {
-    return { structureType: 'greenhouse', displayLabel: STRUCTURE_META.greenhouse.label };
+  if (/\b(greenhouse|farm|garden|botanic)\b/.test(lower)) {
+    return {
+      structureType: 'greenhouse',
+      displayLabel: STRUCTURE_META.greenhouse.label,
+      preferredBiome,
+    };
   }
-  if (lower.includes('windmill') || lower.includes('mill') || lower.includes('wind')) {
-    return { structureType: 'windmill', displayLabel: STRUCTURE_META.windmill.label };
+  if (/\b(windmill|mill|wind)\b/.test(lower)) {
+    return { structureType: 'windmill', displayLabel: STRUCTURE_META.windmill.label, preferredBiome };
   }
-  if (lower.includes('library') || lower.includes('book') || lower.includes('school') || lower.includes('archive')) {
-    return { structureType: 'library', displayLabel: STRUCTURE_META.library.label };
+  if (/\b(library|book|archive)\b/.test(lower)) {
+    return { structureType: 'library', displayLabel: STRUCTURE_META.library.label, preferredBiome };
   }
-  if (lower.includes('granary') || lower.includes('barn') || lower.includes('silo') || lower.includes('storage')) {
-    return { structureType: 'granary', displayLabel: STRUCTURE_META.granary.label };
+  if (/\b(granary|barn|silo|storage)\b/.test(lower)) {
+    return { structureType: 'granary', displayLabel: STRUCTURE_META.granary.label, preferredBiome };
   }
-  if (lower.includes('pavilion') || lower.includes('stage') || lower.includes('music') || lower.includes('gazebo')) {
-    return { structureType: 'pavilion', displayLabel: STRUCTURE_META.pavilion.label };
+  if (/\b(pavilion|stage|music|gazebo)\b/.test(lower)) {
+    return { structureType: 'pavilion', displayLabel: STRUCTURE_META.pavilion.label, preferredBiome };
   }
-  if (lower.includes('clock') || lower.includes('bell')) {
-    return { structureType: 'clock_tower', displayLabel: STRUCTURE_META.clock_tower.label };
+  if (/\b(clock|bell)\b/.test(lower)) {
+    return {
+      structureType: 'clock_tower',
+      displayLabel: STRUCTURE_META.clock_tower.label,
+      preferredBiome,
+    };
   }
-  return { structureType: 'bakery', displayLabel: rawText.trim().slice(0, 32) || 'Artisan Cafe' };
+
+  // Any other named building becomes a procedural custom building with its own nameplate!
+  const extracted = extractBuildingName(rawText);
+  if (extracted && !/^(building|plot|something|anything|one|house)$/i.test(extracted)) {
+    const spec = inferCustomBuildingSpec(extracted);
+    return {
+      structureType: 'custom',
+      displayLabel: spec.label,
+      customStyle: spec.style,
+      preferredBiome,
+    };
+  }
+
+  return { structureType: 'bakery', displayLabel: STRUCTURE_META.bakery.label, preferredBiome };
 }
 
 function buildLiveStatusSummary(
+  townName: string,
   weather: WeatherMode,
   timeOfDay: TimeOfDay,
   metrics: TownMetrics,
   agents: AgentRecord[],
   structures: TownStructure[],
   logs: TownLogItem[],
+  unlockedBiomes: BiomeId[],
+  roads: string[],
+  railSpurBuilt: boolean,
+  autoMode: boolean,
 ): string {
   const eff = getWeatherSeasonEffect(weather, structures);
   const built = structures.filter((s) => s.status === 'complete').length;
   const building = structures.filter((s) => s.status === 'building');
+  const totalPlots = getAvailablePlotIds(unlockedBiomes).length;
   const latestLog = logs.find((l) => l.dialogue && l.agentId !== 'weather_shift');
-  const activeWorker = agents.find((a) => a.rank >= 2) ?? agents[0];
 
   const sitePart =
     building.length > 0
-      ? `${STRUCTURE_META[building[0].structureType].label} is at ${building[0].progress}% construction`
+      ? `${getStructureDisplayLabel(building[0])} is at ${building[0].progress}% construction`
       : built > 0
-        ? `${built}/8 town structures are open and active`
-        : 'all 8 building plots are ready for your first project';
+        ? `${built}/${totalPlots} town buildings are open`
+        : `all ${totalPlots} plots are ready for your first project`;
 
-  const pulsePart = `Pulse sits at Prosperity ${metrics.prosperity}, Order ${metrics.orderLevel}, Morale ${metrics.morale}`;
+  const frontierPart =
+    unlockedBiomes.length > 0
+      ? `Biomes unlocked: ${unlockedBiomes.map((b) => BIOME_META[b].shortLabel).join(', ')}`
+      : '3 outer biomes (Forest, Desert, Cave) await expansion';
+
+  const infraPart = `${roads.length} road${roads.length === 1 ? '' : 's'}, rail spur ${railSpurBuilt ? 'active' : 'not yet built'}, Auto Mode ${autoMode ? 'ON' : 'OFF'}`;
+  const pulsePart = `Pulse: Prosperity ${metrics.prosperity}, Order ${metrics.orderLevel}, Morale ${metrics.morale}`;
   const activityPart = latestLog
-    ? `Most recently, ${latestLog.agentName} reported: "${latestLog.dialogue.slice(0, 72)}"`
-    : activeWorker
-      ? `${activeWorker.name} is busy with "${activeWorker.currentTask.slice(0, 56)}"`
-      : 'Everyone is awaiting orders';
+    ? `Latest: ${latestLog.agentName} said "${latestLog.dialogue.slice(0, 68)}"`
+    : 'Everyone is awaiting orders';
 
-  return `It's a ${timeOfDay} in ${eff.label} with ${agents.length}/${MAX_TOWN_AGENTS} villagers — ${sitePart}. ${pulsePart}. ${activityPart}.`;
+  return `${townName} is in ${timeOfDay} (${eff.label}) with ${agents.length}/${MAX_TOWN_AGENTS} villagers — ${sitePart}. ${frontierPart} (${infraPart}). ${pulsePart}. ${activityPart}.`;
 }
 
 function isSimpleGreeting(text: string): boolean {
@@ -199,9 +314,10 @@ function isSimpleGreeting(text: string): boolean {
 
 function isSimpleStatusCheck(text: string): boolean {
   const lower = text.toLowerCase();
-  const hasActionVerb = /\b(build|construct|make|open|hire|recruit|employ|decree|announce|festival|news|search|weather in)\b/.test(
-    lower,
-  );
+  const hasActionVerb =
+    /\b(build|construct|make|open|hire|recruit|employ|decree|announce|festival|news|search|weather in|expand|unlock|extend|rail|train|road|path|town|city|automatic|auto)\b/.test(
+      lower,
+    );
   if (hasActionVerb) return false;
   return /\b(what'?s happening|what is happening|status|report|how is (the )?town|how are things|whats up|what's up|town update|brief me)\b/.test(
     lower,
@@ -210,14 +326,15 @@ function isSimpleStatusCheck(text: string): boolean {
 
 function isLiveWebResearchQuery(text: string): boolean {
   const lower = text.toLowerCase();
-  // Avoid triggering web search for purely local Alderbrook build/hire commands
   if (
-    /\b(build|construct|hire|recruit|upgrade)\b/.test(lower) &&
+    /\b(build|construct|hire|recruit|upgrade|expand|unlock|road|rail|train|town|city|automatic)\b/.test(
+      lower,
+    ) &&
     !/\b(news|search|look up|internet|web|headlines|latest)\b/.test(lower)
   ) {
     return false;
   }
-  return /\b(world news|5 world news|news|headlines|search|look up|lookup|google|latest|breaking|weather in|forecast in|price of|stock|bitcoin|crypto|score|who won|what happened in|today'?s|live info|internet|online|research)\b/.test(
+  return /\b(world news|5 world news|news|headlines|search|look up|lookup|google|latest|breaking|weather in|forecast in|price of|stock|bitcoin|crypto|score|who won|what happened in|today'?s|live info|internet|online)\b/.test(
     lower,
   );
 }
@@ -234,22 +351,110 @@ function cleanSearchQueryFromMessage(text: string): string {
   return stripped.slice(0, 180) || 'top 5 world news headlines today';
 }
 
-function parseLocalIntent(text: string): { reply: string; action: MayorActionPlan } | null {
+function parseNewTownName(text: string): string | null {
+  const match =
+    text.match(/(?:called|named)\s+["']?([a-zA-Z0-9][a-zA-Z0-9\s'-]{1,36})["']?/i) ||
+    text.match(/(?:new\s+(?:town|city|village|settlement))\s+["']?([a-zA-Z0-9][a-zA-Z0-9\s'-]{1,36})["']?/i);
+  if (!match?.[1]) return null;
+  const cleaned = match[1].replace(/[.!?]+$/g, '').trim();
+  if (!cleaned || /^(for|to|with|please|now)$/i.test(cleaned)) return null;
+  return cleaned.slice(0, 48);
+}
+
+function parseLocalIntent(
+  text: string,
+  unlockedBiomes: BiomeId[],
+): { reply: string; action: MayorActionPlan } | null {
   const lower = text.toLowerCase();
 
+  // 1) Automatic City-Builder Mode toggle
+  if (
+    /\b(automatic|auto mode|autopilot|self[- ]?build|autonomous)\b/.test(lower) &&
+    /\b(go|start|enable|turn on|activate|on|stop|disable|turn off|off|pause)\b/.test(lower)
+  ) {
+    const turnOff = /\b(stop|disable|turn off|off|pause)\b/.test(lower);
+    return {
+      reply: turnOff
+        ? 'Automatic City-Builder mode paused. I await your manual orders!'
+        : 'Automatic City-Builder mode ENGAGED! I will plan buildings, unlock outer biomes, lay roads, and recruit staff automatically.',
+      action: { type: 'toggle_auto', autoEnabled: !turnOff },
+    };
+  }
+
+  // 2) Create a NEW saved town / city (non-destructive)
+  if (
+    /\b(create|start|found|charter|make|new)\b/.test(lower) &&
+    /\b(new town|new city|new village|another town|second town|town called|city called|town named|city named)\b/.test(
+      lower,
+    )
+  ) {
+    const parsedName = parseNewTownName(text) || 'New Haven';
+    return {
+      reply: `Chartering a brand-new saved town called ${parsedName}! Your existing town stays safely saved in your Town Switcher.`,
+      action: { type: 'create_town', townName: parsedName },
+    };
+  }
+
+  // 3) Extend Train Track / Railway Spur
+  if (
+    /\b(train|rail|railway|track|tracks|spur|depot|express)\b/.test(lower) &&
+    /\b(extend|build|add|expand|lay|connect|spur|new stop|station)\b/.test(lower)
+  ) {
+    return {
+      reply:
+        'Right away! Our track crew is laying the East Frontier Railway Spur and building a secondary wooden Depot stop.',
+      action: { type: 'extend_rail' },
+    };
+  }
+
+  // 4) Build Cobblestone Roads
+  if (
+    /\b(road|roads|path|street|cobblestone|highway|trail|lane)\b/.test(lower) &&
+    /\b(build|lay|make|add|connect|extend|pave|create)\b/.test(lower)
+  ) {
+    const targetHint = text
+      .replace(/^(mayor\s*,?\s*)/i, '')
+      .replace(/^.*?\b(?:to|toward|towards|for)\b\s*/i, '')
+      .trim()
+      .slice(0, 64);
+    return {
+      reply: `Sending our stone masons out to pave a cobblestone road${targetHint ? ` to ${targetHint}` : ''} right now!`,
+      action: { type: 'build_road', roadTarget: targetHint || text },
+    };
+  }
+
+  // 5) Expand / Unlock Outer Biomes (Dense Forest, Desert Dunes, Crystal Mountain Cave)
+  if (
+    /\b(expand|unlock|open|explore|discover|reveal|add)\b/.test(lower) &&
+    /\b(map|biome|biomes|frontier|forest|woods|desert|dunes|cave|crystal|mountain|outer|territory)\b/.test(
+      lower,
+    )
+  ) {
+    const mentioned = detectMentionedBiome(text);
+    const nextLocked = ALL_BIOME_IDS.find((b) => !unlockedBiomes.includes(b));
+    const chosenBiome = mentioned ?? nextLocked ?? 'forest';
+    return {
+      reply: `Surveyors dispatched! We are expanding the frontier into the ${BIOME_META[chosenBiome].label} and opening new outer building plots.`,
+      action: { type: 'expand_biome', biome: chosenBiome },
+    };
+  }
+
+  // 6) Build / Construct ANY preset or custom building (Research Lab, Observatory, Cafe Shop, etc.)
   if (
     /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
-    /\b(cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|building|plot|store)\b/.test(
+    !/\b(worker|villager|staff)\b/.test(lower) &&
+    /\b(lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|clinic|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
       lower,
     )
   ) {
     const mapped = mapBuildingRequest(text);
     return {
       reply: `Splendid idea! I'm rallying Architect Lyra and our builders to get the ${mapped.displayLabel} underway right away.`,
-      action: { type: 'build', target: mapped.displayLabel },
+      action: { type: 'build', target: mapped.displayLabel, biome: mapped.preferredBiome },
     };
   }
 
+  // 7) Hire / Recruit worker
   if (/\b(hire|recruit|employ|bring in|add a worker|need a|get a)\b/.test(lower)) {
     const cleanedPrompt = text
       .replace(/^(mayor\s*,?\s*)/i, '')
@@ -261,10 +466,11 @@ function parseLocalIntent(text: string): { reply: string; action: MayorActionPla
     };
   }
 
+  // 8) Town Decree
   if (/\b(decree|proclaim|announce|festival|celebrate|declare)\b/.test(lower)) {
     const cleanedDecree = text.replace(/^(mayor\s*,?\s*)/i, '').trim().slice(0, 220);
     return {
-      reply: `By order of Town Hall, I'll proclaim this across Alderbrook immediately!`,
+      reply: `By order of Town Hall, I'll proclaim this across town immediately!`,
       action: { type: 'decree', decree: cleanedDecree },
     };
   }
@@ -284,6 +490,13 @@ function getSpeechRecognitionCtor(): (new () => BrowserSpeechRecognition) | null
 export function MayorChatModal({
   isOpen,
   isPlaying,
+  townName,
+  activeTownId,
+  savedTowns,
+  unlockedBiomes,
+  roads,
+  railSpurBuilt,
+  autoMode,
   agents,
   structures,
   logs,
@@ -296,6 +509,12 @@ export function MayorChatModal({
   hasServerDefaultKey,
   onClose,
   onTogglePlay,
+  onToggleAutoMode,
+  onSwitchTown,
+  onCreateTown,
+  onExpandBiome,
+  onBuildRoad,
+  onExtendRail,
   onBuildStructure,
   onHireWorker,
   onIssueDecree,
@@ -307,7 +526,7 @@ export function MayorChatModal({
     {
       id: 'mayor-welcome',
       sender: 'mayor',
-      text: "Welcome to Town Hall! Ask what's happening in Alderbrook, tell me what to build (like a Cafe Shop), hire workers, or enable Web Search for live world news.",
+      text: `Welcome to ${townName} Town Hall! Ask me to build a Research Lab or Cafe Shop, expand into Forest/Desert/Cave, pave cobblestone roads, extend the train track, toggle Auto mode, or create a brand-new saved town.`,
       modelTag: 'Instant · 0 tokens',
       timestampMs: Date.now(),
     },
@@ -320,6 +539,8 @@ export function MayorChatModal({
   );
   const [voiceReadout, setVoiceReadout] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [creatingTownInline, setCreatingTownInline] = useState(false);
+  const [newTownDraft, setNewTownDraft] = useState('');
 
   const feedEndRef = useRef<HTMLDivElement | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
@@ -402,9 +623,61 @@ export function MayorChatModal({
     action: MayorActionPlan,
     fallbackText: string,
   ): Promise<{ badge?: string; extraNote?: string }> => {
+    if (action.type === 'toggle_auto') {
+      const nextVal = typeof action.autoEnabled === 'boolean' ? action.autoEnabled : !autoMode;
+      onToggleAutoMode(nextVal);
+      return {
+        badge: nextVal ? '⚡ Auto City-Builder: ON' : '⚡ Auto City-Builder: OFF',
+      };
+    }
+
+    if (action.type === 'create_town') {
+      const requestedName =
+        (action.townName || parseNewTownName(fallbackText) || 'New Haven').trim();
+      const res = await onCreateTown(requestedName);
+      return {
+        badge: res.ok ? `🏙️ ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.ok ? undefined : res.detail,
+      };
+    }
+
+    if (action.type === 'expand_biome') {
+      const chosenBiome: BiomeId =
+        action.biome ||
+        detectMentionedBiome(fallbackText) ||
+        ALL_BIOME_IDS.find((b) => !unlockedBiomes.includes(b)) ||
+        'forest';
+      const res = await onExpandBiome(chosenBiome);
+      return {
+        badge: res.ok ? `🗺️ ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.ok ? undefined : res.detail,
+      };
+    }
+
+    if (action.type === 'build_road') {
+      const res = await onBuildRoad(action.roadTarget || fallbackText);
+      return {
+        badge: res.ok ? `🛣️ ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.ok ? undefined : res.detail,
+      };
+    }
+
+    if (action.type === 'extend_rail') {
+      const res = await onExtendRail();
+      return {
+        badge: res.ok ? `🚂 ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.ok ? undefined : res.detail,
+      };
+    }
+
     if (action.type === 'build') {
       const mapped = mapBuildingRequest(action.target || fallbackText);
-      const res = await onBuildStructure(mapped.structureType, mapped.displayLabel);
+      const res = await onBuildStructure(
+        mapped.structureType,
+        mapped.displayLabel,
+        mapped.customStyle,
+        action.biome || mapped.preferredBiome,
+      );
       return {
         badge: res.ok ? `🏗️ ${res.badge}` : `⚠️ ${res.badge}`,
         extraNote: res.ok ? undefined : res.detail,
@@ -425,7 +698,8 @@ export function MayorChatModal({
       }
       return {
         badge: '⚠️ Hiring needs an AI key in Settings',
-        extraNote: 'Open AI Providers settings to configure a key if you want AI-generated workers.',
+        extraNote:
+          'Open AI Providers settings to configure a key if you want custom AI-generated workers.',
       };
     }
 
@@ -433,7 +707,9 @@ export function MayorChatModal({
       const decreeText = (action.decree || fallbackText).trim().slice(0, 220);
       if (decreeText) {
         await onIssueDecree(decreeText);
-        return { badge: `📜 Decree: ${decreeText.slice(0, 42)}${decreeText.length > 42 ? '…' : ''}` };
+        return {
+          badge: `📜 Decree: ${decreeText.slice(0, 42)}${decreeText.length > 42 ? '…' : ''}`,
+        };
       }
     }
 
@@ -478,7 +754,6 @@ export function MayorChatModal({
         const searchQuery = cleanSearchQueryFromMessage(trimmed);
         setStatusNotice(`Dispatching News Scout to research "${searchQuery.slice(0, 40)}"…`);
 
-        // Dispatch existing News Scout / Archivist or recruit one (respecting 15-villager cap) & query search in parallel
         const [dispatchRes, searchRes] = await Promise.all([
           onDispatchResearcher(searchQuery),
           executeWebSearch(webSearchConfig, searchQuery, 5),
@@ -505,9 +780,10 @@ export function MayorChatModal({
         let summaryReply = '';
         let usedTag = `${searchRes.providerName} · 0 LLM tokens`;
 
-        // Summarize with Mayor Sterling's configured LLM if available (1 compact call)
         if (hasUsableMayorLlm) {
-          setStatusNotice(`Mayor Sterling is summarizing ${topResults.length} reports from ${dispatchRes.scoutName}…`);
+          setStatusNotice(
+            `Mayor Sterling is summarizing ${topResults.length} reports from ${dispatchRes.scoutName}…`,
+          );
           try {
             advanceProviderKeyCursor(resolvedMayorModel);
             const res = await fetch('/api/town/mayor-chat', {
@@ -515,9 +791,14 @@ export function MayorChatModal({
               headers: buildInferenceHeaders(resolvedMayorModel),
               body: JSON.stringify({
                 message: trimmed,
+                townName,
                 weather,
                 timeOfDay,
                 activeDecree,
+                unlockedBiomes,
+                roads,
+                railSpurBuilt,
+                autoMode,
                 metrics,
                 agents: agents.slice(0, 6).map((a) => ({
                   name: a.name,
@@ -528,6 +809,7 @@ export function MayorChatModal({
                 structures: structures.map((s) => ({
                   plotId: s.plotId,
                   structureType: s.structureType,
+                  customLabel: s.customLabel,
                   status: s.status,
                   tier: s.tier,
                 })),
@@ -542,7 +824,7 @@ export function MayorChatModal({
               }
             }
           } catch {
-            // Fall back to direct zero-token formatted summary below
+            // Fall back to zero-token summary below
           }
         }
 
@@ -556,7 +838,9 @@ export function MayorChatModal({
           ? `🌐 Hired & Dispatched ${dispatchRes.scoutName} · ${topResults.length} sources (${searchRes.providerName})`
           : `🌐 Researched by ${dispatchRes.scoutName} · ${topResults.length} sources (${searchRes.providerName})`;
 
-        onMayorSpeak(`${dispatchRes.scoutName} brought back ${topResults.length} fresh reports on "${searchQuery.slice(0, 48)}"!`);
+        onMayorSpeak(
+          `${dispatchRes.scoutName} brought back ${topResults.length} fresh reports on "${searchQuery.slice(0, 48)}"!`,
+        );
         speakMayorReply(summaryReply.slice(0, 320));
         appendMessage({
           id: `mayor-${Date.now()}`,
@@ -573,7 +857,7 @@ export function MayorChatModal({
       // 2) Zero-Token Fast Path: simple greetings & status reports
       if (isSimpleGreeting(trimmed)) {
         const eff = getWeatherSeasonEffect(weather, structures);
-        const reply = `Good day, friend! Alderbrook is in ${eff.label} (${timeOfDay}) with ${agents.length} villagers active. Ask for a status report, tell me what to build, or have me hire new hands!`;
+        const reply = `Good day from ${townName}! We're in ${eff.label} (${timeOfDay}) with ${agents.length} villagers. Tell me to build a Research Lab, expand to the Cave, lay roads, extend the train track, or switch on Auto mode!`;
         onMayorSpeak(reply);
         speakMayorReply(reply);
         appendMessage({
@@ -587,7 +871,19 @@ export function MayorChatModal({
       }
 
       if (isSimpleStatusCheck(trimmed)) {
-        const reply = buildLiveStatusSummary(weather, timeOfDay, metrics, agents, structures, logs);
+        const reply = buildLiveStatusSummary(
+          townName,
+          weather,
+          timeOfDay,
+          metrics,
+          agents,
+          structures,
+          logs,
+          unlockedBiomes,
+          roads,
+          railSpurBuilt,
+          autoMode,
+        );
         onMayorSpeak(reply.slice(0, 180));
         speakMayorReply(reply);
         appendMessage({
@@ -614,9 +910,14 @@ export function MayorChatModal({
             body: JSON.stringify({
               message: trimmed,
               history: messages.slice(-4).map((m) => ({ role: m.sender, text: m.text })),
+              townName,
               weather,
               timeOfDay,
               activeDecree,
+              unlockedBiomes,
+              roads,
+              railSpurBuilt,
+              autoMode,
               metrics,
               agents: agents.map((a) => ({
                 name: a.name,
@@ -627,6 +928,7 @@ export function MayorChatModal({
               structures: structures.map((s) => ({
                 plotId: s.plotId,
                 structureType: s.structureType,
+                customLabel: s.customLabel,
                 status: s.status,
                 tier: s.tier,
               })),
@@ -656,22 +958,27 @@ export function MayorChatModal({
 
       // 4) Local Intent Fallback (guaranteed action execution even offline / zero-token mode)
       if (!replyText) {
-        const localIntent = parseLocalIntent(trimmed);
+        const localIntent = parseLocalIntent(trimmed, unlockedBiomes);
         if (localIntent) {
           replyText = localIntent.reply;
           actionPlan = localIntent.action;
         } else {
           replyText = `Heard loud and clear! ${buildLiveStatusSummary(
+            townName,
             weather,
             timeOfDay,
             metrics,
             agents,
             structures,
             logs,
-          )} Say "Build a Cafe Shop" or "Hire a barista" anytime to put me to work.`;
+            unlockedBiomes,
+            roads,
+            railSpurBuilt,
+            autoMode,
+          )} Try "Build a Research Lab", "Expand map to Cave", "Extend the train track", or "Mayor go automatic".`;
         }
       } else if (actionPlan.type === 'none') {
-        const fallbackIntent = parseLocalIntent(trimmed);
+        const fallbackIntent = parseLocalIntent(trimmed, unlockedBiomes);
         if (fallbackIntent) {
           actionPlan = fallbackIntent.action;
         }
@@ -695,6 +1002,24 @@ export function MayorChatModal({
     } finally {
       setIsSending(false);
     }
+  };
+
+  const handleCreateTownInlineSubmit = async () => {
+    const clean = newTownDraft.trim();
+    if (!clean || isSending) return;
+    setCreatingTownInline(false);
+    setNewTownDraft('');
+    const res = await onCreateTown(clean);
+    appendMessage({
+      id: `mayor-town-${Date.now()}`,
+      sender: 'mayor',
+      text: res.ok
+        ? `Welcome to ${clean}! Your previous town stays safely saved — switch back anytime using the Town Switcher.`
+        : res.detail,
+      badge: res.ok ? `🏙️ ${res.badge}` : `⚠️ ${res.badge}`,
+      modelTag: 'Town Charter · 0 tokens',
+      timestampMs: Date.now(),
+    });
   };
 
   const handleToggleMic = () => {
@@ -736,8 +1061,8 @@ export function MayorChatModal({
       aria-modal="true"
       aria-labelledby="mayor-chat-title"
     >
-      <div className="flex h-[86dvh] max-h-[700px] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-amber-400/30 bg-slate-900 shadow-2xl">
-        {/* Header Bar with Pause/Play + Web Search Toggle */}
+      <div className="flex h-[88dvh] max-h-[740px] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-amber-400/30 bg-slate-900 shadow-2xl">
+        {/* Header Bar with Auto Mode + Web Search + Pause/Play */}
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/90 px-3.5 py-2.5">
           <div className="flex min-w-0 items-center gap-2">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-amber-400/40 bg-amber-500/15 text-amber-300">
@@ -757,7 +1082,27 @@ export function MayorChatModal({
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {/* Automatic City-Builder Toggle */}
+            <button
+              type="button"
+              onClick={() => onToggleAutoMode()}
+              aria-pressed={autoMode}
+              title={
+                autoMode
+                  ? 'Automatic City-Builder is ON — Mayor autonomously builds, expands & hires'
+                  : 'Turn ON Automatic City-Builder mode'
+              }
+              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2 text-[11px] font-semibold transition-colors ${
+                autoMode
+                  ? 'border-violet-400/60 bg-violet-500/25 text-violet-100 hover:bg-violet-500/35'
+                  : 'border-white/10 bg-slate-900 text-slate-400 hover:border-white/25 hover:text-slate-200'
+              }`}
+            >
+              <Zap className="h-3.5 w-3.5 shrink-0" />
+              <span>Auto: {autoMode ? 'ON' : 'OFF'}</span>
+            </button>
+
             {/* Web Search ON/OFF Toggle */}
             <button
               type="button"
@@ -768,7 +1113,7 @@ export function MayorChatModal({
                   ? 'Web Search is ON — Mayor can look up live internet news'
                   : 'Web Search is OFF — tap to enable live internet search'
               }
-              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2.5 text-[11px] font-semibold transition-colors ${
+              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2 text-[11px] font-semibold transition-colors ${
                 webSearchEnabled
                   ? 'border-cyan-400/50 bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30'
                   : 'border-white/10 bg-slate-900 text-slate-400 hover:border-white/25 hover:text-slate-200'
@@ -822,6 +1167,80 @@ export function MayorChatModal({
               <X className="h-5 w-5" />
             </button>
           </div>
+        </div>
+
+        {/* Compact Non-Destructive Town Switcher Bar */}
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-slate-950/60 px-3.5 py-2">
+          {!creatingTownInline ? (
+            <>
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <Building2 className="h-3.5 w-3.5 shrink-0 text-amber-300/80" />
+                <select
+                  aria-label="Switch active saved town"
+                  value={activeTownId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    if (nextId === '__new__') {
+                      setCreatingTownInline(true);
+                      return;
+                    }
+                    void onSwitchTown(nextId);
+                  }}
+                  className="min-h-[32px] min-w-0 flex-1 truncate rounded-lg border border-white/10 bg-slate-900 px-2 text-xs font-medium text-slate-100 focus:border-amber-400 focus:outline-none"
+                >
+                  {savedTowns.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.isMain ? `${t.name} (Main)` : t.name} · {t.buildingCount} bldgs · {t.population} pop
+                    </option>
+                  ))}
+                  <option value="__new__">+ New Town…</option>
+                </select>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCreatingTownInline(true)}
+                className="inline-flex min-h-[32px] shrink-0 items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/20"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>New Town</span>
+              </button>
+            </>
+          ) : (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleCreateTownInlineSubmit();
+              }}
+              className="flex flex-1 items-center gap-1.5"
+            >
+              <input
+                type="text"
+                value={newTownDraft}
+                onChange={(e) => setNewTownDraft(e.target.value)}
+                maxLength={48}
+                autoFocus
+                placeholder="New town name (e.g. New Haven)…"
+                className="min-h-[34px] min-w-0 flex-1 rounded-lg border border-amber-400/50 bg-slate-900 px-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!newTownDraft.trim()}
+                className="min-h-[34px] rounded-lg bg-amber-500 px-2.5 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-40"
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreatingTownInline(false);
+                  setNewTownDraft('');
+                }}
+                className="min-h-[34px] rounded-lg px-2 text-xs text-slate-400 hover:text-white"
+              >
+                Cancel
+              </button>
+            </form>
+          )}
         </div>
 
         {/* Live Back-and-Forth Chat Feed */}
@@ -962,8 +1381,8 @@ export function MayorChatModal({
                 isListening
                   ? 'Listening… speak to Mayor Sterling'
                   : webSearchEnabled
-                    ? 'Ask Mayor Sterling or search live world news…'
-                    : 'Ask Mayor Sterling or give an order…'
+                    ? 'Build Research Lab, expand Cave, or search live news…'
+                    : 'Build Research Lab, expand Cave, pave roads, or go auto…'
               }
               className="min-h-[44px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-900 px-3 text-base text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none disabled:opacity-50"
             />

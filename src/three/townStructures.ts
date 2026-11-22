@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { GraphicsQuality, PlotId, StructureType, TownStructure, TownTheme } from '../types/town.ts';
+import type { CustomBuildingStyle, GraphicsQuality, PlotId, StructureType, TownStructure, TownTheme } from '../types/town.ts';
 import { createClothWaveMaterial, createWindSwayMaterial, type WindUniforms } from './townEnvironment.ts';
 import { applyThemeToObjectTree, tagThemeMaterial, type ThemeMaterialRole } from './townThemes.ts';
 
@@ -536,6 +536,184 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.ConeGeometry(2.05, 0.85, 6), roofMat, 0, 2.28, 0);
     addPart(group, new THREE.ConeGeometry(1.25, 0.65, 6), roofMat, 0, 2.86, 0);
     addPart(group, new THREE.SphereGeometry(0.24, 8, 6), lampMat, 0, 1.55, 0);
+  } else if (type === 'custom') {
+    const style: CustomBuildingStyle = structure.customStyle || 'lab';
+    const labelText = (structure.customLabel || 'Research Lab').trim().slice(0, 24);
+
+    // Procedural CanvasTexture nameplate sign mounted on the front facade
+    const signCanvas = document.createElement('canvas');
+    signCanvas.width = 256;
+    signCanvas.height = 64;
+    const sCtx = signCanvas.getContext('2d');
+    const styleAccentMap: Record<CustomBuildingStyle, string> = {
+      lab: '#06b6d4',
+      observatory: '#6366f1',
+      cafe: '#d97706',
+      tavern: '#b45309',
+      forge: '#ea580c',
+      guild: '#8b5cf6',
+      cabin: '#16a34a',
+      tower: '#3b82f6',
+    };
+    const accentHex = styleAccentMap[style] || '#06b6d4';
+    if (sCtx) {
+      sCtx.fillStyle = '#0f172a';
+      sCtx.fillRect(0, 0, 256, 64);
+      sCtx.strokeStyle = accentHex;
+      sCtx.lineWidth = 6;
+      sCtx.strokeRect(4, 4, 248, 56);
+      sCtx.fillStyle = '#f8fafc';
+      sCtx.font = 'bold 24px system-ui, -apple-system, sans-serif';
+      sCtx.textAlign = 'center';
+      sCtx.textBaseline = 'middle';
+      sCtx.fillText(labelText, 128, 33, 232);
+    }
+    const signTex = new THREE.CanvasTexture(signCanvas);
+    signTex.colorSpace = THREE.SRGBColorSpace;
+    const signMat = new THREE.MeshStandardMaterial({
+      map: signTex,
+      roughness: 0.35,
+      emissive: new THREE.Color(accentHex),
+      emissiveIntensity: 0.22,
+    });
+
+    if (style === 'lab') {
+      const labWallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.58 }), 'wall');
+      const labTrimMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x0e7490, roughness: 0.42, metalness: 0.35 }), 'metal');
+      const domeGlassMat = new THREE.MeshStandardMaterial({
+        color: 0xa5f3fc,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 0.32,
+        roughness: 0.16,
+        transparent: true,
+        opacity: 0.72,
+      });
+      const cyanCoreMat = new THREE.MeshStandardMaterial({
+        color: 0x67e8f9,
+        emissive: 0x06b6d4,
+        emissiveIntensity: 1.35,
+        roughness: 0.2,
+      });
+      interiorFireMats.push(cyanCoreMat);
+      cutawayRoofMaterials.push(labTrimMat, domeGlassMat);
+
+      addPart(group, new THREE.BoxGeometry(3.0, 0.3, 2.5), plinthMat, 0, 0.15, 0);
+      addHollowBoxWalls(group, 2.65, 1.65, 2.15, 0.3, 0.14, labWallMat, interiorFloorMat);
+
+      // Interior: Research workbench, glowing cyan reactor tube, specimen shelves
+      addWoodenTable(group, -0.45, 0.32, -0.42, 1.15, 0.54, interiorWoodMat);
+      addPart(group, new THREE.CylinderGeometry(0.18, 0.22, 0.92, 10), cyanCoreMat, 0.65, 0.82, -0.45);
+      addPart(group, new THREE.CylinderGeometry(0.24, 0.24, 0.12, 10), labTrimMat, 0.65, 0.36, -0.45);
+      addPart(group, new THREE.CylinderGeometry(0.24, 0.24, 0.12, 10), labTrimMat, 0.65, 1.28, -0.45);
+      addWallShelf(group, -1.06, 0.32, 0.2, Math.PI / 2, labTrimMat, cyanCoreMat);
+
+      // Roof deck + translucent research dome + brass antenna
+      addPart(group, new THREE.BoxGeometry(2.85, 0.16, 2.35), labTrimMat, 0, 2.02, 0);
+      addPart(group, new THREE.SphereGeometry(0.95, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), domeGlassMat, 0, 2.1, 0);
+      addPart(group, new THREE.CylinderGeometry(0.04, 0.05, 0.72, 6), labTrimMat, 0.85, 2.45, -0.55);
+      addPart(group, new THREE.SphereGeometry(0.11, 8, 6), cyanCoreMat, 0.85, 2.86, -0.55);
+
+      // Door, lab windows & custom nameplate
+      addPart(group, new THREE.BoxGeometry(0.58, 0.98, 0.08), labTrimMat, 0, 0.79, 1.09);
+      addPart(group, new THREE.BoxGeometry(0.52, 0.52, 0.08), winMat, -0.86, 1.18, 1.09);
+      addPart(group, new THREE.BoxGeometry(0.52, 0.52, 0.08), winMat, 0.86, 1.18, 1.09);
+      addPart(group, new THREE.BoxGeometry(1.56, 0.38, 0.07), signMat, 0, 1.82, 1.14);
+    } else if (style === 'observatory') {
+      const obsWallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xddd6fe, roughness: 0.72 }), 'wall');
+      const obsDomeMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.38, metalness: 0.55 }), 'roofPrimary');
+      const brassMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.3, metalness: 0.75 }), 'gold');
+      cutawayRoofMaterials.push(obsDomeMat);
+
+      addPart(group, new THREE.CylinderGeometry(1.62, 1.75, 0.32, 12), plinthMat, 0, 0.16, 0);
+      addHollowBoxWalls(group, 2.25, 1.7, 2.25, 0.32, 0.14, obsWallMat, interiorFloorMat);
+
+      // Interior: Star chart table + glowing celestial orb
+      addWoodenTable(group, 0, 0.34, 0, 0.96, 0.62, interiorWoodMat);
+      addPart(group, new THREE.OctahedronGeometry(0.2, 0), createFireGlowMat(), 0, 1.02, 0);
+
+      // Rotating dome + brass telescope barrel
+      addPart(group, new THREE.SphereGeometry(1.36, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2), obsDomeMat, 0, 2.02, 0);
+      addPart(group, new THREE.CylinderGeometry(0.14, 0.2, 1.45, 8), brassMat, 0.45, 2.75, 0.45, Math.PI / 4, 0, -Math.PI / 6);
+      addPart(group, new THREE.BoxGeometry(0.56, 0.96, 0.08), woodMat, 0, 0.8, 1.14);
+      addPart(group, new THREE.BoxGeometry(1.52, 0.36, 0.07), signMat, 0, 1.78, 1.18);
+    } else if (style === 'cafe') {
+      const cafeWallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.76 }), 'wall');
+      const cafeRoofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.62 }), 'roofPrimary');
+      const awningMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.6 }), 'roofSecondary');
+      cutawayRoofMaterials.push(cafeRoofMat);
+
+      addPart(group, new THREE.BoxGeometry(2.95, 0.28, 2.45), plinthMat, 0, 0.14, 0);
+      addHollowBoxWalls(group, 2.55, 1.58, 2.05, 0.28, 0.14, cafeWallMat, interiorFloorMat);
+
+      // Interior: Espresso bar counter + glowing coffee roaster + cozy bistro table
+      addWoodenTable(group, -0.55, 0.3, -0.45, 1.1, 0.48, interiorWoodMat);
+      addPart(group, new THREE.BoxGeometry(0.32, 0.34, 0.26), createFireGlowMat(), -0.68, 0.94, -0.46);
+      addWoodenTable(group, 0.58, 0.3, 0.22, 0.66, 0.66, interiorWoodMat);
+
+      // Cafe roof + front terrace awning + outdoor bistro table + nameplate
+      addPart(group, new THREE.ConeGeometry(2.05, 0.96, 4), cafeRoofMat, 0, 2.34, 0, 0, Math.PI / 4);
+      addPart(group, new THREE.BoxGeometry(2.35, 0.1, 0.74), awningMat, 0, 1.56, 1.32, 0.24);
+      addPart(group, new THREE.BoxGeometry(0.58, 0.96, 0.08), woodMat, 0, 0.76, 1.04);
+      addPart(group, new THREE.BoxGeometry(0.56, 0.54, 0.08), winMat, -0.82, 1.08, 1.04);
+      addPart(group, new THREE.BoxGeometry(0.56, 0.54, 0.08), winMat, 0.82, 1.08, 1.04);
+      addPart(group, new THREE.BoxGeometry(1.54, 0.36, 0.07), signMat, 0, 1.88, 1.08);
+    } else {
+      // Tavern / Forge / Guild / Cabin / Tower versatile procedural civic hall
+      const roofColorMap: Record<CustomBuildingStyle, number> = {
+        lab: 0x0e7490,
+        observatory: 0x312e81,
+        cafe: 0x92400e,
+        tavern: 0x7c2d12,
+        forge: 0x44403c,
+        guild: 0x4c1d95,
+        cabin: 0x166534,
+        tower: 0x1e3a8a,
+      };
+      const wallColorMap: Record<CustomBuildingStyle, number> = {
+        lab: 0xe2e8f0,
+        observatory: 0xddd6fe,
+        cafe: 0xfef3c7,
+        tavern: 0xf5e6d3,
+        forge: 0x94a3b8,
+        guild: 0xf1f5f9,
+        cabin: 0xb45309,
+        tower: 0xcbd5e1,
+      };
+      const wallMat = tagThemeMaterial(
+        new THREE.MeshStandardMaterial({ color: wallColorMap[style] ?? 0xf1f5f9, roughness: 0.78 }),
+        'wall',
+      );
+      const roofMat = tagThemeMaterial(
+        new THREE.MeshStandardMaterial({ color: roofColorMap[style] ?? 0x1e3a8a, roughness: 0.62 }),
+        'roofPrimary',
+      );
+      cutawayRoofMaterials.push(roofMat);
+
+      const isTall = style === 'tower';
+      const wallH = isTall ? 2.45 : 1.62;
+      const wX = isTall ? 1.85 : 2.55;
+      const wZ = isTall ? 1.85 : 2.1;
+
+      addPart(group, new THREE.BoxGeometry(wX + 0.4, 0.3, wZ + 0.4), plinthMat, 0, 0.15, 0);
+      addHollowBoxWalls(group, wX, wallH, wZ, 0.3, 0.14, wallMat, interiorFloorMat);
+
+      // Interior focal table + glowing hearth/forge/lantern
+      const shelfAccentMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.65 });
+      addWoodenTable(group, 0, 0.32, 0.1, 0.88, 0.52, interiorWoodMat);
+      addPart(group, new THREE.BoxGeometry(0.46, 0.42, 0.42), createFireGlowMat(), -0.58, 0.56, -0.55);
+      addWallShelf(group, wX / 2 - 0.24, 0.32, -0.1, -Math.PI / 2, interiorWoodMat, shelfAccentMat);
+
+      // Roof + optional forge chimney
+      addPart(group, new THREE.ConeGeometry(isTall ? 1.55 : 2.08, isTall ? 1.35 : 1.05, 4), roofMat, 0, 0.3 + wallH + (isTall ? 0.66 : 0.5), 0, 0, Math.PI / 4);
+      if (style === 'forge' || style === 'tavern') {
+        addPart(group, new THREE.BoxGeometry(0.46, 1.15, 0.46), plinthMat, -0.78, 0.3 + wallH + 0.45, -0.55);
+      }
+
+      addPart(group, new THREE.BoxGeometry(0.56, 0.96, 0.08), woodMat, 0, 0.78, wZ / 2 + 0.02);
+      addPart(group, new THREE.BoxGeometry(0.46, 0.48, 0.08), winMat, -wX * 0.3, 1.12, wZ / 2 + 0.02);
+      addPart(group, new THREE.BoxGeometry(0.46, 0.48, 0.08), winMat, wX * 0.3, 1.12, wZ / 2 + 0.02);
+      addPart(group, new THREE.BoxGeometry(1.52, 0.36, 0.07), signMat, 0, 0.3 + wallH - 0.08, wZ / 2 + 0.08);
+    }
   } else {
     // clock_tower
     const brickMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9f1239, roughness: 0.76 }), 'brick');
@@ -619,7 +797,11 @@ export function disposeStructureGroup(
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const mat of mats) {
         if (!mat) continue;
-        const idx = lanternMaterials.indexOf(mat as THREE.MeshStandardMaterial);
+        const stdMat = mat as THREE.MeshStandardMaterial;
+        if (stdMat.map && stdMat.map instanceof THREE.CanvasTexture) {
+          stdMat.map.dispose();
+        }
+        const idx = lanternMaterials.indexOf(stdMat);
         if (idx !== -1) {
           lanternMaterials.splice(idx, 1);
         }

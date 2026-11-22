@@ -1,5 +1,9 @@
 export type LocationId = 'town_hall' | 'workshop' | 'market' | 'park';
 
+export type BiomeId = 'forest' | 'desert' | 'cave';
+
+export const ALL_BIOME_IDS: BiomeId[] = ['forest', 'desert', 'cave'];
+
 export type PlotId =
   | 'plot_nw'
   | 'plot_ne'
@@ -8,7 +12,23 @@ export type PlotId =
   | 'plot_n_west'
   | 'plot_n_east'
   | 'plot_s_west'
-  | 'plot_s_east';
+  | 'plot_s_east'
+  | 'plot_forest_1'
+  | 'plot_forest_2'
+  | 'plot_desert_1'
+  | 'plot_desert_2'
+  | 'plot_cave_1'
+  | 'plot_cave_2';
+
+export type CustomBuildingStyle =
+  | 'lab'
+  | 'observatory'
+  | 'cafe'
+  | 'tavern'
+  | 'forge'
+  | 'guild'
+  | 'cabin'
+  | 'tower';
 
 export type StructureType =
   | 'bakery'
@@ -18,7 +38,8 @@ export type StructureType =
   | 'library'
   | 'granary'
   | 'pavilion'
-  | 'clock_tower';
+  | 'clock_tower'
+  | 'custom';
 
 export type StructureStatus = 'building' | 'complete';
 
@@ -147,6 +168,27 @@ export interface TownStructure {
   proposedBy: string;
   lastBuilder: string;
   updatedAtMs: number;
+  /** Optional custom procedural building nameplate (e.g. "Research Lab", "Cafe Shop") */
+  customLabel?: string;
+  /** Visual architecture preset for custom procedural buildings */
+  customStyle?: CustomBuildingStyle;
+}
+
+export interface TownSummary {
+  id: string;
+  name: string;
+  isMain: boolean;
+  updatedAtMs: number;
+  buildingCount: number;
+  population: number;
+}
+
+export interface TownExpansionState {
+  townName: string;
+  unlockedBiomes: BiomeId[];
+  roads: string[];
+  railSpurBuilt: boolean;
+  autoMode: boolean;
 }
 
 export interface AgentRecord {
@@ -357,7 +399,7 @@ export interface ProviderPresetMeta {
   suggestedModels: string[];
 }
 
-export const ALL_PLOT_IDS: PlotId[] = [
+export const CORE_PLOT_IDS: PlotId[] = [
   'plot_nw',
   'plot_ne',
   'plot_sw',
@@ -367,6 +409,77 @@ export const ALL_PLOT_IDS: PlotId[] = [
   'plot_s_west',
   'plot_s_east',
 ];
+
+export const BIOME_PLOT_IDS: Record<BiomeId, PlotId[]> = {
+  forest: ['plot_forest_1', 'plot_forest_2'],
+  desert: ['plot_desert_1', 'plot_desert_2'],
+  cave: ['plot_cave_1', 'plot_cave_2'],
+};
+
+export const ALL_PLOT_IDS: PlotId[] = [
+  ...CORE_PLOT_IDS,
+  ...BIOME_PLOT_IDS.forest,
+  ...BIOME_PLOT_IDS.desert,
+  ...BIOME_PLOT_IDS.cave,
+];
+
+export function getAvailablePlotIds(unlockedBiomes: BiomeId[]): PlotId[] {
+  const plots: PlotId[] = [...CORE_PLOT_IDS];
+  for (const b of unlockedBiomes) {
+    if (BIOME_PLOT_IDS[b]) {
+      plots.push(...BIOME_PLOT_IDS[b]);
+    }
+  }
+  return plots;
+}
+
+export interface BiomeMeta {
+  id: BiomeId;
+  label: string;
+  shortLabel: string;
+  direction: string;
+  center: { x: number; z: number };
+  color: string;
+  roadId: string;
+  plots: PlotId[];
+  summary: string;
+}
+
+export const BIOME_META: Record<BiomeId, BiomeMeta> = {
+  forest: {
+    id: 'forest',
+    label: 'Dense Forest',
+    shortLabel: 'Forest',
+    direction: 'North-West',
+    center: { x: -28, z: -24 },
+    color: '#16a34a',
+    roadId: 'plaza_to_forest',
+    plots: ['plot_forest_1', 'plot_forest_2'],
+    summary: 'Deep pine timber groves, mossy boulders, and woodland outpost plots.',
+  },
+  desert: {
+    id: 'desert',
+    label: 'Desert Dunes',
+    shortLabel: 'Desert',
+    direction: 'South-East',
+    center: { x: 28, z: 24 },
+    color: '#d97706',
+    roadId: 'plaza_to_desert',
+    plots: ['plot_desert_1', 'plot_desert_2'],
+    summary: 'Sun-baked golden dunes, saguaro cacti, sandstone arches, and trade outposts.',
+  },
+  cave: {
+    id: 'cave',
+    label: 'Crystal Mountain Cave',
+    shortLabel: 'Crystal Cave',
+    direction: 'North-East',
+    center: { x: 28, z: -25 },
+    color: '#06b6d4',
+    roadId: 'plaza_to_cave',
+    plots: ['plot_cave_1', 'plot_cave_2'],
+    summary: 'Hollow see-inside mountain cavern rich with glowing cyan & amber crystals.',
+  },
+};
 
 export const ALL_STRUCTURE_TYPES: StructureType[] = [
   'bakery',
@@ -379,7 +492,10 @@ export const ALL_STRUCTURE_TYPES: StructureType[] = [
   'clock_tower',
 ];
 
-export const PLOT_META: Record<PlotId, { label: string; shortLabel: string; x: number; z: number }> = {
+export const PLOT_META: Record<
+  PlotId,
+  { label: string; shortLabel: string; x: number; z: number; biome?: BiomeId }
+> = {
   plot_nw: { label: 'Northwest Corner', shortLabel: 'NW', x: -8.6, z: -8.4 },
   plot_ne: { label: 'Northeast Corner', shortLabel: 'NE', x: 8.6, z: -8.4 },
   plot_sw: { label: 'Southwest Corner', shortLabel: 'SW', x: -8.6, z: 8.2 },
@@ -388,6 +504,12 @@ export const PLOT_META: Record<PlotId, { label: string; shortLabel: string; x: n
   plot_n_east: { label: 'North-East Terrace', shortLabel: 'NET', x: 5.2, z: -13.4 },
   plot_s_west: { label: 'South-West Meadow', shortLabel: 'SWM', x: -5.2, z: 13.0 },
   plot_s_east: { label: 'South-East Meadow', shortLabel: 'SEM', x: 5.2, z: 13.0 },
+  plot_forest_1: { label: 'Pine Glade Clearing', shortLabel: 'F1', x: -24.8, z: -22.2, biome: 'forest' },
+  plot_forest_2: { label: 'Deepwood Timber Yard', shortLabel: 'F2', x: -30.5, z: -17.0, biome: 'forest' },
+  plot_desert_1: { label: 'Sunstone Outpost', shortLabel: 'D1', x: 25.2, z: 22.4, biome: 'desert' },
+  plot_desert_2: { label: 'Dune Caravan Pad', shortLabel: 'D2', x: 30.8, z: 16.8, biome: 'desert' },
+  plot_cave_1: { label: 'Crystal Cavern Floor', shortLabel: 'C1', x: 27.6, z: -24.6, biome: 'cave' },
+  plot_cave_2: { label: 'Mountain Ridge Outpost', shortLabel: 'C2', x: 21.8, z: -28.8, biome: 'cave' },
 };
 
 export const STRUCTURE_META: Record<
@@ -447,7 +569,125 @@ export const STRUCTURE_META: Record<
     color: '#a855f7',
     bonus: { prosperity: 2, order: 3, morale: 2 },
   },
+  custom: {
+    label: 'Custom Civic Hall',
+    category: 'Custom Project',
+    color: '#06b6d4',
+    bonus: { prosperity: 3, order: 2, morale: 3 },
+  },
 };
+
+export const CUSTOM_STYLE_COLORS: Record<CustomBuildingStyle, string> = {
+  lab: '#06b6d4',
+  observatory: '#6366f1',
+  cafe: '#d97706',
+  tavern: '#b45309',
+  forge: '#ea580c',
+  guild: '#8b5cf6',
+  cabin: '#16a34a',
+  tower: '#3b82f6',
+};
+
+export function getStructureDisplayLabel(
+  structure: Pick<TownStructure, 'structureType' | 'customLabel'>,
+): string {
+  if (structure.structureType === 'custom' && structure.customLabel?.trim()) {
+    return structure.customLabel.trim();
+  }
+  return STRUCTURE_META[structure.structureType]?.label ?? 'Civic Structure';
+}
+
+export function getStructureColor(
+  structure: Pick<TownStructure, 'structureType' | 'customStyle'>,
+): string {
+  if (structure.structureType === 'custom' && structure.customStyle) {
+    return CUSTOM_STYLE_COLORS[structure.customStyle] ?? STRUCTURE_META.custom.color;
+  }
+  return STRUCTURE_META[structure.structureType]?.color ?? '#06b6d4';
+}
+
+export function inferCustomBuildingSpec(rawName: string): {
+  label: string;
+  style: CustomBuildingStyle;
+  suggestedRole: string;
+  suggestedWorkerPrompt: string;
+} {
+  const cleaned = rawName
+    .replace(/^(a|an|the|new|custom|my)\s+/i, '')
+    .replace(/[.!?]+$/g, '')
+    .trim()
+    .slice(0, 36);
+  const label = cleaned
+    ? cleaned
+        .split(/\s+/)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ')
+    : 'Research Lab';
+  const low = label.toLowerCase();
+
+  if (/(research|lab|science|clinic|hospital|alchemy|tech|studio|academy)/i.test(low)) {
+    return {
+      label,
+      style: 'lab',
+      suggestedRole: 'Lead Researcher',
+      suggestedWorkerPrompt: `Hire a brilliant Lead Researcher to run the ${label}`,
+    };
+  }
+  if (/(observatory|star|astro|planetarium|telescope|beacon)/i.test(low)) {
+    return {
+      label,
+      style: 'observatory',
+      suggestedRole: 'Chief Astronomer',
+      suggestedWorkerPrompt: `Hire a keen Chief Astronomer to staff the ${label}`,
+    };
+  }
+  if (/(cafe|coffee|tea|bistro|espresso|roaster)/i.test(low)) {
+    return {
+      label,
+      style: 'cafe',
+      suggestedRole: 'Master Barista',
+      suggestedWorkerPrompt: `Hire a friendly Master Barista to brew at the ${label}`,
+    };
+  }
+  if (/(tavern|inn|pub|hotel|lodge|restaurant|diner)/i.test(low)) {
+    return {
+      label,
+      style: 'tavern',
+      suggestedRole: 'Head Innkeeper',
+      suggestedWorkerPrompt: `Hire a warm Head Innkeeper to manage the ${label}`,
+    };
+  }
+  if (/(forge|smith|foundry|mine|smelter|factory|foundry|mill)/i.test(low)) {
+    return {
+      label,
+      style: 'forge',
+      suggestedRole: 'Master Blacksmith',
+      suggestedWorkerPrompt: `Hire a skilled Master Blacksmith for the ${label}`,
+    };
+  }
+  if (/(guild|bank|museum|theater|school|hall|market|depot|station)/i.test(low)) {
+    return {
+      label,
+      style: 'guild',
+      suggestedRole: 'Guild Steward',
+      suggestedWorkerPrompt: `Hire a capable Guild Steward to oversee the ${label}`,
+    };
+  }
+  if (/(tower|citadel|fort|outpost|spire|lighthouse)/i.test(low)) {
+    return {
+      label,
+      style: 'tower',
+      suggestedRole: 'Outpost Ranger',
+      suggestedWorkerPrompt: `Hire a vigilant Outpost Ranger to watch over the ${label}`,
+    };
+  }
+  return {
+    label,
+    style: 'cabin',
+    suggestedRole: `${label.split(' ')[0]} Specialist`,
+    suggestedWorkerPrompt: `Hire a dedicated specialist to operate the ${label}`,
+  };
+}
 
 export const AI_PROVIDER_PRESETS: ProviderPresetMeta[] = [
   {

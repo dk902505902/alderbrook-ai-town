@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Building2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -15,6 +16,7 @@ import {
   Palette,
   Pause,
   Play,
+  Plus,
   Radio,
   ScrollText,
   Settings,
@@ -22,6 +24,7 @@ import {
   Video,
   Volume2,
   VolumeX,
+  Zap,
 } from 'lucide-react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { AIProvidersModal } from './components/AIProvidersModal.tsx';
@@ -45,8 +48,15 @@ import {
 import { auth, googleAuthProvider } from './lib/firebase.ts';
 import { soundscape } from './lib/soundscape.ts';
 import {
+  createFreshTownState,
+  createNewLocalTown,
+  createNewTownInFirestore,
   enqueueRemoteCommand,
+  listLocalTowns,
+  listUserTowns,
+  loadLocalTown,
   loadOrInitializeTown,
+  LOCAL_MAIN_TOWN_ID,
   markRemoteCommandStatus,
   persistAgentNote,
   persistAgentTurn,
@@ -55,9 +65,12 @@ import {
   persistGodDecree,
   persistHiredWorkers,
   persistRemoteStructureAction,
+  persistTownExpansion,
   persistWeatherShift,
   resetTownInFirestore,
+  saveLocalTown,
   subscribePendingRemoteCommands,
+  type LoadedTownState,
 } from './lib/townStore.ts';
 import {
   loadWebSearchConfig,
@@ -66,18 +79,21 @@ import {
 } from './lib/webSearch.ts';
 import type { AgentWorldCoord } from './three/townScene.ts';
 import {
+  ALL_BIOME_IDS,
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
   ALL_TOWN_THEMES,
+  BIOME_META,
+  BIOME_PLOT_IDS,
   createHiredAgentRecord,
-  createInitialAgents,
-  createInitialLogs,
   DEFAULT_PROVIDER_CONFIG,
   DEFAULT_REMOTE_BRIDGE_CONFIG,
   DEFAULT_SIGNAL_RELAY_CONFIG,
-  DEFAULT_TOWN_METRICS,
   detectDefaultGraphicsQuality,
+  getAvailablePlotIds,
+  getStructureDisplayLabel,
   getWeatherSeasonEffect,
+  inferCustomBuildingSpec,
   LOCATION_LABELS,
   MAX_TOWN_AGENTS,
   normalizeTownTheme,
@@ -89,7 +105,9 @@ import {
   type AgentRecord,
   type AgentTurnResponse,
   type AIProviderConfig,
+  type BiomeId,
   type CliAgentActivity,
+  type CustomBuildingStyle,
   type GraphicsQuality,
   type HiredWorkerSpec,
   type LocationId,
@@ -103,6 +121,7 @@ import {
   type TownLogItem,
   type TownMetrics,
   type TownStructure,
+  type TownSummary,
   type TownTheme,
   type WeatherMode,
 } from './types/town.ts';
@@ -111,7 +130,6 @@ const PROVIDER_STORAGE_KEY = 'ai_town_provider_settings';
 const REMOTE_BRIDGE_STORAGE_KEY = 'alderbrook_remote_bridge_v1';
 const SIGNAL_RELAY_STORAGE_KEY = 'alderbrook_signal_relay_v1';
 const LOCAL_TOWN_ID_STORAGE_KEY = 'alderbrook_local_town_id';
-const LOCAL_TOWN_STORAGE_KEY = 'alderbrook_local_town_v2';
 const GRAPHICS_QUALITY_STORAGE_KEY = 'alderbrook_graphics_quality';
 
 const QUALITY_CYCLE: GraphicsQuality[] = ['low', 'medium', 'high'];
@@ -129,19 +147,6 @@ function loadGraphicsQuality(): GraphicsQuality {
 }
 
 type MobileTab = 'hierarchy' | 'log' | 'decree';
-
-interface LocalTownSnapshot {
-  turnCount: number;
-  activeAgentIndex: number;
-  activeDecree: string;
-  metrics: TownMetrics;
-  timeOfDay: TimeOfDay;
-  weather: WeatherMode;
-  theme: TownTheme;
-  agents: AgentRecord[];
-  structures: TownStructure[];
-  logs: TownLogItem[];
-}
 
 function clampMetric(val: number): number {
   return Math.max(0, Math.min(100, Math.round(val)));
@@ -356,71 +361,89 @@ function parseRemoteBuildTarget(
   return null;
 }
 
-function loadLocalTown(): LocalTownSnapshot {
-  try {
-    const raw = window.localStorage.getItem(LOCAL_TOWN_STORAGE_KEY);
-    if (!raw) {
-      return {
-        turnCount: 0,
-        activeAgentIndex: 0,
-        activeDecree: '',
-        metrics: { ...DEFAULT_TOWN_METRICS },
-        timeOfDay: 'day',
-        weather: 'summer',
-        theme: 'meadow',
-        agents: createInitialAgents(),
-        structures: [],
-        logs: createInitialLogs(),
-      };
-    }
-    const parsed = JSON.parse(raw) as Partial<LocalTownSnapshot>;
-    if (!Array.isArray(parsed.agents) || parsed.agents.length < 5) {
-      throw new Error('Invalid local snapshot');
-    }
-    const restoredAgents = parsed.agents.slice(0, MAX_TOWN_AGENTS).map((a) => ({
-      ...a,
-      activePlotId: a.activePlotId || null,
-      userNote: typeof a.userNote === 'string' ? a.userNote : '',
-    }));
-    return {
-      turnCount: Number(parsed.turnCount ?? 0),
-      activeAgentIndex: Number(parsed.activeAgentIndex ?? 0) % restoredAgents.length,
-      activeDecree: typeof parsed.activeDecree === 'string' ? parsed.activeDecree : '',
-      metrics: parsed.metrics || { ...DEFAULT_TOWN_METRICS },
-      timeOfDay: parsed.timeOfDay || 'day',
-      weather: normalizeWeatherMode(parsed.weather),
-      theme: normalizeTownTheme(parsed.theme),
-      agents: restoredAgents,
-      structures: Array.isArray(parsed.structures) ? parsed.structures : [],
-      logs: Array.isArray(parsed.logs) && parsed.logs.length > 0 ? parsed.logs : createInitialLogs(),
-    };
-  } catch {
-    return {
-      turnCount: 0,
-      activeAgentIndex: 0,
-      activeDecree: '',
-      metrics: { ...DEFAULT_TOWN_METRICS },
-      timeOfDay: 'day',
-      weather: 'summer',
-      theme: 'meadow',
-      agents: createInitialAgents(),
-      structures: [],
-      logs: createInitialLogs(),
-    };
-  }
+const AUTO_SPECIALIST_NAMES = [
+  'Dr. Mira',
+  'Sage Rowan',
+  'Scout Orin',
+  'Barista Maya',
+  'Smith Taren',
+  'Warden Kael',
+  'Botanist Iris',
+  'Mason Bryn',
+  'Archivist Vera',
+  'Explorer Nico',
+];
+
+function createLocalSpecialistWorker(
+  roleTitle: string,
+  buildingLabel: string,
+  existingAgents: AgentRecord[],
+  now: number,
+): AgentRecord {
+  const existingNames = new Set(existingAgents.map((a) => a.name.toLowerCase()));
+  const chosenName =
+    AUTO_SPECIALIST_NAMES.find((n) => !existingNames.has(n.toLowerCase())) ||
+    `Specialist ${existingAgents.length + 1}`;
+  const existingIds = new Set(existingAgents.map((a) => a.id));
+  const spec: HiredWorkerSpec = {
+    name: chosenName,
+    role: roleTitle.slice(0, 56),
+    department: buildingLabel.slice(0, 48),
+    supervisor: 'Architect Lyra',
+    personality: `Dedicated ${roleTitle.toLowerCase()} managing ${buildingLabel}.`,
+    location: 'workshop',
+    assignedPlotId: null,
+    accentColor: /research|astro/i.test(roleTitle)
+      ? '#0ea5e9'
+      : /barista|cafe/i.test(roleTitle)
+        ? '#d97706'
+        : '#14b8a6',
+    outfitColors: {
+      coat: /research|astro/i.test(roleTitle)
+        ? '#0ea5e9'
+        : /barista|cafe/i.test(roleTitle)
+          ? '#d97706'
+          : '#14b8a6',
+      pants: '#1e293b',
+      hat: '#fde68a',
+      trim: '#38bdf8',
+    },
+    hatStyle: /research|astro|librar/i.test(roleTitle)
+      ? 'beret'
+      : /miner|smith/i.test(roleTitle)
+        ? 'helmet'
+        : 'cap',
+    dialogue: `Reporting for duty at ${buildingLabel}!`,
+    currentTask: `Operate and expand ${buildingLabel}`,
+    thought: `Excited to get ${buildingLabel} running smoothly.`,
+  };
+  return createHiredAgentRecord(spec, existingIds, now);
 }
 
 export default function App() {
-  const initialLocal = useRef<LocalTownSnapshot | null>(null);
+  const initialLocal = useRef<LoadedTownState | null>(null);
   if (!initialLocal.current) {
-    initialLocal.current = loadLocalTown();
+    initialLocal.current =
+      loadLocalTown(LOCAL_MAIN_TOWN_ID) ?? createFreshTownState(LOCAL_MAIN_TOWN_ID, 'Alderbrook');
   }
+
+  const [activeTownId, setActiveTownId] = useState<string>(initialLocal.current.townId);
+  const [townName, setTownName] = useState<string>(initialLocal.current.townName);
+  const [savedTowns, setSavedTowns] = useState<TownSummary[]>(() => listLocalTowns());
+  const [unlockedBiomes, setUnlockedBiomes] = useState<BiomeId[]>(
+    initialLocal.current.unlockedBiomes,
+  );
+  const [roads, setRoads] = useState<string[]>(initialLocal.current.roads);
+  const [railSpurBuilt, setRailSpurBuilt] = useState<boolean>(initialLocal.current.railSpurBuilt);
+  const [autoMode, setAutoMode] = useState<boolean>(initialLocal.current.autoMode);
 
   const [agents, setAgents] = useState<AgentRecord[]>(initialLocal.current.agents);
   const [structures, setStructures] = useState<TownStructure[]>(initialLocal.current.structures);
   const [logs, setLogs] = useState<TownLogItem[]>(initialLocal.current.logs);
   const [turnCount, setTurnCount] = useState<number>(initialLocal.current.turnCount);
-  const [activeAgentIndex, setActiveAgentIndex] = useState<number>(initialLocal.current.activeAgentIndex);
+  const [activeAgentIndex, setActiveAgentIndex] = useState<number>(
+    initialLocal.current.activeAgentIndex,
+  );
   const [activeDecree, setActiveDecree] = useState<string>(initialLocal.current.activeDecree);
   const [metrics, setMetrics] = useState<TownMetrics>(initialLocal.current.metrics);
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>(initialLocal.current.timeOfDay);
@@ -436,6 +459,8 @@ export default function App() {
   const [isThinking, setIsThinking] = useState(false);
   const [isHiring, setIsHiring] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [topBarNewTownOpen, setTopBarNewTownOpen] = useState(false);
+  const [topBarNewTownName, setTopBarNewTownName] = useState('');
 
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>('mayor_sterling');
   const [selectedPlotId, setSelectedPlotId] = useState<PlotId | null>(null);
@@ -454,6 +479,8 @@ export default function App() {
     | { type: 'agent'; id: AgentId; nonce: number }
     | { type: 'location'; id: LocationId; nonce: number }
     | { type: 'plot'; id: PlotId; nonce: number }
+    | { type: 'biome'; id: BiomeId; nonce: number }
+    | { type: 'rail_spur'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null
@@ -504,12 +531,35 @@ export default function App() {
   const effectiveBaseUrl =
     typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
   const effectiveTownId =
-    signalRelayConfig.customTownId.trim() || user?.uid || localTownId;
+    signalRelayConfig.customTownId.trim() || (user ? activeTownId : localTownId);
 
   const activeAgent = agents[activeAgentIndex % agents.length];
   const activeAgentId = activeAgent?.id ?? 'mayor_sterling';
   const inFlightRef = useRef(false);
   const processingCommandIdsRef = useRef<Set<string>>(new Set());
+
+  const applyLoadedTownState = useCallback((loaded: LoadedTownState) => {
+    setActiveTownId(loaded.townId);
+    setTownName(loaded.townName);
+    setTurnCount(loaded.turnCount);
+    setActiveAgentIndex(loaded.activeAgentIndex);
+    setActiveDecree(loaded.activeDecree);
+    setMetrics(loaded.metrics);
+    setTimeOfDay(loaded.timeOfDay);
+    setWeather(loaded.weather);
+    setTownTheme(loaded.theme);
+    setUnlockedBiomes(loaded.unlockedBiomes);
+    setRoads(loaded.roads);
+    setRailSpurBuilt(loaded.railSpurBuilt);
+    setAutoMode(loaded.autoMode);
+    setAgents(loaded.agents);
+    setStructures(loaded.structures);
+    setLogs(loaded.logs);
+    setSelectedPlotId(null);
+    setSelectedAgentId('mayor_sterling');
+    setFollowActive(false);
+    setFocusRequest({ type: 'reset', nonce: Date.now() });
+  }, []);
 
   useEffect(() => {
     fetch('/api/health')
@@ -530,51 +580,95 @@ export default function App() {
     };
   }, []);
 
+  // Non-destructive local multi-town auto-save (guest mode)
   useEffect(() => {
     if (user) return;
-    try {
-      const snapshot: LocalTownSnapshot = {
-        turnCount,
-        activeAgentIndex,
-        activeDecree,
-        metrics,
-        timeOfDay,
-        weather,
-        theme: townTheme,
-        agents,
-        structures,
-        logs: logs.slice(0, 40),
-      };
-      window.localStorage.setItem(LOCAL_TOWN_STORAGE_KEY, JSON.stringify(snapshot));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [user, turnCount, activeAgentIndex, activeDecree, metrics, timeOfDay, weather, townTheme, agents, structures, logs]);
+    const snapshot: LoadedTownState = {
+      townId: activeTownId || LOCAL_MAIN_TOWN_ID,
+      townName,
+      turnCount,
+      activeAgentIndex,
+      activeDecree,
+      metrics,
+      timeOfDay,
+      weather,
+      theme: townTheme,
+      unlockedBiomes,
+      roads,
+      railSpurBuilt,
+      autoMode,
+      agents,
+      structures,
+      logs: logs.slice(0, 40),
+    };
+    saveLocalTown(snapshot);
+    setSavedTowns(listLocalTowns());
+  }, [
+    user,
+    activeTownId,
+    townName,
+    turnCount,
+    activeAgentIndex,
+    activeDecree,
+    metrics,
+    timeOfDay,
+    weather,
+    townTheme,
+    unlockedBiomes,
+    roads,
+    railSpurBuilt,
+    autoMode,
+    agents,
+    structures,
+    logs,
+  ]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (nextUser) => {
       setUser(nextUser);
-      if (!nextUser) return;
+      if (!nextUser) {
+        const localMain =
+          loadLocalTown(LOCAL_MAIN_TOWN_ID) ??
+          createFreshTownState(LOCAL_MAIN_TOWN_ID, 'Alderbrook');
+        applyLoadedTownState(localMain);
+        setSavedTowns(listLocalTowns());
+        return;
+      }
       try {
-        const cloudState = await loadOrInitializeTown(nextUser.uid);
-        setTurnCount(cloudState.turnCount);
-        setActiveAgentIndex(cloudState.activeAgentIndex);
-        setActiveDecree(cloudState.activeDecree);
-        setMetrics(cloudState.metrics);
-        setTimeOfDay(cloudState.timeOfDay);
-        setWeather(cloudState.weather);
-        setTownTheme(cloudState.theme);
-        setAgents(cloudState.agents);
-        setStructures(cloudState.structures);
-        setLogs(cloudState.logs);
+        const [cloudState, townsList] = await Promise.all([
+          loadOrInitializeTown(nextUser.uid, nextUser.uid),
+          listUserTowns(nextUser.uid),
+        ]);
+        applyLoadedTownState(cloudState);
+        setSavedTowns(
+          townsList.length > 0
+            ? townsList
+            : [
+                {
+                  id: cloudState.townId,
+                  name: cloudState.townName,
+                  isMain: true,
+                  updatedAtMs: Date.now(),
+                  buildingCount: cloudState.structures.length,
+                  population: cloudState.agents.length,
+                },
+              ],
+        );
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
     });
     return () => unsub();
-  }, []);
+  }, [applyLoadedTownState]);
 
   const stateRef = useRef({
+    activeTownId,
+    townName,
+    unlockedBiomes,
+    roads,
+    railSpurBuilt,
+    autoMode,
+    isPlaying,
     agents,
     structures,
     logs,
@@ -584,12 +678,20 @@ export default function App() {
     metrics,
     timeOfDay,
     weather,
+    townTheme,
     turnIntervalSeconds,
     providerConfig,
     remoteBridgeConfig,
     user,
   });
   stateRef.current = {
+    activeTownId,
+    townName,
+    unlockedBiomes,
+    roads,
+    railSpurBuilt,
+    autoMode,
+    isPlaying,
     agents,
     structures,
     logs,
@@ -599,6 +701,7 @@ export default function App() {
     metrics,
     timeOfDay,
     weather,
+    townTheme,
     turnIntervalSeconds,
     providerConfig,
     remoteBridgeConfig,
@@ -1038,6 +1141,7 @@ export default function App() {
           structureMutation,
           weatherShift,
           hiredPayload,
+          snap.activeTownId,
         );
       }
     } catch (error) {
@@ -1121,7 +1225,7 @@ export default function App() {
 
     if (snap.user) {
       try {
-        await persistGodDecree(snap.user.uid, decreeText, nextTurn, decreeLog);
+        await persistGodDecree(snap.user.uid, decreeText, nextTurn, decreeLog, snap.activeTownId);
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
@@ -1134,7 +1238,7 @@ export default function App() {
     );
     if (user) {
       try {
-        await persistAgentNote(user.uid, agentId, note);
+        await persistAgentNote(user.uid, agentId, note, activeTownId);
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
@@ -1223,7 +1327,7 @@ export default function App() {
 
       if (snap.user) {
         try {
-          await persistHiredWorkers(snap.user.uid, newWorkers, welcomeLogs);
+          await persistHiredWorkers(snap.user.uid, newWorkers, welcomeLogs, snap.activeTownId);
         } catch (err) {
           setAsyncError(err instanceof Error ? err : new Error(String(err)));
         }
@@ -1244,7 +1348,7 @@ export default function App() {
     setTimeOfDay(tod);
     if (user) {
       try {
-        await persistEnvironmentSettings(user.uid, { timeOfDay: tod });
+        await persistEnvironmentSettings(user.uid, { timeOfDay: tod }, activeTownId);
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
@@ -1255,13 +1359,17 @@ export default function App() {
     const preferredTod = TOWN_THEME_META[nextTheme].preferredTimeOfDay;
     setTownTheme(nextTheme);
     setTimeOfDay(preferredTod);
-    const activeUser = stateRef.current.user;
-    if (activeUser) {
+    const snap = stateRef.current;
+    if (snap.user) {
       try {
-        await persistEnvironmentSettings(activeUser.uid, {
-          theme: nextTheme,
-          timeOfDay: preferredTod,
-        });
+        await persistEnvironmentSettings(
+          snap.user.uid,
+          {
+            theme: nextTheme,
+            timeOfDay: preferredTod,
+          },
+          snap.activeTownId,
+        );
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
@@ -1286,7 +1394,7 @@ export default function App() {
       dispatchBridgeNotification('weather_shift', `Weather Shifted to ${eff.label}`, eff.shiftHeadline);
       if (snap.user) {
         try {
-          await persistWeatherShift(snap.user.uid, w, shiftLog);
+          await persistWeatherShift(snap.user.uid, w, shiftLog, snap.activeTownId);
         } catch (err) {
           setAsyncError(err instanceof Error ? err : new Error(String(err)));
         }
@@ -1409,7 +1517,7 @@ export default function App() {
             });
             soundscape.playAgentChime(updatedAgent.rank);
             if (snap.user) {
-              await persistCliAgentUpdate(snap.user.uid, updatedAgent, cliLog);
+              await persistCliAgentUpdate(snap.user.uid, updatedAgent, cliLog, snap.activeTownId);
             }
             handledOwnLog = true;
             resultMessage = `${updatedAgent.name} (${sourceLabel}): "${dialogue}"`;
@@ -1459,7 +1567,7 @@ export default function App() {
             setSelectedAgentId(updatedAgent.id);
             soundscape.playAgentChime(updatedAgent.rank);
             if (snap.user) {
-              await persistCliAgentUpdate(snap.user.uid, updatedAgent, cliLog);
+              await persistCliAgentUpdate(snap.user.uid, updatedAgent, cliLog, snap.activeTownId);
             }
             handledOwnLog = true;
             resultMessage = `Assigned ${updatedAgent.name} (${sourceLabel}): ${taskText}`;
@@ -1515,7 +1623,7 @@ export default function App() {
               setFocusRequest({ type: 'plot', id: created.plotId, nonce: now });
               soundscape.playAgentChime(2);
               if (snap.user) {
-                await persistRemoteStructureAction(snap.user.uid, 'create', created);
+                await persistRemoteStructureAction(snap.user.uid, 'create', created, snap.activeTownId);
               }
               resultMessage = `Staked ${label} on ${plotLabel} (${target.plotId}) at 25%.`;
             } else if (existing.status === 'building') {
@@ -1544,7 +1652,7 @@ export default function App() {
                 soundscape.playAgentChime(3);
               }
               if (snap.user) {
-                await persistRemoteStructureAction(snap.user.uid, 'progress', progressed);
+                await persistRemoteStructureAction(snap.user.uid, 'progress', progressed, snap.activeTownId);
               }
               resultMessage = finished
                 ? `Completed ${label} on ${plotLabel}!`
@@ -1570,7 +1678,7 @@ export default function App() {
                 );
               }
               if (snap.user) {
-                await persistRemoteStructureAction(snap.user.uid, 'upgrade', upgraded);
+                await persistRemoteStructureAction(snap.user.uid, 'upgrade', upgraded, snap.activeTownId);
               }
               resultMessage = `Upgraded ${label} on ${plotLabel} to Tier ${upgraded.tier}.`;
             } else {
@@ -1618,7 +1726,14 @@ export default function App() {
 
       if (origin === 'firestore' && snap.user) {
         try {
-          await markRemoteCommandStatus(snap.user.uid, cmd.id, execStatus, resultMessage, remoteLog);
+          await markRemoteCommandStatus(
+            snap.user.uid,
+            cmd.id,
+            execStatus,
+            resultMessage,
+            remoteLog,
+            snap.activeTownId,
+          );
         } catch (err) {
           setErrorBanner(
             err instanceof Error ? err.message : 'Failed to update remote command status in Firestore.',
@@ -1651,12 +1766,13 @@ export default function App() {
       (err) => {
         setErrorBanner(err.message);
       },
+      activeTownId || user.uid,
     );
 
     return () => {
       unsub();
     };
-  }, [user, executeRemoteCommand]);
+  }, [user, activeTownId, executeRemoteCommand]);
 
   // Sync compact town state to Signal Relay REST endpoint (debounced, fails silently on static hosts)
   useEffect(() => {
@@ -1665,12 +1781,17 @@ export default function App() {
     const timer = window.setTimeout(() => {
       const eff = getWeatherSeasonEffect(weather, structures);
       const compactState = {
+        townName,
         weather,
         season: eff.label,
         theme: townTheme,
         timeOfDay,
         turnCount,
         activeDecree,
+        unlockedBiomes,
+        roads,
+        railSpurBuilt,
+        autoMode,
         pulse: {
           prosperity: metrics.prosperity,
           order: metrics.orderLevel,
@@ -1680,12 +1801,12 @@ export default function App() {
           population: agents.length,
           maxPopulation: MAX_TOWN_AGENTS,
           completedBuildings: structures.filter((s) => s.status === 'complete').length,
-          totalPlots: ALL_PLOT_IDS.length,
+          totalPlots: getAvailablePlotIds(unlockedBiomes).length,
         },
         buildings: structures.map((s) => ({
           plotId: s.plotId,
           type: s.structureType,
-          label: STRUCTURE_META[s.structureType].label,
+          label: getStructureDisplayLabel(s),
           status: s.status,
           progress: s.progress,
           tier: s.tier,
@@ -1902,6 +2023,7 @@ export default function App() {
 
   const handleResetTown = async () => {
     setIsPlaying(false);
+    setAutoMode(false);
     setSecondsLeft(turnIntervalSeconds);
     setErrorBanner(null);
     setFollowActive(false);
@@ -1909,34 +2031,381 @@ export default function App() {
 
     if (user) {
       try {
-        const fresh = await resetTownInFirestore(user.uid);
-        setTurnCount(fresh.turnCount);
-        setActiveAgentIndex(fresh.activeAgentIndex);
-        setActiveDecree(fresh.activeDecree);
-        setMetrics(fresh.metrics);
-        setTimeOfDay(fresh.timeOfDay);
-        setWeather(fresh.weather);
-        setTownTheme(fresh.theme);
-        setAgents(fresh.agents);
-        setStructures(fresh.structures);
-        setLogs(fresh.logs);
+        const fresh = await resetTownInFirestore(user.uid, activeTownId, townName);
+        applyLoadedTownState(fresh);
+        const list = await listUserTowns(user.uid);
+        if (list.length > 0) setSavedTowns(list);
       } catch (err) {
         setAsyncError(err instanceof Error ? err : new Error(String(err)));
       }
     } else {
-      setTurnCount(0);
-      setActiveAgentIndex(0);
-      setActiveDecree('');
-      setMetrics({ ...DEFAULT_TOWN_METRICS });
-      setTimeOfDay('day');
-      setWeather('summer');
-      setTownTheme('meadow');
-      setAgents(createInitialAgents());
-      setStructures([]);
-      setLogs(createInitialLogs());
+      const fresh = createFreshTownState(activeTownId || LOCAL_MAIN_TOWN_ID, townName);
+      saveLocalTown(fresh);
+      applyLoadedTownState(fresh);
+      setSavedTowns(listLocalTowns());
     }
     setFocusRequest({ type: 'reset', nonce: Date.now() });
   };
+
+  const handleSwitchTown = useCallback(
+    async (targetTownId: string) => {
+      const snap = stateRef.current;
+      if (!targetTownId || targetTownId === snap.activeTownId) return;
+      setIsPlaying(false);
+      setErrorBanner(null);
+
+      if (snap.user) {
+        try {
+          const loaded = await loadOrInitializeTown(snap.user.uid, targetTownId);
+          applyLoadedTownState(loaded);
+          const list = await listUserTowns(snap.user.uid);
+          if (list.length > 0) setSavedTowns(list);
+        } catch (err) {
+          setErrorBanner(err instanceof Error ? err.message : 'Unable to switch saved town.');
+        }
+      } else {
+        // Persist current town slot before switching (strictly non-destructive)
+        saveLocalTown({
+          townId: snap.activeTownId,
+          townName: snap.townName,
+          turnCount: snap.turnCount,
+          activeAgentIndex: snap.activeAgentIndex,
+          activeDecree: snap.activeDecree,
+          metrics: snap.metrics,
+          timeOfDay: snap.timeOfDay,
+          weather: snap.weather,
+          theme: snap.townTheme,
+          unlockedBiomes: snap.unlockedBiomes,
+          roads: snap.roads,
+          railSpurBuilt: snap.railSpurBuilt,
+          autoMode: snap.autoMode,
+          agents: snap.agents,
+          structures: snap.structures,
+          logs: snap.logs.slice(0, 40),
+        });
+        const loaded =
+          loadLocalTown(targetTownId) ?? createFreshTownState(targetTownId, 'Alderbrook');
+        applyLoadedTownState(loaded);
+        setSavedTowns(listLocalTowns());
+      }
+      soundscape.playAgentChime(1);
+    },
+    [applyLoadedTownState],
+  );
+
+  const handleCreateNewTown = useCallback(
+    async (rawName: string): Promise<MayorBuildResult> => {
+      const cleanName = rawName.trim().slice(0, 48) || 'New Haven';
+      const snap = stateRef.current;
+      setIsPlaying(false);
+      setErrorBanner(null);
+
+      if (snap.user) {
+        try {
+          const fresh = await createNewTownInFirestore(snap.user.uid, cleanName);
+          applyLoadedTownState(fresh);
+          const list = await listUserTowns(snap.user.uid);
+          if (list.length > 0) setSavedTowns(list);
+          soundscape.playBuildCompleteChime();
+          return {
+            ok: true,
+            badge: `Created Town: ${fresh.townName}`,
+            detail: `${fresh.townName} is ready in its own save slot. ${snap.townName} remains safely saved.`,
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            badge: 'Could not create town',
+            detail: err instanceof Error ? err.message : 'Firestore error while creating town.',
+          };
+        }
+      }
+
+      // Guest mode: save current town first, then allocate brand-new local slot
+      saveLocalTown({
+        townId: snap.activeTownId,
+        townName: snap.townName,
+        turnCount: snap.turnCount,
+        activeAgentIndex: snap.activeAgentIndex,
+        activeDecree: snap.activeDecree,
+        metrics: snap.metrics,
+        timeOfDay: snap.timeOfDay,
+        weather: snap.weather,
+        theme: snap.townTheme,
+        unlockedBiomes: snap.unlockedBiomes,
+        roads: snap.roads,
+        railSpurBuilt: snap.railSpurBuilt,
+        autoMode: snap.autoMode,
+        agents: snap.agents,
+        structures: snap.structures,
+        logs: snap.logs.slice(0, 40),
+      });
+      const fresh = createNewLocalTown(cleanName);
+      applyLoadedTownState(fresh);
+      setSavedTowns(listLocalTowns());
+      soundscape.playBuildCompleteChime();
+      return {
+        ok: true,
+        badge: `Created Town: ${fresh.townName}`,
+        detail: `${fresh.townName} is ready in a new save slot. ${snap.townName} stays safely saved.`,
+      };
+    },
+    [applyLoadedTownState],
+  );
+
+  const handleExpandBiome = useCallback(async (biome: BiomeId): Promise<MayorBuildResult> => {
+    const snap = stateRef.current;
+    const now = Date.now();
+    const meta = BIOME_META[biome];
+    setFocusRequest({ type: 'biome', id: biome, nonce: now });
+
+    if (snap.unlockedBiomes.includes(biome)) {
+      return {
+        ok: true,
+        badge: `${meta.shortLabel} Already Open`,
+        detail: `${meta.label} is already unlocked with 2 build plots ready.`,
+      };
+    }
+
+    const nextBiomes: BiomeId[] = [...snap.unlockedBiomes, biome];
+    const nextRoads = snap.roads.includes(`plaza_to_${biome}`)
+      ? snap.roads
+      : [...snap.roads, `plaza_to_${biome}`];
+
+    setUnlockedBiomes(nextBiomes);
+    setRoads(nextRoads);
+    soundscape.playBuildCompleteChime();
+
+    const expandLog: TownLogItem = {
+      id: `biome-${biome}-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'mayor_sterling',
+      agentName: 'Mayor Sterling',
+      rank: 1,
+      location: 'town_hall',
+      targetAgent: 'Architect Lyra',
+      thought: `Expanded ${snap.townName} frontier into ${meta.label} (+2 outer plots).`,
+      dialogue: `Frontier expanded! The ${meta.label} is now open with 2 new building plots and a starter cobblestone trail.`,
+      newTask: `Survey ${meta.label}`,
+      timestampMs: now,
+    };
+    setLogs((prev) => [expandLog, ...prev].slice(0, 50));
+
+    if (snap.user) {
+      try {
+        await persistTownExpansion(
+          snap.user.uid,
+          { unlockedBiomes: nextBiomes, roads: nextRoads },
+          snap.activeTownId,
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    return {
+      ok: true,
+      badge: `Unlocked: ${meta.label}`,
+      detail: `${meta.label} is now open with 2 outer plots (${BIOME_PLOT_IDS[biome].join(', ')}).`,
+    };
+  }, []);
+
+  const handleBuildRoad = useCallback(async (targetHint?: string): Promise<MayorBuildResult> => {
+    const snap = stateRef.current;
+    const now = Date.now();
+    const hint = (targetHint || '').toLowerCase();
+    let roadId = '';
+    let roadLabel = 'Cobblestone Road';
+
+    if (/\b(cave|crystal|mountain)\b/.test(hint)) {
+      roadId = 'plaza_to_cave';
+      roadLabel = 'Crystal Cave Road';
+    } else if (/\b(desert|dune|oasis|sand)\b/.test(hint)) {
+      roadId = 'plaza_to_desert';
+      roadLabel = 'Desert Dunes Road';
+    } else if (/\b(forest|woods|pine|timber)\b/.test(hint)) {
+      roadId = 'plaza_to_forest';
+      roadLabel = 'Dense Forest Road';
+    } else if (/\b(rail|train|spur|depot|station)\b/.test(hint)) {
+      roadId = 'plaza_to_spur';
+      roadLabel = 'Frontier Depot Road';
+    } else {
+      // Match a named structure first (e.g. "road to the Research Lab")
+      const matchedStruct = snap.structures.find((s) => {
+        const lbl = getStructureDisplayLabel(s).toLowerCase();
+        return hint && (lbl.includes(hint) || hint.includes(lbl) || hint.includes(s.plotId));
+      });
+      if (matchedStruct && !snap.roads.includes(`plot:${matchedStruct.plotId}`)) {
+        roadId = `plot:${matchedStruct.plotId}`;
+        roadLabel = `Road to ${getStructureDisplayLabel(matchedStruct)}`;
+      } else {
+        // Next unlinked structure, then next unlocked biome road, then depot road
+        const unlinkedStruct = snap.structures.find((s) => !snap.roads.includes(`plot:${s.plotId}`));
+        if (unlinkedStruct) {
+          roadId = `plot:${unlinkedStruct.plotId}`;
+          roadLabel = `Road to ${getStructureDisplayLabel(unlinkedStruct)}`;
+        } else {
+          const nextBiomeRoad = snap.unlockedBiomes.find(
+            (b) => !snap.roads.includes(`plaza_to_${b}`),
+          );
+          if (nextBiomeRoad) {
+            roadId = `plaza_to_${nextBiomeRoad}`;
+            roadLabel = `Road to ${BIOME_META[nextBiomeRoad].label}`;
+          } else if (!snap.roads.includes('plaza_to_spur')) {
+            roadId = 'plaza_to_spur';
+            roadLabel = 'Frontier Depot Road';
+          } else {
+            const unlinkedCore = getAvailablePlotIds(snap.unlockedBiomes).find(
+              (p) => !snap.roads.includes(`plot:${p}`),
+            );
+            if (unlinkedCore) {
+              roadId = `plot:${unlinkedCore}`;
+              roadLabel = `Road to ${PLOT_META[unlinkedCore].shortLabel}`;
+            }
+          }
+        }
+      }
+    }
+
+    if (!roadId) {
+      return {
+        ok: true,
+        badge: 'Road Network Complete',
+        detail: 'All active plots and unlocked frontiers already have cobblestone road links.',
+      };
+    }
+
+    if (snap.roads.includes(roadId)) {
+      return {
+        ok: true,
+        badge: `${roadLabel} Already Paved`,
+        detail: `${roadLabel} is already laid and ready for villagers.`,
+      };
+    }
+
+    const nextRoads = [...snap.roads, roadId].slice(0, 24);
+    setRoads(nextRoads);
+    soundscape.playAgentChime(2);
+
+    const roadLog: TownLogItem = {
+      id: `road-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'architect_lyra',
+      agentName: 'Architect Lyra',
+      rank: 2,
+      location: 'plaza',
+      targetAgent: 'Mayor Sterling',
+      thought: `Paved instanced cobblestone tiles for ${roadLabel}.`,
+      dialogue: `${roadLabel} is now paved with fresh cobblestones!`,
+      newTask: `Maintain ${roadLabel}`,
+      timestampMs: now,
+    };
+    setLogs((prev) => [roadLog, ...prev].slice(0, 50));
+
+    if (snap.user) {
+      try {
+        await persistTownExpansion(snap.user.uid, { roads: nextRoads }, snap.activeTownId);
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    return {
+      ok: true,
+      badge: `Paved: ${roadLabel}`,
+      detail: `${roadLabel} now connects your town square cleanly.`,
+    };
+  }, []);
+
+  const handleExtendRail = useCallback(async (): Promise<MayorBuildResult> => {
+    const snap = stateRef.current;
+    const now = Date.now();
+    setFocusRequest({ type: 'rail_spur', nonce: now });
+
+    if (snap.railSpurBuilt) {
+      setTriggerTrainNonce(now);
+      return {
+        ok: true,
+        badge: 'Frontier Rail Spur Active',
+        detail: 'The East Frontier Rail Spur & Depot are already operational — summoning the steam express!',
+      };
+    }
+
+    const nextRoads = snap.roads.includes('plaza_to_spur')
+      ? snap.roads
+      : [...snap.roads, 'plaza_to_spur'].slice(0, 24);
+
+    setRailSpurBuilt(true);
+    setRoads(nextRoads);
+    setTriggerTrainNonce(now);
+    soundscape.playBuildCompleteChime();
+
+    const railLog: TownLogItem = {
+      id: `rail-spur-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'architect_lyra',
+      agentName: 'Architect Lyra',
+      rank: 2,
+      location: 'plaza',
+      targetAgent: 'Mayor Sterling',
+      thought: 'Extended East Frontier Railway Spur and built secondary wooden Depot platform.',
+      dialogue: 'All aboard! The East Frontier Railway Spur & Depot Stop are open for the steam express!',
+      newTask: 'Inspect Frontier Depot',
+      timestampMs: now,
+    };
+    setLogs((prev) => [railLog, ...prev].slice(0, 50));
+
+    if (snap.user) {
+      try {
+        await persistTownExpansion(
+          snap.user.uid,
+          { railSpurBuilt: true, roads: nextRoads },
+          snap.activeTownId,
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    return {
+      ok: true,
+      badge: 'Built: Frontier Rail Spur & Depot',
+      detail: 'Extended branch railway track and secondary Depot platform; express train dispatched!',
+    };
+  }, []);
+
+  const handleToggleAutoMode = useCallback((next?: boolean) => {
+    const snap = stateRef.current;
+    const targetVal = typeof next === 'boolean' ? next : !snap.autoMode;
+    setAutoMode(targetVal);
+    if (targetVal && !snap.isPlaying) {
+      setIsPlaying(true);
+    }
+    const now = Date.now();
+    const autoLog: TownLogItem = {
+      id: `auto-mode-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'mayor_sterling',
+      agentName: 'Mayor Sterling',
+      rank: 1,
+      location: 'town_hall',
+      targetAgent: null,
+      thought: targetVal
+        ? 'Automatic City-Builder mode activated — planning builds, biomes, roads, and hires.'
+        : 'Automatic City-Builder mode paused — returning to manual command.',
+      dialogue: targetVal
+        ? 'Automatic City-Builder mode ON! Watch our town grow on its own.'
+        : 'Automatic City-Builder mode OFF — awaiting your next order.',
+      newTask: targetVal ? 'Autonomous city expansion' : 'Await player orders',
+      timestampMs: now,
+    };
+    setLogs((prev) => [autoLog, ...prev].slice(0, 50));
+    if (snap.user) {
+      void persistTownExpansion(snap.user.uid, { autoMode: targetVal }, snap.activeTownId).catch(
+        () => {},
+      );
+    }
+  }, []);
 
   const handleAuthToggle = async () => {
     setAuthBusy(true);
@@ -1977,33 +2446,99 @@ export default function App() {
   };
 
   const handleMayorBuildStructure = useCallback(
-    async (structureType: StructureType, displayLabel?: string): Promise<MayorBuildResult> => {
+    async (
+      structureType: StructureType,
+      displayLabel?: string,
+      customStyle?: CustomBuildingStyle,
+      preferredBiome?: BiomeId,
+    ): Promise<MayorBuildResult> => {
       const snap = stateRef.current;
       const now = Date.now();
-      const label = displayLabel || STRUCTURE_META[structureType].label;
-      const target = parseRemoteBuildTarget(
-        { id: `mayor_${now}`, type: 'build_structure', value: structureType, status: 'pending' },
-        snap.structures,
-      );
-      if (!target) {
+      const customSpec =
+        structureType === 'custom' ? inferCustomBuildingSpec(displayLabel || 'Research Lab') : null;
+      const label =
+        displayLabel?.trim() ||
+        customSpec?.label ||
+        STRUCTURE_META[structureType]?.label ||
+        'Town Building';
+      const resolvedStyle = customStyle || customSpec?.style;
+
+      // Auto-unlock requested outer biome if player asked to build there directly
+      let activeBiomes = snap.unlockedBiomes;
+      if (preferredBiome && !activeBiomes.includes(preferredBiome)) {
+        activeBiomes = [...activeBiomes, preferredBiome];
+        setUnlockedBiomes(activeBiomes);
+        if (snap.user) {
+          void persistTownExpansion(
+            snap.user.uid,
+            { unlockedBiomes: activeBiomes },
+            snap.activeTownId,
+          ).catch(() => {});
+        }
+      }
+
+      const availablePlots = getAvailablePlotIds(activeBiomes);
+      const occupiedMap = new Map(snap.structures.map((s) => [s.plotId, s]));
+
+      let chosenPlot: PlotId | null = null;
+
+      // 1) If preferred biome requested, prioritize open plot inside that biome
+      if (preferredBiome) {
+        const biomeEmpty = BIOME_PLOT_IDS[preferredBiome].find((p) => !occupiedMap.has(p));
+        if (biomeEmpty) chosenPlot = biomeEmpty;
+      }
+
+      // 2) Otherwise check if same building is currently under construction or upgradable
+      if (!chosenPlot) {
+        const matchingExisting = snap.structures.find((s) => {
+          const sameType =
+            structureType === 'custom'
+              ? s.structureType === 'custom' &&
+                (s.customLabel || '').toLowerCase() === label.toLowerCase()
+              : s.structureType === structureType;
+          return sameType && (s.status === 'building' || s.tier < 3);
+        });
+        if (matchingExisting) {
+          chosenPlot = matchingExisting.plotId;
+        }
+      }
+
+      // 3) Otherwise pick first open plot across unlocked town + biomes
+      if (!chosenPlot) {
+        chosenPlot = availablePlots.find((p) => !occupiedMap.has(p)) ?? null;
+      }
+
+      // 4) Fallback: progress/upgrade any existing building
+      if (!chosenPlot) {
+        const upgradable = snap.structures.find((s) => s.status === 'building' || s.tier < 3);
+        if (upgradable) chosenPlot = upgradable.plotId;
+      }
+
+      if (!chosenPlot) {
         return {
           ok: false,
-          badge: 'All 8 plots at Tier 3',
-          detail: 'Every plot in Alderbrook is already built and upgraded to Tier 3.',
+          badge: `All ${availablePlots.length} plots at Tier 3`,
+          detail:
+            activeBiomes.length < 3
+              ? 'All open plots are at Tier 3! Expand into Forest, Desert, or Cave to unlock more plots.'
+              : 'Every single plot across your town and outer biomes is already Tier 3!',
         };
       }
-      const existing = snap.structures.find((s) => s.plotId === target.plotId);
-      const plotLabel = PLOT_META[target.plotId].shortLabel;
+
+      const existing = occupiedMap.get(chosenPlot);
+      const plotLabel = PLOT_META[chosenPlot].shortLabel;
       let nextStruct: TownStructure;
       let actionKind: 'create' | 'progress' | 'upgrade';
       let badge: string;
 
       if (!existing) {
         nextStruct = {
-          plotId: target.plotId,
+          plotId: chosenPlot,
           structureType,
+          customLabel: structureType === 'custom' ? label.slice(0, 36) : undefined,
+          customStyle: structureType === 'custom' ? resolvedStyle : undefined,
           status: 'building',
-          progress: 25,
+          progress: 50,
           tier: 1,
           proposedBy: 'Mayor Sterling',
           lastBuilder: 'Mayor Sterling',
@@ -2016,6 +2551,7 @@ export default function App() {
       } else if (existing.status === 'building') {
         const nextProgress = Math.min(100, existing.progress + 50);
         const done = nextProgress >= 100;
+        const existingLabel = getStructureDisplayLabel(existing);
         nextStruct = {
           ...existing,
           progress: nextProgress,
@@ -2024,11 +2560,14 @@ export default function App() {
           updatedAtMs: now,
         };
         actionKind = 'progress';
-        badge = done ? `Completed: ${label} (${plotLabel})` : `Built: ${label} ${nextProgress}%`;
+        badge = done
+          ? `Completed: ${existingLabel} (${plotLabel})`
+          : `Built: ${existingLabel} ${nextProgress}%`;
         setStructures((prev) => prev.map((s) => (s.plotId === nextStruct.plotId ? nextStruct : s)));
         if (done) soundscape.playBuildCompleteChime();
         else soundscape.playAgentChime(2);
       } else {
+        const existingLabel = getStructureDisplayLabel(existing);
         nextStruct = {
           ...existing,
           tier: Math.min(3, existing.tier + 1),
@@ -2036,9 +2575,34 @@ export default function App() {
           updatedAtMs: now,
         };
         actionKind = 'upgrade';
-        badge = `Upgraded: ${label} to Tier ${nextStruct.tier}`;
+        badge = `Upgraded: ${existingLabel} to Tier ${nextStruct.tier}`;
         setStructures((prev) => prev.map((s) => (s.plotId === nextStruct.plotId ? nextStruct : s)));
         soundscape.playBuildCompleteChime();
+      }
+
+      // If creating a custom building (e.g. Research Lab) and under 15-villager cap, staff a matching specialist!
+      let recruitedRoleNote = '';
+      let recruitedWorker: AgentRecord | null = null;
+      if (
+        actionKind === 'create' &&
+        structureType === 'custom' &&
+        customSpec &&
+        snap.agents.length < MAX_TOWN_AGENTS
+      ) {
+        const alreadyHasRole = snap.agents.some(
+          (a) => a.role.toLowerCase() === customSpec.suggestedRole.toLowerCase(),
+        );
+        if (!alreadyHasRole) {
+          recruitedWorker = createLocalSpecialistWorker(
+            customSpec.suggestedRole,
+            label,
+            snap.agents,
+            now + 5,
+          );
+          setAgents((prev) => [...prev, recruitedWorker!].slice(0, MAX_TOWN_AGENTS));
+          recruitedRoleNote = ` + Staffed ${recruitedWorker.name} (${recruitedWorker.role})`;
+          badge = `${badge} · ${recruitedWorker.role}`;
+        }
       }
 
       const logItem: TownLogItem = {
@@ -2049,25 +2613,124 @@ export default function App() {
         rank: 1,
         location: 'town_hall',
         targetAgent: 'Architect Lyra',
-        thought: `Player requested ${label} in Mayor Chat.`,
+        thought: `Player requested ${label} in Mayor Chat${recruitedRoleNote}.`,
         dialogue: `${badge} — builders are mobilized!`,
         newTask: badge,
         timestampMs: now,
       };
       setLogs((prev) => [logItem, ...prev].slice(0, 50));
-      setSelectedPlotId(target.plotId);
-      setFocusRequest({ type: 'plot', id: target.plotId, nonce: now });
+      setSelectedPlotId(chosenPlot);
+      setFocusRequest({ type: 'plot', id: chosenPlot, nonce: now });
       if (snap.user) {
         try {
-          await persistRemoteStructureAction(snap.user.uid, actionKind, nextStruct);
+          await persistRemoteStructureAction(
+            snap.user.uid,
+            actionKind,
+            nextStruct,
+            snap.activeTownId,
+          );
+          if (recruitedWorker) {
+            await persistHiredWorkers(snap.user.uid, [recruitedWorker], [], snap.activeTownId);
+          }
         } catch {
           // Non-fatal in chat
         }
       }
-      return { ok: true, badge, detail: `${badge} on ${PLOT_META[target.plotId].label}.` };
+      return {
+        ok: true,
+        badge,
+        detail: `${badge} on ${PLOT_META[chosenPlot].label}.${recruitedRoleNote}`,
+      };
     },
     [],
   );
+
+  // Automatic City-Builder Loop (lightweight, zero-token civic progression when Auto + Play are ON)
+  useEffect(() => {
+    if (!autoMode || !isPlaying) return;
+
+    const autoBlueprintCycle: Array<{
+      type: StructureType;
+      label: string;
+      style?: CustomBuildingStyle;
+    }> = [
+      { type: 'custom', label: 'Research Lab', style: 'lab' },
+      { type: 'bakery', label: 'Artisan Bakery' },
+      { type: 'greenhouse', label: 'Glass Greenhouse' },
+      { type: 'custom', label: 'Observatory', style: 'observatory' },
+      { type: 'custom', label: 'Artisan Cafe', style: 'cafe' },
+      { type: 'windmill', label: 'Timber Windmill' },
+      { type: 'library', label: 'Town Library' },
+      { type: 'custom', label: 'Crystal Forge', style: 'forge' },
+    ];
+
+    const intervalId = window.setInterval(() => {
+      const snap = stateRef.current;
+      if (!snap.autoMode || !snap.isPlaying) return;
+
+      // 1) Finish any active construction site first
+      const activeSite = snap.structures.find((s) => s.status === 'building');
+      if (activeSite) {
+        void handleMayorBuildStructure(
+          activeSite.structureType,
+          activeSite.customLabel,
+          activeSite.customStyle,
+        );
+        return;
+      }
+
+      // 2) Connect an unlinked completed building with a cobblestone road
+      const unlinkedStruct = snap.structures.find(
+        (s) => s.status === 'complete' && !snap.roads.includes(`plot:${s.plotId}`),
+      );
+      if (unlinkedStruct) {
+        void handleBuildRoad(getStructureDisplayLabel(unlinkedStruct));
+        return;
+      }
+
+      // 3) Expand into next outer biome once core town grows
+      if (snap.structures.length >= 2 && snap.unlockedBiomes.length < ALL_BIOME_IDS.length) {
+        const nextBiome = ALL_BIOME_IDS.find((b) => !snap.unlockedBiomes.includes(b));
+        if (nextBiome) {
+          void handleExpandBiome(nextBiome);
+          return;
+        }
+      }
+
+      // 4) Extend Frontier Railway Spur once 3+ buildings exist
+      if (snap.structures.length >= 3 && !snap.railSpurBuilt) {
+        void handleExtendRail();
+        return;
+      }
+
+      // 5) Build next civic/custom landmark on an open plot
+      const availablePlots = getAvailablePlotIds(snap.unlockedBiomes);
+      if (snap.structures.length < availablePlots.length) {
+        const blueprint = autoBlueprintCycle[snap.structures.length % autoBlueprintCycle.length];
+        void handleMayorBuildStructure(blueprint.type, blueprint.label, blueprint.style);
+        return;
+      }
+
+      // 6) Upgrade an existing structure toward Tier 3
+      const upgradable = snap.structures.find((s) => s.tier < 3);
+      if (upgradable) {
+        void handleMayorBuildStructure(
+          upgradable.structureType,
+          upgradable.customLabel,
+          upgradable.customStyle,
+        );
+      }
+    }, 10500);
+
+    return () => window.clearInterval(intervalId);
+  }, [
+    autoMode,
+    isPlaying,
+    handleMayorBuildStructure,
+    handleBuildRoad,
+    handleExpandBiome,
+    handleExtendRail,
+  ]);
 
   const handleMayorSpeak = useCallback((dialogue: string) => {
     const clean = dialogue.trim().slice(0, 200);
@@ -2153,6 +2816,9 @@ export default function App() {
       <TownViewport
         agents={agents}
         structures={structures}
+        unlockedBiomes={unlockedBiomes}
+        roads={roads}
+        railSpurBuilt={railSpurBuilt}
         activeAgentId={activeAgentId}
         selectedAgentId={selectedAgentId}
         selectedPlotId={selectedPlotId}
@@ -2181,7 +2847,7 @@ export default function App() {
       {/* Town Hall Quick Action Banner ("Talk to Mayor") */}
       {townHallPromptOpen && !mayorChatOpen && (
         <div className="fixed top-18 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-2xl border border-amber-400/40 bg-slate-950/95 px-3.5 py-2 shadow-2xl md:top-20">
-          <span className="text-xs font-semibold text-white">Town Hall</span>
+          <span className="text-xs font-semibold text-white">{townName} Hall</span>
           <button
             type="button"
             onClick={() => {
@@ -2204,15 +2870,108 @@ export default function App() {
         </div>
       )}
 
+      {/* New Town Quick Popover (Non-Destructive Multi-Town Slot) */}
+      {topBarNewTownOpen && (
+        <div className="fixed top-18 left-3 z-40 w-[min(320px,calc(100vw-1.5rem))] rounded-2xl border border-amber-400/40 bg-slate-950/95 p-3 shadow-2xl md:top-20 md:left-4">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-display text-xs font-semibold text-amber-200">
+              Create New Saved Town
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setTopBarNewTownOpen(false);
+                setTopBarNewTownName('');
+              }}
+              aria-label="Close new town dialog"
+              className="rounded-lg px-1.5 py-0.5 text-xs text-slate-400 hover:text-white"
+            >
+              ✕
+            </button>
+          </div>
+          <p className="mb-2 text-[11px] text-slate-400">
+            Creates a separate save slot — your existing {townName} stays completely untouched.
+          </p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const clean = topBarNewTownName.trim();
+              if (!clean) return;
+              setTopBarNewTownOpen(false);
+              setTopBarNewTownName('');
+              void handleCreateNewTown(clean);
+            }}
+            className="flex items-center gap-1.5"
+          >
+            <input
+              type="text"
+              value={topBarNewTownName}
+              onChange={(e) => setTopBarNewTownName(e.target.value)}
+              maxLength={48}
+              autoFocus
+              placeholder="e.g. New Haven"
+              className="min-h-[38px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={!topBarNewTownName.trim()}
+              className="min-h-[38px] rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-40"
+            >
+              Create
+            </button>
+          </form>
+        </div>
+      )}
+
       {/* Compact Floating Top Bar */}
       <header className="pointer-events-none fixed top-2.5 right-2.5 left-2.5 z-30 flex items-center justify-between gap-2 md:top-4 md:right-4 md:left-4">
-        <div className="pointer-events-auto flex min-h-[48px] max-w-full flex-1 items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/90 px-3.5 py-1.5 shadow-xl md:px-4">
-          {/* Title & Unboxed Status Metadata */}
-          <div className="flex min-w-0 items-center gap-3">
-            <h1 className="font-display text-base font-bold tracking-tight whitespace-nowrap text-white md:text-lg">
-              Alderbrook
-            </h1>
-            <div className="hidden items-center gap-1.5 text-xs text-slate-400 sm:flex">
+        <div className="pointer-events-auto flex min-h-[48px] max-w-full flex-1 items-center justify-between gap-2 rounded-2xl border border-white/10 bg-slate-950/90 px-3 py-1.5 shadow-xl md:gap-3 md:px-4">
+          {/* Town Switcher & Unboxed Status Metadata */}
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="flex min-w-0 items-center gap-1">
+              <Building2 className="hidden h-4 w-4 shrink-0 text-amber-300 sm:block" />
+              <select
+                aria-label="Switch active town"
+                value={activeTownId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === '__new__') {
+                    setTopBarNewTownOpen(true);
+                    return;
+                  }
+                  void handleSwitchTown(val);
+                }}
+                className="min-h-[36px] max-w-[132px] truncate rounded-xl border border-white/10 bg-slate-900/90 px-2 font-display text-sm font-bold text-white focus:border-amber-400 focus:outline-none sm:max-w-[175px] md:text-base"
+              >
+                {savedTowns.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.isMain ? `${t.name} (Main)` : t.name}
+                  </option>
+                ))}
+                <option value="__new__">+ New Town…</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => setTopBarNewTownOpen((v) => !v)}
+                title="Create a brand-new saved town"
+                aria-label="Create new town"
+                className="hidden min-h-[36px] min-w-[34px] items-center justify-center rounded-xl border border-white/10 bg-slate-900 text-amber-300 transition-colors hover:bg-slate-800 sm:inline-flex"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {autoMode && (
+              <button
+                type="button"
+                onClick={() => handleToggleAutoMode(false)}
+                title="Automatic City-Builder is ON (click to disable)"
+                className="hidden min-h-[30px] items-center gap-1 rounded-lg border border-violet-400/50 bg-violet-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-violet-100 hover:bg-violet-500/30 lg:inline-flex"
+              >
+                <Zap className="h-3 w-3" />
+                <span>Auto</span>
+              </button>
+            )}
+            <div className="hidden items-center gap-1.5 text-xs text-slate-400 xl:flex">
               <span className="font-mono-tabular text-slate-300">Turn {turnCount}</span>
               <span aria-hidden="true">·</span>
               <span className="truncate">
@@ -2385,6 +3144,8 @@ export default function App() {
           <TownMinimap
             agents={agents}
             structures={structures}
+            unlockedBiomes={unlockedBiomes}
+            railSpurBuilt={railSpurBuilt}
             coords={minimapCoords}
             activeAgentId={activeAgentId}
             selectedAgentId={selectedAgentId}
@@ -2393,6 +3154,11 @@ export default function App() {
             onFocusLocation={handleFocusLocation}
             onSelectPlot={handleSelectPlot}
             onSelectSignalRelay={handleSelectSignalRelay}
+            onFocusBiome={(biome) => {
+              setSelectedPlotId(null);
+              setFollowActive(false);
+              setFocusRequest({ type: 'biome', id: biome, nonce: Date.now() });
+            }}
           />
         )}
         <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-950/90 p-1 shadow-xl">
@@ -2786,6 +3552,13 @@ export default function App() {
       <MayorChatModal
         isOpen={mayorChatOpen}
         isPlaying={isPlaying}
+        townName={townName}
+        activeTownId={activeTownId}
+        savedTowns={savedTowns}
+        unlockedBiomes={unlockedBiomes}
+        roads={roads}
+        railSpurBuilt={railSpurBuilt}
+        autoMode={autoMode}
         agents={agents}
         structures={structures}
         logs={logs}
@@ -2801,6 +3574,12 @@ export default function App() {
           setSecondsLeft(turnIntervalSeconds);
           setIsPlaying((p) => !p);
         }}
+        onToggleAutoMode={handleToggleAutoMode}
+        onSwitchTown={handleSwitchTown}
+        onCreateTown={handleCreateNewTown}
+        onExpandBiome={handleExpandBiome}
+        onBuildRoad={handleBuildRoad}
+        onExtendRail={handleExtendRail}
         onBuildStructure={handleMayorBuildStructure}
         onHireWorker={handleHireWorker}
         onIssueDecree={handleIssueDecree}

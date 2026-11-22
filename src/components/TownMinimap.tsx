@@ -1,10 +1,12 @@
 import type { AgentWorldCoord } from '../three/townScene.ts';
 import {
-  ALL_PLOT_IDS,
+  BIOME_META,
+  getAvailablePlotIds,
+  getStructureColor,
   PLOT_META,
-  STRUCTURE_META,
   type AgentId,
   type AgentRecord,
+  type BiomeId,
   type LocationId,
   type PlotId,
   type TownStructure,
@@ -13,6 +15,8 @@ import {
 interface TownMinimapProps {
   agents: AgentRecord[];
   structures: TownStructure[];
+  unlockedBiomes?: BiomeId[];
+  railSpurBuilt?: boolean;
   coords: Partial<Record<AgentId, AgentWorldCoord>>;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
@@ -20,6 +24,7 @@ interface TownMinimapProps {
   onSelectAgent: (id: AgentId) => void;
   onFocusLocation: (loc: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
+  onFocusBiome?: (biome: BiomeId) => void;
   onSelectSignalRelay?: () => void;
 }
 
@@ -30,14 +35,11 @@ const LANDMARK_MARKERS: Array<{ id: LocationId; label: string; x: number; z: num
   { id: 'park', label: 'Park', x: 0, z: 10.2 },
 ];
 
-function toMapCoord(val: number): number {
-  // World range [-15, 15] -> SVG [12, 128]
-  return 70 + (val / 15) * 56;
-}
-
 export function TownMinimap({
   agents,
   structures,
+  unlockedBiomes = [],
+  railSpurBuilt = false,
   coords,
   activeAgentId,
   selectedAgentId,
@@ -45,12 +47,18 @@ export function TownMinimap({
   onSelectAgent,
   onFocusLocation,
   onSelectPlot,
+  onFocusBiome,
   onSelectSignalRelay,
 }: TownMinimapProps) {
   const structureByPlot = new Map<PlotId, TownStructure>();
   for (const s of structures) {
     structureByPlot.set(s.plotId, s);
   }
+
+  const expandedView = unlockedBiomes.length > 0 || railSpurBuilt;
+  const worldSpan = expandedView ? 36 : 15;
+  const toMapCoord = (val: number) => 70 + (val / worldSpan) * 58;
+  const visiblePlots = getAvailablePlotIds(unlockedBiomes);
 
   return (
     <div className="rounded-2xl border border-white/15 bg-slate-950/90 p-2 shadow-xl">
@@ -60,16 +68,99 @@ export function TownMinimap({
         role="img"
         aria-label="Overhead Town Radar"
       >
-        {/* Grass Ring */}
+        {/* Outer Terrain Ring */}
         <circle cx="70" cy="70" r="64" fill="#1e293b" stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
-        {/* Walkways */}
-        <line x1="70" y1="22" x2="70" y2="118" stroke="rgba(148,163,184,0.28)" strokeWidth="6" strokeLinecap="round" />
-        <line x1="22" y1="68" x2="118" y2="68" stroke="rgba(148,163,184,0.28)" strokeWidth="6" strokeLinecap="round" />
-        {/* Central Plaza */}
-        <circle cx="70" cy="70" r="14" fill="rgba(148,163,184,0.22)" stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
 
-        {/* 8 Buildable Plots */}
-        {ALL_PLOT_IDS.map((plotId) => {
+        {/* Unlocked Outer Biome Zones */}
+        {unlockedBiomes.map((bId) => {
+          const meta = BIOME_META[bId];
+          const bx = toMapCoord(meta.center.x);
+          const by = toMapCoord(meta.center.z);
+          return (
+            <g
+              key={bId}
+              onClick={() => onFocusBiome?.(bId)}
+              className="cursor-pointer"
+            >
+              <circle
+                cx={bx}
+                cy={by}
+                r="17"
+                fill={meta.color}
+                fillOpacity="0.22"
+                stroke={meta.color}
+                strokeWidth="1"
+                strokeDasharray="2.5 2"
+              />
+              <text
+                x={bx}
+                y={by - 10}
+                textAnchor="middle"
+                fill="#e2e8f0"
+                fontSize="6.2"
+                fontWeight="700"
+              >
+                {meta.shortLabel}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Railway Ring & Optional East Spur */}
+        {expandedView && (
+          <circle
+            cx="70"
+            cy="70"
+            r={(19.6 / worldSpan) * 58}
+            fill="none"
+            stroke="rgba(148,163,184,0.3)"
+            strokeWidth="1.2"
+            strokeDasharray="3 2"
+          />
+        )}
+        {railSpurBuilt && (
+          <line
+            x1={toMapCoord(19.6)}
+            y1={toMapCoord(2.2)}
+            x2={toMapCoord(28.5)}
+            y2={toMapCoord(5.2)}
+            stroke="#22d3ee"
+            strokeWidth="2"
+            strokeLinecap="round"
+          />
+        )}
+
+        {/* Walkways */}
+        <line
+          x1="70"
+          y1={toMapCoord(-11)}
+          x2="70"
+          y2={toMapCoord(11)}
+          stroke="rgba(148,163,184,0.28)"
+          strokeWidth={expandedView ? 3 : 6}
+          strokeLinecap="round"
+        />
+        <line
+          x1={toMapCoord(-11)}
+          y1={toMapCoord(-0.5)}
+          x2={toMapCoord(11)}
+          y2={toMapCoord(-0.5)}
+          stroke="rgba(148,163,184,0.28)"
+          strokeWidth={expandedView ? 3 : 6}
+          strokeLinecap="round"
+        />
+        {/* Central Plaza */}
+        <circle
+          cx="70"
+          cy="70"
+          r={expandedView ? 8 : 14}
+          fill="rgba(148,163,184,0.22)"
+          stroke="rgba(255,255,255,0.18)"
+          strokeWidth="1"
+        />
+
+        {/* Visible Buildable Plots (8 Core + Unlocked Biome Plots) */}
+        {visiblePlots.map((plotId) => {
           const pm = PLOT_META[plotId];
           const cx = toMapCoord(pm.x);
           const cy = toMapCoord(pm.z);
@@ -77,7 +168,7 @@ export function TownMinimap({
           const isSelected = selectedPlotId === plotId;
           const fillColor = st
             ? st.status === 'complete'
-              ? STRUCTURE_META[st.structureType].color
+              ? getStructureColor(st)
               : 'rgba(245, 158, 11, 0.35)'
             : 'rgba(15, 23, 42, 0.45)';
           const strokeColor = isSelected
@@ -87,6 +178,7 @@ export function TownMinimap({
                 ? '#f8fafc'
                 : '#f59e0b'
               : 'rgba(148, 163, 184, 0.45)';
+          const boxSize = expandedView ? 7 : 9;
 
           return (
             <g
@@ -95,10 +187,10 @@ export function TownMinimap({
               className="cursor-pointer"
             >
               <rect
-                x={cx - 4.5}
-                y={cy - 4.5}
-                width="9"
-                height="9"
+                x={cx - boxSize / 2}
+                y={cy - boxSize / 2}
+                width={boxSize}
+                height={boxSize}
                 rx="2"
                 fill={fillColor}
                 stroke={strokeColor}
@@ -120,21 +212,21 @@ export function TownMinimap({
               className="cursor-pointer"
             >
               <rect
-                x={cx - 12}
-                y={cy - 9}
-                width="24"
-                height="18"
-                rx="4"
+                x={cx - (expandedView ? 9 : 12)}
+                y={cy - (expandedView ? 6.5 : 9)}
+                width={expandedView ? 18 : 24}
+                height={expandedView ? 13 : 18}
+                rx="3.5"
                 fill="rgba(15,23,42,0.9)"
                 stroke="rgba(255,255,255,0.25)"
                 strokeWidth="1"
               />
               <text
                 x={cx}
-                y={cy + 3}
+                y={cy + 2.5}
                 textAnchor="middle"
                 fill="#cbd5e1"
-                fontSize="8"
+                fontSize={expandedView ? '6.3' : '8'}
                 fontWeight="600"
               >
                 {lm.label}
@@ -147,21 +239,21 @@ export function TownMinimap({
         {onSelectSignalRelay && (
           <g onClick={onSelectSignalRelay} className="cursor-pointer">
             <rect
-              x={toMapCoord(10.6) - 13}
-              y={toMapCoord(12.2) - 8}
-              width="26"
-              height="16"
-              rx="4"
+              x={toMapCoord(10.6) - (expandedView ? 9 : 13)}
+              y={toMapCoord(12.2) - (expandedView ? 6 : 8)}
+              width={expandedView ? 18 : 26}
+              height={expandedView ? 12 : 16}
+              rx="3.5"
               fill="rgba(8, 51, 68, 0.92)"
               stroke="#22d3ee"
               strokeWidth="1.2"
             />
             <text
               x={toMapCoord(10.6)}
-              y={toMapCoord(12.2) + 3}
+              y={toMapCoord(12.2) + 2.5}
               textAnchor="middle"
               fill="#a5f3fc"
-              fontSize="7.5"
+              fontSize={expandedView ? '6' : '7.5'}
               fontWeight="700"
             >
               Relay
@@ -172,8 +264,8 @@ export function TownMinimap({
         {/* Agents */}
         {agents.map((agent) => {
           const pos = coords[agent.id];
-          const cx = pos ? toMapCoord(pos.x) : 70;
-          const cy = pos ? toMapCoord(pos.z) : 70;
+          const cx = pos ? Math.max(8, Math.min(132, toMapCoord(pos.x))) : 70;
+          const cy = pos ? Math.max(8, Math.min(132, toMapCoord(pos.z))) : 70;
           const isSelected = agent.id === selectedAgentId;
           const isActive = agent.id === activeAgentId;
           return (
@@ -186,7 +278,7 @@ export function TownMinimap({
                 <circle
                   cx={cx}
                   cy={cy}
-                  r="7"
+                  r="6.5"
                   fill="none"
                   stroke={agent.accentColor}
                   strokeWidth="1.5"
@@ -196,7 +288,7 @@ export function TownMinimap({
               <circle
                 cx={cx}
                 cy={cy}
-                r={isSelected ? 5 : 4}
+                r={isSelected ? 4.8 : 3.8}
                 fill={agent.accentColor}
                 stroke={isSelected ? '#ffffff' : '#0f172a'}
                 strokeWidth={isSelected ? 1.5 : 1}

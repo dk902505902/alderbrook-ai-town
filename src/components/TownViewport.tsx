@@ -6,10 +6,12 @@ import {
   type ProjectedLabel,
 } from '../three/townScene.ts';
 import {
+  getStructureDisplayLabel,
   PLOT_META,
   STRUCTURE_META,
   type AgentId,
   type AgentRecord,
+  type BiomeId,
   type GraphicsQuality,
   type LocationId,
   type PlotId,
@@ -22,6 +24,9 @@ import {
 interface TownViewportProps {
   agents: AgentRecord[];
   structures: TownStructure[];
+  unlockedBiomes: BiomeId[];
+  roads: string[];
+  railSpurBuilt: boolean;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
   selectedPlotId: PlotId | null;
@@ -40,6 +45,8 @@ interface TownViewportProps {
     | { type: 'agent'; id: AgentId; nonce: number }
     | { type: 'location'; id: LocationId; nonce: number }
     | { type: 'plot'; id: PlotId; nonce: number }
+    | { type: 'biome'; id: BiomeId; nonce: number }
+    | { type: 'rail_spur'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null;
@@ -58,6 +65,9 @@ interface TownViewportProps {
 export function TownViewport({
   agents,
   structures,
+  unlockedBiomes,
+  roads,
+  railSpurBuilt,
   activeAgentId,
   selectedAgentId,
   selectedPlotId,
@@ -145,6 +155,10 @@ export function TownViewport({
   }, [agents, activeAgentId, selectedAgentId]);
 
   useEffect(() => {
+    controllerRef.current?.syncExpansion(unlockedBiomes, roads, railSpurBuilt);
+  }, [unlockedBiomes, roads, railSpurBuilt]);
+
+  useEffect(() => {
     controllerRef.current?.syncStructures(structures, selectedPlotId);
   }, [structures, selectedPlotId]);
 
@@ -193,6 +207,10 @@ export function TownViewport({
       controllerRef.current.focusLocation(focusRequest.id);
     } else if (focusRequest.type === 'plot') {
       controllerRef.current.focusPlot(focusRequest.id);
+    } else if (focusRequest.type === 'biome') {
+      controllerRef.current.focusBiome(focusRequest.id);
+    } else if (focusRequest.type === 'rail_spur') {
+      controllerRef.current.focusRailSpur();
     } else if (focusRequest.type === 'signal_relay') {
       controllerRef.current.focusSignalRelay();
     } else {
@@ -266,7 +284,7 @@ export function TownViewport({
               </div>
               <h3 className="truncate font-display text-sm font-semibold text-white">
                 {selectedStructure
-                  ? STRUCTURE_META[selectedStructure.structureType].label
+                  ? getStructureDisplayLabel(selectedStructure)
                   : 'Open Town Plot'}
               </h3>
             </div>

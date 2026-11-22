@@ -55,6 +55,38 @@
           "enum": ["meadow", "fantasy_night", "solarpunk_oasis"],
           "maxLength": 24
         },
+        "townName": {
+          "type": "string",
+          "description": "Display name of this saved town slot (e.g. Alderbrook, New Haven).",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "unlockedBiomes": {
+          "type": "array",
+          "description": "List of unlocked outer biome sectors (forest, desert, cave).",
+          "items": {
+            "type": "string",
+            "enum": ["forest", "desert", "cave"]
+          },
+          "maxItems": 3
+        },
+        "roads": {
+          "type": "array",
+          "description": "List of constructed cobblestone road segment identifiers.",
+          "items": {
+            "type": "string",
+            "maxLength": 48
+          },
+          "maxItems": 24
+        },
+        "railSpurBuilt": {
+          "type": "boolean",
+          "description": "Whether the outer railway spur and frontier depot stop have been built."
+        },
+        "autoMode": {
+          "type": "boolean",
+          "description": "Whether Mayor Sterling Automatic City-Builder mode is enabled."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -139,7 +171,7 @@
         "assignedPlotId": {
           "type": "string",
           "description": "Optional assigned workplace plot ID or empty string.",
-          "enum": ["", "plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east"],
+          "enum": ["", "plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east", "plot_forest_1", "plot_forest_2", "plot_desert_1", "plot_desert_2", "plot_cave_1", "plot_cave_2"],
           "maxLength": 20
         },
         "hatStyle": {
@@ -185,7 +217,7 @@
         "activePlotId": {
           "type": "string",
           "description": "Optional buildable plot ID the agent is currently visiting, or empty string.",
-          "enum": ["", "plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east"],
+          "enum": ["", "plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east", "plot_forest_1", "plot_forest_2", "plot_desert_1", "plot_desert_2", "plot_cave_1", "plot_cave_2"],
           "maxLength": 20
         },
         "targetAgent": {
@@ -250,14 +282,25 @@
         "plotId": {
           "type": "string",
           "description": "Buildable plot identifier.",
-          "enum": ["plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east"],
+          "enum": ["plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east", "plot_forest_1", "plot_forest_2", "plot_desert_1", "plot_desert_2", "plot_cave_1", "plot_cave_2"],
           "maxLength": 20
         },
         "structureType": {
           "type": "string",
           "description": "Procedural building prefab type.",
-          "enum": ["bakery", "watchtower", "greenhouse", "windmill", "library", "granary", "pavilion", "clock_tower"],
+          "enum": ["bakery", "watchtower", "greenhouse", "windmill", "library", "granary", "pavilion", "clock_tower", "custom"],
           "maxLength": 24
+        },
+        "customLabel": {
+          "type": "string",
+          "description": "Optional custom building nameplate (e.g. Research Lab, Cafe Shop).",
+          "maxLength": 40
+        },
+        "customStyle": {
+          "type": "string",
+          "description": "Optional procedural visual style for custom structures.",
+          "enum": ["lab", "observatory", "cafe", "tavern", "forge", "guild", "cabin", "tower"],
+          "maxLength": 20
         },
         "status": {
           "type": "string",

@@ -2,11 +2,11 @@ import { useState } from 'react';
 import { CloudRain, Compass, Cpu, MapPin, Radio, Send, Snowflake, Sun, UserPlus } from 'lucide-react';
 import { formatCompactModelName, resolveInferenceConfig } from '../lib/aiRouting.ts';
 import {
+  getStructureDisplayLabel,
   getWeatherSeasonEffect,
   LOCATION_LABELS,
   MAX_TOWN_AGENTS,
   PLOT_META,
-  STRUCTURE_META,
   type AgentId,
   type AgentRecord,
   type AIProviderConfig,
@@ -135,7 +135,7 @@ export function HierarchyPanel({
 
         <div className="flex items-center justify-between text-[11px] text-slate-400">
           <span>
-            Town Growth: <span className="font-mono-tabular text-slate-200">{completedCount}/8</span> built
+            Town Growth: <span className="font-mono-tabular text-slate-200">{completedCount}</span> built
             {' · '}
             <span className="font-mono-tabular text-slate-200">{agents.length}/{MAX_TOWN_AGENTS}</span> villagers
           </span>
@@ -145,7 +145,7 @@ export function HierarchyPanel({
               onClick={() => onSelectPlot(activeSites[0].plotId)}
               className="truncate font-medium text-amber-300 hover:underline"
             >
-              Building {STRUCTURE_META[activeSites[0].structureType].label} ({activeSites[0].progress}%)
+              Building {getStructureDisplayLabel(activeSites[0])} ({activeSites[0].progress}%)
             </button>
           )}
         </div>

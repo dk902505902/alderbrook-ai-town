@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from './firebase.ts';
 import {
+  ALL_BIOME_IDS,
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
   CORE_AGENT_IDS,
@@ -27,6 +28,8 @@ import {
   normalizeWeatherMode,
   type AgentId,
   type AgentRecord,
+  type BiomeId,
+  type CustomBuildingStyle,
   type HatStyle,
   type LocationId,
   type PlotId,
@@ -38,11 +41,14 @@ import {
   type TownLogItem,
   type TownMetrics,
   type TownStructure,
+  type TownSummary,
   type TownTheme,
   type WeatherMode,
 } from '../types/town.ts';
 
 export interface LoadedTownState {
+  townId: string;
+  townName: string;
   turnCount: number;
   activeAgentIndex: number;
   activeDecree: string;
@@ -50,13 +56,33 @@ export interface LoadedTownState {
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
   theme: TownTheme;
+  unlockedBiomes: BiomeId[];
+  roads: string[];
+  railSpurBuilt: boolean;
+  autoMode: boolean;
   agents: AgentRecord[];
   structures: TownStructure[];
   logs: TownLogItem[];
 }
 
+export const LOCAL_MAIN_TOWN_ID = 'alderbrook_main';
+export const LEGACY_LOCAL_TOWN_KEY = 'alderbrook_local_town_v2';
+const LOCAL_TOWNS_INDEX_KEY = 'alderbrook_local_towns_index_v1';
+const LOCAL_TOWN_PREFIX = 'alderbrook_local_town_slot_';
+
 const VALID_PLOT_SET = new Set<string>(ALL_PLOT_IDS);
-const VALID_STRUCTURE_SET = new Set<string>(ALL_STRUCTURE_TYPES);
+const VALID_STRUCTURE_SET = new Set<string>([...ALL_STRUCTURE_TYPES, 'custom']);
+const VALID_BIOME_SET = new Set<string>(ALL_BIOME_IDS);
+const VALID_CUSTOM_STYLES = new Set<CustomBuildingStyle>([
+  'lab',
+  'observatory',
+  'cafe',
+  'tavern',
+  'forge',
+  'guild',
+  'cabin',
+  'tower',
+]);
 const CORE_AGENT_SET = new Set<string>(CORE_AGENT_IDS);
 const VALID_HAT_STYLES = new Set<HatStyle>(['straw', 'cap', 'helmet', 'hood', 'beret']);
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -85,6 +111,54 @@ function sanitizeHatStyle(val: unknown): HatStyle | undefined {
   return typeof val === 'string' && VALID_HAT_STYLES.has(val as HatStyle)
     ? (val as HatStyle)
     : undefined;
+}
+
+function sanitizeCustomStyle(val: unknown): CustomBuildingStyle | undefined {
+  return typeof val === 'string' && VALID_CUSTOM_STYLES.has(val as CustomBuildingStyle)
+    ? (val as CustomBuildingStyle)
+    : undefined;
+}
+
+function sanitizeBiomes(val: unknown): BiomeId[] {
+  if (!Array.isArray(val)) return [];
+  const seen = new Set<BiomeId>();
+  const out: BiomeId[] = [];
+  for (const item of val) {
+    if (typeof item === 'string' && VALID_BIOME_SET.has(item)) {
+      const b = item as BiomeId;
+      if (!seen.has(b)) {
+        seen.add(b);
+        out.push(b);
+      }
+    }
+  }
+  return out.slice(0, 3);
+}
+
+function sanitizeRoads(val: unknown): string[] {
+  if (!Array.isArray(val)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of val) {
+    if (typeof item === 'string') {
+      const cleaned = item.trim().slice(0, 48);
+      if (cleaned && !seen.has(cleaned)) {
+        seen.add(cleaned);
+        out.push(cleaned);
+      }
+    }
+  }
+  return out.slice(0, 24);
+}
+
+function slugifyTownName(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 20) || 'haven'
+  );
 }
 
 function buildAgentDocPayload(uid: string, agent: AgentRecord): Record<string, unknown> {
@@ -127,9 +201,324 @@ function buildAgentDocPayload(uid: string, agent: AgentRecord): Record<string, u
   return payload;
 }
 
-export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState> {
-  const townPath = `towns/${uid}`;
-  const townRef = doc(db, 'towns', uid);
+function buildStructureCreatePayload(uid: string, structure: TownStructure): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    ownerId: uid,
+    plotId: structure.plotId,
+    structureType: structure.structureType,
+    status: structure.status,
+    progress: clampScore(structure.progress, 0),
+    tier: Math.max(1, Math.min(3, structure.tier)),
+    proposedBy: clampStr(structure.proposedBy, 60) || 'Architect Lyra',
+    lastBuilder: clampStr(structure.lastBuilder, 60),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  if (structure.customLabel?.trim()) {
+    payload.customLabel = clampStr(structure.customLabel.trim(), 40);
+  }
+  if (structure.customStyle && VALID_CUSTOM_STYLES.has(structure.customStyle)) {
+    payload.customStyle = structure.customStyle;
+  }
+  return payload;
+}
+
+export function createFreshTownState(townId: string, townName: string): LoadedTownState {
+  const cleanName = clampStr(townName.trim(), 60) || 'Alderbrook';
+  const agents = createInitialAgents();
+  const logs = createInitialLogs();
+  if (cleanName !== 'Alderbrook' && logs[0]) {
+    logs[0] = {
+      ...logs[0],
+      thought: `Chartering ${cleanName} with open civic plots and outer frontiers.`,
+      dialogue: `Welcome to ${cleanName}! Council, survey the square and plan our first landmarks.`,
+    };
+  }
+  return {
+    townId,
+    townName: cleanName,
+    turnCount: 0,
+    activeAgentIndex: 0,
+    activeDecree: '',
+    metrics: { ...DEFAULT_TOWN_METRICS },
+    timeOfDay: 'day',
+    weather: 'summer',
+    theme: 'meadow',
+    unlockedBiomes: [],
+    roads: [],
+    railSpurBuilt: false,
+    autoMode: false,
+    agents,
+    structures: [],
+    logs,
+  };
+}
+
+// ============================================================================
+// Non-Destructive Local Multi-Town Storage (Guest / Offline / Fast Fallback)
+// ============================================================================
+
+interface LocalTownMetaEntry {
+  id: string;
+  name: string;
+  updatedAtMs: number;
+  buildingCount: number;
+  population: number;
+}
+
+function readLocalTownIndex(): LocalTownMetaEntry[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(LOCAL_TOWNS_INDEX_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((x) => x && typeof x.id === 'string' && typeof x.name === 'string')
+      .map((x) => ({
+        id: String(x.id),
+        name: clampStr(String(x.name), 60) || 'Town',
+        updatedAtMs: Number(x.updatedAtMs) || Date.now(),
+        buildingCount: Number(x.buildingCount) || 0,
+        population: Number(x.population) || 5,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalTownIndex(entries: LocalTownMetaEntry[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(LOCAL_TOWNS_INDEX_KEY, JSON.stringify(entries.slice(0, 20)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function listLocalTowns(): TownSummary[] {
+  const index = readLocalTownIndex();
+  const hasMain = index.some((e) => e.id === LOCAL_MAIN_TOWN_ID);
+  const mainFallback = loadLocalTown(LOCAL_MAIN_TOWN_ID);
+  const list: TownSummary[] = [];
+
+  if (!hasMain) {
+    list.push({
+      id: LOCAL_MAIN_TOWN_ID,
+      name: mainFallback?.townName || 'Alderbrook',
+      isMain: true,
+      updatedAtMs: Date.now(),
+      buildingCount: mainFallback?.structures.length ?? 0,
+      population: mainFallback?.agents.length ?? 5,
+    });
+  }
+
+  for (const entry of index) {
+    list.push({
+      id: entry.id,
+      name: entry.name,
+      isMain: entry.id === LOCAL_MAIN_TOWN_ID,
+      updatedAtMs: entry.updatedAtMs,
+      buildingCount: entry.buildingCount,
+      population: entry.population,
+    });
+  }
+
+  list.sort((a, b) => {
+    if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+    return b.updatedAtMs - a.updatedAtMs;
+  });
+  return list;
+}
+
+export function loadLocalTown(townId: string): LoadedTownState | null {
+  if (typeof window === 'undefined') return null;
+  const key = townId === LOCAL_MAIN_TOWN_ID ? LEGACY_LOCAL_TOWN_KEY : `${LOCAL_TOWN_PREFIX}${townId}`;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Partial<LoadedTownState>;
+    const fallbackName = townId === LOCAL_MAIN_TOWN_ID ? 'Alderbrook' : 'New Town';
+    const agents = Array.isArray(d.agents) && d.agents.length >= 5 ? d.agents : createInitialAgents();
+    const structures = Array.isArray(d.structures)
+      ? d.structures.filter(
+          (s) =>
+            s &&
+            VALID_PLOT_SET.has(s.plotId) &&
+            VALID_STRUCTURE_SET.has(s.structureType),
+        )
+      : [];
+    const logs = Array.isArray(d.logs) && d.logs.length > 0 ? d.logs : createInitialLogs();
+
+    return {
+      townId,
+      townName: typeof d.townName === 'string' && d.townName.trim() ? clampStr(d.townName.trim(), 60) : fallbackName,
+      turnCount: Number(d.turnCount ?? 0),
+      activeAgentIndex: Number(d.activeAgentIndex ?? 0) % agents.length,
+      activeDecree: typeof d.activeDecree === 'string' ? d.activeDecree : '',
+      metrics: {
+        prosperity: clampScore(d.metrics?.prosperity, DEFAULT_TOWN_METRICS.prosperity),
+        orderLevel: clampScore(d.metrics?.orderLevel, DEFAULT_TOWN_METRICS.orderLevel),
+        morale: clampScore(d.metrics?.morale, DEFAULT_TOWN_METRICS.morale),
+      },
+      timeOfDay: (d.timeOfDay as TimeOfDay) || 'day',
+      weather: normalizeWeatherMode(d.weather),
+      theme: normalizeTownTheme(d.theme),
+      unlockedBiomes: sanitizeBiomes(d.unlockedBiomes),
+      roads: sanitizeRoads(d.roads),
+      railSpurBuilt: Boolean(d.railSpurBuilt),
+      autoMode: Boolean(d.autoMode),
+      agents,
+      structures,
+      logs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveLocalTown(state: LoadedTownState): void {
+  if (typeof window === 'undefined') return;
+  const key =
+    state.townId === LOCAL_MAIN_TOWN_ID
+      ? LEGACY_LOCAL_TOWN_KEY
+      : `${LOCAL_TOWN_PREFIX}${state.townId}`;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(state));
+    const index = readLocalTownIndex();
+    const now = Date.now();
+    const nextEntry: LocalTownMetaEntry = {
+      id: state.townId,
+      name: state.townName || (state.townId === LOCAL_MAIN_TOWN_ID ? 'Alderbrook' : 'New Town'),
+      updatedAtMs: now,
+      buildingCount: state.structures.length,
+      population: state.agents.length,
+    };
+    const filtered = index.filter((e) => e.id !== state.townId);
+    filtered.push(nextEntry);
+    writeLocalTownIndex(filtered);
+  } catch {
+    // Ignore storage quota issues on small devices
+  }
+}
+
+export function createNewLocalTown(townName: string): LoadedTownState {
+  const cleanName = clampStr(townName.trim(), 60) || 'New Haven';
+  const slug = slugifyTownName(cleanName);
+  const rand = Math.random().toString(36).slice(2, 6);
+  const newId = `local_${slug}_${rand}`;
+  const fresh = createFreshTownState(newId, cleanName);
+  saveLocalTown(fresh);
+  return fresh;
+}
+
+// ============================================================================
+// Firestore Multi-Town Persistence (/towns/{uid} Main + /towns/{townId} Slots)
+// ============================================================================
+
+export async function listUserTowns(uid: string): Promise<TownSummary[]> {
+  const townsPath = 'towns';
+  let snap;
+  try {
+    snap = await getDocs(query(collection(db, 'towns'), where('ownerId', '==', uid)));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, townsPath);
+  }
+
+  const summaries: TownSummary[] = [];
+  snap.forEach((docSnap) => {
+    const d = docSnap.data();
+    const isMain = docSnap.id === uid;
+    const defaultName = isMain ? 'Alderbrook' : 'Frontier Town';
+    summaries.push({
+      id: docSnap.id,
+      name:
+        typeof d.townName === 'string' && d.townName.trim()
+          ? clampStr(d.townName.trim(), 60)
+          : defaultName,
+      isMain,
+      updatedAtMs: d.updatedAt?.toMillis ? d.updatedAt.toMillis() : Date.now(),
+      buildingCount: 0,
+      population: 5,
+    });
+  });
+
+  summaries.sort((a, b) => {
+    if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+    return b.updatedAtMs - a.updatedAtMs;
+  });
+  return summaries;
+}
+
+export async function createNewTownInFirestore(
+  uid: string,
+  townName: string,
+): Promise<LoadedTownState> {
+  const cleanName = clampStr(townName.trim(), 60) || 'New Haven';
+  const slug = slugifyTownName(cleanName);
+  const rand = Math.random().toString(36).slice(2, 6);
+  const uidPrefix = uid.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10) || 'u';
+  const townId = `town_${uidPrefix}_${slug}_${rand}`;
+  const townPath = `towns/${townId}`;
+  const townRef = doc(db, 'towns', townId);
+
+  const fresh = createFreshTownState(townId, cleanName);
+  const batch = writeBatch(db);
+
+  batch.set(townRef, {
+    ownerId: uid,
+    townName: cleanName,
+    turnCount: 0,
+    activeAgentIndex: 0,
+    activeDecree: '',
+    prosperity: DEFAULT_TOWN_METRICS.prosperity,
+    orderLevel: DEFAULT_TOWN_METRICS.orderLevel,
+    morale: DEFAULT_TOWN_METRICS.morale,
+    timeOfDay: 'day',
+    weather: 'summer',
+    theme: 'meadow',
+    unlockedBiomes: [],
+    roads: [],
+    railSpurBuilt: false,
+    autoMode: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  for (const agent of fresh.agents) {
+    batch.set(doc(db, 'towns', townId, 'agents', agent.id), buildAgentDocPayload(uid, agent));
+  }
+
+  const seedLog = fresh.logs[0];
+  batch.set(doc(db, 'towns', townId, 'logs', seedLog.id), {
+    ownerId: uid,
+    turnNumber: seedLog.turnNumber,
+    agentId: seedLog.agentId,
+    agentName: clampStr(seedLog.agentName, 60),
+    rank: seedLog.rank,
+    location: seedLog.location,
+    targetAgent: clampStr(seedLog.targetAgent, 60),
+    thought: clampStr(seedLog.thought, 500),
+    dialogue: clampStr(seedLog.dialogue, 300),
+    newTask: clampStr(seedLog.newTask, 240),
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, townPath);
+  }
+
+  return fresh;
+}
+
+export async function loadOrInitializeTown(
+  uid: string,
+  townId: string = uid,
+): Promise<LoadedTownState> {
+  const townPath = `towns/${townId}`;
+  const townRef = doc(db, 'towns', townId);
 
   let townSnap;
   try {
@@ -141,10 +530,12 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
   if (!townSnap.exists()) {
     const initialAgents = createInitialAgents();
     const initialLogs = createInitialLogs();
+    const defaultName = townId === uid ? 'Alderbrook' : 'Frontier Town';
     const batch = writeBatch(db);
 
     batch.set(townRef, {
       ownerId: uid,
+      townName: defaultName,
       turnCount: 0,
       activeAgentIndex: 0,
       activeDecree: '',
@@ -154,17 +545,21 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
       timeOfDay: 'day',
       weather: 'summer',
       theme: 'meadow',
+      unlockedBiomes: [],
+      roads: [],
+      railSpurBuilt: false,
+      autoMode: false,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
 
     for (const agent of initialAgents) {
-      const agentRef = doc(db, 'towns', uid, 'agents', agent.id);
+      const agentRef = doc(db, 'towns', townId, 'agents', agent.id);
       batch.set(agentRef, buildAgentDocPayload(uid, agent));
     }
 
     const seedLog = initialLogs[0];
-    const logRef = doc(db, 'towns', uid, 'logs', seedLog.id);
+    const logRef = doc(db, 'towns', townId, 'logs', seedLog.id);
     batch.set(logRef, {
       ownerId: uid,
       turnNumber: seedLog.turnNumber,
@@ -186,6 +581,8 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
     }
 
     return {
+      townId,
+      townName: defaultName,
       turnCount: 0,
       activeAgentIndex: 0,
       activeDecree: '',
@@ -193,6 +590,10 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
       timeOfDay: 'day',
       weather: 'summer',
       theme: 'meadow',
+      unlockedBiomes: [],
+      roads: [],
+      railSpurBuilt: false,
+      autoMode: false,
       agents: initialAgents,
       structures: [],
       logs: initialLogs,
@@ -200,20 +601,20 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
   }
 
   const townData = townSnap.data();
-  const agentsPath = `towns/${uid}/agents`;
-  const structuresPath = `towns/${uid}/structures`;
-  const logsPath = `towns/${uid}/logs`;
+  const agentsPath = `towns/${townId}/agents`;
+  const structuresPath = `towns/${townId}/structures`;
+  const logsPath = `towns/${townId}/logs`;
 
   let agentsSnap;
   try {
-    agentsSnap = await getDocs(collection(db, 'towns', uid, 'agents'));
+    agentsSnap = await getDocs(collection(db, 'towns', townId, 'agents'));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, agentsPath);
   }
 
   let structuresSnap;
   try {
-    structuresSnap = await getDocs(collection(db, 'towns', uid, 'structures'));
+    structuresSnap = await getDocs(collection(db, 'towns', townId, 'structures'));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, structuresPath);
   }
@@ -221,7 +622,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
   let logsSnap;
   try {
     logsSnap = await getDocs(
-      query(collection(db, 'towns', uid, 'logs'), orderBy('turnNumber', 'desc'), limit(40)),
+      query(collection(db, 'towns', townId, 'logs'), orderBy('turnNumber', 'desc'), limit(40)),
     );
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, logsPath);
@@ -284,8 +685,8 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
         location: (d.location as LocationId) || 'park',
         activePlotId: sanitizeOptionalPlot(d.activePlotId),
         targetAgent: d.targetAgent ? String(d.targetAgent) : null,
-        thought: typeof d.thought === 'string' ? d.thought : 'Ready to lend a hand in Alderbrook.',
-        dialogue: typeof d.dialogue === 'string' ? d.dialogue : 'Glad to join Alderbrook Square!',
+        thought: typeof d.thought === 'string' ? d.thought : 'Ready to lend a hand in town.',
+        dialogue: typeof d.dialogue === 'string' ? d.dialogue : 'Glad to join the civic team!',
         currentTask: typeof d.currentTask === 'string' ? d.currentTask : 'Reporting for town duties',
         userNote: typeof d.userNote === 'string' ? d.userNote : '',
         updatedAtMs: d.updatedAt?.toMillis ? d.updatedAt.toMillis() : Date.now(),
@@ -315,7 +716,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
       });
     }
     for (const item of agentsNeedingBackfill) {
-      migrationBatch.update(doc(db, 'towns', uid, 'agents', item.id), item.patch);
+      migrationBatch.update(doc(db, 'towns', townId, 'agents', item.id), item.patch);
     }
     try {
       await migrationBatch.commit();
@@ -334,9 +735,16 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
         : null;
     if (!plotId || !structureType) return;
     const status: StructureStatus = d.status === 'complete' ? 'complete' : 'building';
+    const customLabel =
+      typeof d.customLabel === 'string' && d.customLabel.trim()
+        ? clampStr(d.customLabel.trim(), 40)
+        : undefined;
+    const customStyle = sanitizeCustomStyle(d.customStyle);
     structures.push({
       plotId,
       structureType,
+      customLabel,
+      customStyle,
       status,
       progress: clampScore(d.progress, status === 'complete' ? 100 : 0),
       tier: Math.max(1, Math.min(3, Math.round(Number(d.tier ?? 1)))),
@@ -358,7 +766,7 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
       turnNumber: Number(d.turnNumber ?? 0),
       agentId: String(d.agentId ?? 'mayor_sterling'),
       agentName: String(d.agentName ?? 'Mayor Sterling'),
-      rank: (Number(d.rank ?? 1) as 0 | 1 | 2 | 3),
+      rank: Number(d.rank ?? 1) as 0 | 1 | 2 | 3,
       location: (d.location as LocationId | 'plaza') || 'plaza',
       targetAgent: d.targetAgent ? String(d.targetAgent) : null,
       thought: String(d.thought ?? ''),
@@ -368,7 +776,16 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
     });
   });
 
+  const resolvedTownName =
+    typeof townData.townName === 'string' && townData.townName.trim()
+      ? clampStr(townData.townName.trim(), 60)
+      : townId === uid
+        ? 'Alderbrook'
+        : 'Frontier Town';
+
   return {
+    townId,
+    townName: resolvedTownName,
     turnCount: Number(townData.turnCount ?? 0),
     activeAgentIndex: Number(townData.activeAgentIndex ?? 0) % orderedAgents.length,
     activeDecree: typeof townData.activeDecree === 'string' ? townData.activeDecree : '',
@@ -380,10 +797,49 @@ export async function loadOrInitializeTown(uid: string): Promise<LoadedTownState
     timeOfDay: (townData.timeOfDay as TimeOfDay) || 'day',
     weather: normalizeWeatherMode(townData.weather),
     theme: normalizeTownTheme(townData.theme),
+    unlockedBiomes: sanitizeBiomes(townData.unlockedBiomes),
+    roads: sanitizeRoads(townData.roads),
+    railSpurBuilt: Boolean(townData.railSpurBuilt),
+    autoMode: Boolean(townData.autoMode),
     agents: orderedAgents,
     structures,
     logs: logs.length > 0 ? logs : createInitialLogs(),
   };
+}
+
+export async function persistTownExpansion(
+  uid: string,
+  updates: {
+    townName?: string;
+    unlockedBiomes?: BiomeId[];
+    roads?: string[];
+    railSpurBuilt?: boolean;
+    autoMode?: boolean;
+  },
+  townId: string = uid,
+): Promise<void> {
+  const path = `towns/${townId}`;
+  const patch: Record<string, unknown> = { updatedAt: serverTimestamp() };
+  if (updates.townName !== undefined) {
+    patch.townName = clampStr(updates.townName.trim(), 60) || 'Alderbrook';
+  }
+  if (updates.unlockedBiomes !== undefined) {
+    patch.unlockedBiomes = sanitizeBiomes(updates.unlockedBiomes);
+  }
+  if (updates.roads !== undefined) {
+    patch.roads = sanitizeRoads(updates.roads);
+  }
+  if (updates.railSpurBuilt !== undefined) {
+    patch.railSpurBuilt = Boolean(updates.railSpurBuilt);
+  }
+  if (updates.autoMode !== undefined) {
+    patch.autoMode = Boolean(updates.autoMode);
+  }
+  try {
+    await updateDoc(doc(db, 'towns', townId), patch);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
 }
 
 export async function persistAgentTurn(
@@ -406,10 +862,11 @@ export async function persistAgentTurn(
     workers: AgentRecord[];
     logs: TownLogItem[];
   } | null,
+  townId: string = uid,
 ): Promise<void> {
-  const townRef = doc(db, 'towns', uid);
-  const agentRef = doc(db, 'towns', uid, 'agents', updatedAgent.id);
-  const logRef = doc(db, 'towns', uid, 'logs', logEntry.id);
+  const townRef = doc(db, 'towns', townId);
+  const agentRef = doc(db, 'towns', townId, 'agents', updatedAgent.id);
+  const logRef = doc(db, 'towns', townId, 'logs', logEntry.id);
 
   const batch = writeBatch(db);
   const townPatch: Record<string, unknown> = {
@@ -451,20 +908,9 @@ export async function persistAgentTurn(
 
   if (structureMutation) {
     const { mode, structure } = structureMutation;
-    const structureRef = doc(db, 'towns', uid, 'structures', structure.plotId);
+    const structureRef = doc(db, 'towns', townId, 'structures', structure.plotId);
     if (mode === 'create') {
-      batch.set(structureRef, {
-        ownerId: uid,
-        plotId: structure.plotId,
-        structureType: structure.structureType,
-        status: structure.status,
-        progress: clampScore(structure.progress, 0),
-        tier: Math.max(1, Math.min(3, structure.tier)),
-        proposedBy: clampStr(structure.proposedBy, 60) || 'Architect Lyra',
-        lastBuilder: clampStr(structure.lastBuilder, 60),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      batch.set(structureRef, buildStructureCreatePayload(uid, structure));
     } else if (mode === 'progress') {
       batch.update(structureRef, {
         status: structure.status,
@@ -483,7 +929,7 @@ export async function persistAgentTurn(
 
   if (weatherShift) {
     const wLog = weatherShift.logEntry;
-    batch.set(doc(db, 'towns', uid, 'logs', wLog.id), {
+    batch.set(doc(db, 'towns', townId, 'logs', wLog.id), {
       ownerId: uid,
       turnNumber: wLog.turnNumber,
       agentId: 'weather_shift',
@@ -500,10 +946,10 @@ export async function persistAgentTurn(
 
   if (hiredPayload) {
     for (const worker of hiredPayload.workers) {
-      batch.set(doc(db, 'towns', uid, 'agents', worker.id), buildAgentDocPayload(uid, worker));
+      batch.set(doc(db, 'towns', townId, 'agents', worker.id), buildAgentDocPayload(uid, worker));
     }
     for (const hLog of hiredPayload.logs) {
-      batch.set(doc(db, 'towns', uid, 'logs', hLog.id), {
+      batch.set(doc(db, 'towns', townId, 'logs', hLog.id), {
         ownerId: uid,
         turnNumber: hLog.turnNumber,
         agentId: clampStr(hLog.agentId, 40),
@@ -522,7 +968,7 @@ export async function persistAgentTurn(
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `towns/${uid}`);
+    handleFirestoreError(error, OperationType.WRITE, `towns/${townId}`);
   }
 }
 
@@ -530,14 +976,15 @@ export async function persistHiredWorkers(
   uid: string,
   workers: AgentRecord[],
   logs: TownLogItem[],
+  townId: string = uid,
 ): Promise<void> {
   if (workers.length === 0) return;
   const batch = writeBatch(db);
   for (const worker of workers) {
-    batch.set(doc(db, 'towns', uid, 'agents', worker.id), buildAgentDocPayload(uid, worker));
+    batch.set(doc(db, 'towns', townId, 'agents', worker.id), buildAgentDocPayload(uid, worker));
   }
   for (const hLog of logs) {
-    batch.set(doc(db, 'towns', uid, 'logs', hLog.id), {
+    batch.set(doc(db, 'towns', townId, 'logs', hLog.id), {
       ownerId: uid,
       turnNumber: hLog.turnNumber,
       agentId: clampStr(hLog.agentId, 40),
@@ -554,7 +1001,7 @@ export async function persistHiredWorkers(
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `towns/${uid}/agents`);
+    handleFirestoreError(error, OperationType.WRITE, `towns/${townId}/agents`);
   }
 }
 
@@ -563,9 +1010,10 @@ export async function persistGodDecree(
   decreeText: string,
   turnCount: number,
   logEntry: TownLogItem,
+  townId: string = uid,
 ): Promise<void> {
-  const townRef = doc(db, 'towns', uid);
-  const logRef = doc(db, 'towns', uid, 'logs', logEntry.id);
+  const townRef = doc(db, 'towns', townId);
+  const logRef = doc(db, 'towns', townId, 'logs', logEntry.id);
 
   const batch = writeBatch(db);
   batch.update(townRef, {
@@ -591,7 +1039,7 @@ export async function persistGodDecree(
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `towns/${uid}`);
+    handleFirestoreError(error, OperationType.WRITE, `towns/${townId}`);
   }
 }
 
@@ -599,10 +1047,11 @@ export async function persistAgentNote(
   uid: string,
   agentId: AgentId,
   userNote: string,
+  townId: string = uid,
 ): Promise<void> {
-  const path = `towns/${uid}/agents/${agentId}`;
+  const path = `towns/${townId}/agents/${agentId}`;
   try {
-    await updateDoc(doc(db, 'towns', uid, 'agents', agentId), {
+    await updateDoc(doc(db, 'towns', townId, 'agents', agentId), {
       userNote: clampStr(userNote, 200),
       updatedAt: serverTimestamp(),
     });
@@ -615,9 +1064,10 @@ export async function persistWeatherShift(
   uid: string,
   weather: WeatherMode,
   logEntry: TownLogItem,
+  townId: string = uid,
 ): Promise<void> {
-  const townRef = doc(db, 'towns', uid);
-  const logRef = doc(db, 'towns', uid, 'logs', logEntry.id);
+  const townRef = doc(db, 'towns', townId);
+  const logRef = doc(db, 'towns', townId, 'logs', logEntry.id);
   const batch = writeBatch(db);
   batch.update(townRef, {
     weather,
@@ -640,17 +1090,18 @@ export async function persistWeatherShift(
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `towns/${uid}`);
+    handleFirestoreError(error, OperationType.WRITE, `towns/${townId}`);
   }
 }
 
 export async function persistEnvironmentSettings(
   uid: string,
   updates: { timeOfDay?: TimeOfDay; weather?: WeatherMode; theme?: TownTheme },
+  townId: string = uid,
 ): Promise<void> {
-  const path = `towns/${uid}`;
+  const path = `towns/${townId}`;
   try {
-    await updateDoc(doc(db, 'towns', uid), {
+    await updateDoc(doc(db, 'towns', townId), {
       ...updates,
       updatedAt: serverTimestamp(),
     });
@@ -675,10 +1126,11 @@ export function subscribePendingRemoteCommands(
   uid: string,
   onCommands: (commands: RemoteCommandRecord[]) => void,
   onError?: (error: Error) => void,
+  townId: string = uid,
 ): Unsubscribe {
-  const remotePath = `towns/${uid}/remoteCommands`;
+  const remotePath = `towns/${townId}/remoteCommands`;
   const q = query(
-    collection(db, 'towns', uid, 'remoteCommands'),
+    collection(db, 'towns', townId, 'remoteCommands'),
     where('status', '==', 'pending'),
   );
 
@@ -727,17 +1179,18 @@ export async function markRemoteCommandStatus(
   status: 'executed' | 'failed',
   resultMessage: string,
   remoteLogEntry?: TownLogItem | null,
+  townId: string = uid,
 ): Promise<void> {
-  const cmdPath = `towns/${uid}/remoteCommands/${commandId}`;
+  const cmdPath = `towns/${townId}/remoteCommands/${commandId}`;
   const batch = writeBatch(db);
-  batch.update(doc(db, 'towns', uid, 'remoteCommands', commandId), {
+  batch.update(doc(db, 'towns', townId, 'remoteCommands', commandId), {
     status,
     executedAt: serverTimestamp(),
     resultMessage: clampStr(resultMessage, 300),
   });
 
   if (remoteLogEntry) {
-    batch.set(doc(db, 'towns', uid, 'logs', remoteLogEntry.id), {
+    batch.set(doc(db, 'towns', townId, 'logs', remoteLogEntry.id), {
       ownerId: uid,
       turnNumber: remoteLogEntry.turnNumber,
       agentId: 'remote_command',
@@ -763,23 +1216,13 @@ export async function persistRemoteStructureAction(
   uid: string,
   mode: 'create' | 'progress' | 'upgrade',
   structure: TownStructure,
+  townId: string = uid,
 ): Promise<void> {
-  const structPath = `towns/${uid}/structures/${structure.plotId}`;
-  const structureRef = doc(db, 'towns', uid, 'structures', structure.plotId);
+  const structPath = `towns/${townId}/structures/${structure.plotId}`;
+  const structureRef = doc(db, 'towns', townId, 'structures', structure.plotId);
   try {
     if (mode === 'create') {
-      await setDoc(structureRef, {
-        ownerId: uid,
-        plotId: structure.plotId,
-        structureType: structure.structureType,
-        status: structure.status,
-        progress: clampScore(structure.progress, 0),
-        tier: Math.max(1, Math.min(3, structure.tier)),
-        proposedBy: clampStr(structure.proposedBy, 60) || 'Remote Command',
-        lastBuilder: clampStr(structure.lastBuilder, 60) || 'Remote Command',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await setDoc(structureRef, buildStructureCreatePayload(uid, structure));
     } else if (mode === 'progress') {
       await updateDoc(structureRef, {
         status: structure.status,
@@ -804,11 +1247,12 @@ export async function enqueueRemoteCommand(
   type: RemoteCommandType,
   value: string,
   source = 'telegram',
+  townId: string = uid,
 ): Promise<string> {
   const cmdId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const cmdPath = `towns/${uid}/remoteCommands/${cmdId}`;
+  const cmdPath = `towns/${townId}/remoteCommands/${cmdId}`;
   try {
-    await setDoc(doc(db, 'towns', uid, 'remoteCommands', cmdId), {
+    await setDoc(doc(db, 'towns', townId, 'remoteCommands', cmdId), {
       ownerId: uid,
       type,
       value: clampStr(value, 400),
@@ -826,10 +1270,11 @@ export async function persistCliAgentUpdate(
   uid: string,
   updatedAgent: AgentRecord,
   logEntry: TownLogItem,
+  townId: string = uid,
 ): Promise<void> {
-  const agentPath = `towns/${uid}/agents/${updatedAgent.id}`;
+  const agentPath = `towns/${townId}/agents/${updatedAgent.id}`;
   const batch = writeBatch(db);
-  batch.update(doc(db, 'towns', uid, 'agents', updatedAgent.id), {
+  batch.update(doc(db, 'towns', townId, 'agents', updatedAgent.id), {
     location: updatedAgent.location,
     activePlotId: updatedAgent.activePlotId ?? '',
     targetAgent: clampStr(updatedAgent.targetAgent, 60),
@@ -840,7 +1285,7 @@ export async function persistCliAgentUpdate(
     updatedAt: serverTimestamp(),
   });
 
-  batch.set(doc(db, 'towns', uid, 'logs', logEntry.id), {
+  batch.set(doc(db, 'towns', townId, 'logs', logEntry.id), {
     ownerId: uid,
     turnNumber: logEntry.turnNumber,
     agentId: updatedAgent.id,
@@ -861,29 +1306,33 @@ export async function persistCliAgentUpdate(
   }
 }
 
-export async function resetTownInFirestore(uid: string): Promise<LoadedTownState> {
-  const townRef = doc(db, 'towns', uid);
-  const logsPath = `towns/${uid}/logs`;
-  const structuresPath = `towns/${uid}/structures`;
-  const agentsPath = `towns/${uid}/agents`;
+export async function resetTownInFirestore(
+  uid: string,
+  townId: string = uid,
+  townName = 'Alderbrook',
+): Promise<LoadedTownState> {
+  const townRef = doc(db, 'towns', townId);
+  const logsPath = `towns/${townId}/logs`;
+  const structuresPath = `towns/${townId}/structures`;
+  const agentsPath = `towns/${townId}/agents`;
 
   let existingLogs;
   try {
-    existingLogs = await getDocs(collection(db, 'towns', uid, 'logs'));
+    existingLogs = await getDocs(collection(db, 'towns', townId, 'logs'));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, logsPath);
   }
 
   let existingStructures;
   try {
-    existingStructures = await getDocs(collection(db, 'towns', uid, 'structures'));
+    existingStructures = await getDocs(collection(db, 'towns', townId, 'structures'));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, structuresPath);
   }
 
   let existingAgents;
   try {
-    existingAgents = await getDocs(collection(db, 'towns', uid, 'agents'));
+    existingAgents = await getDocs(collection(db, 'towns', townId, 'agents'));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, agentsPath);
   }
@@ -891,7 +1340,7 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
   let pendingCommands;
   try {
     pendingCommands = await getDocs(
-      query(collection(db, 'towns', uid, 'remoteCommands'), where('status', '==', 'pending')),
+      query(collection(db, 'towns', townId, 'remoteCommands'), where('status', '==', 'pending')),
     );
   } catch {
     pendingCommands = null;
@@ -920,6 +1369,7 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
   });
 
   batch.update(townRef, {
+    townName: clampStr(townName, 60) || 'Alderbrook',
     turnCount: 0,
     activeAgentIndex: 0,
     activeDecree: '',
@@ -929,11 +1379,15 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
     timeOfDay: 'day',
     weather: 'summer',
     theme: 'meadow',
+    unlockedBiomes: [],
+    roads: [],
+    railSpurBuilt: false,
+    autoMode: false,
     updatedAt: serverTimestamp(),
   });
 
   for (const agent of initialAgents) {
-    const agentRef = doc(db, 'towns', uid, 'agents', agent.id);
+    const agentRef = doc(db, 'towns', townId, 'agents', agent.id);
     batch.update(agentRef, {
       location: agent.location,
       activePlotId: '',
@@ -947,7 +1401,7 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
   }
 
   const seedLog = initialLogs[0];
-  batch.set(doc(db, 'towns', uid, 'logs', seedLog.id), {
+  batch.set(doc(db, 'towns', townId, 'logs', seedLog.id), {
     ownerId: uid,
     turnNumber: seedLog.turnNumber,
     agentId: seedLog.agentId,
@@ -964,10 +1418,12 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `towns/${uid}`);
+    handleFirestoreError(error, OperationType.WRITE, `towns/${townId}`);
   }
 
   return {
+    townId,
+    townName: clampStr(townName, 60) || 'Alderbrook',
     turnCount: 0,
     activeAgentIndex: 0,
     activeDecree: '',
@@ -975,6 +1431,10 @@ export async function resetTownInFirestore(uid: string): Promise<LoadedTownState
     timeOfDay: 'day',
     weather: 'summer',
     theme: 'meadow',
+    unlockedBiomes: [],
+    roads: [],
+    railSpurBuilt: false,
+    autoMode: false,
     agents: initialAgents,
     structures: [],
     logs: initialLogs,
