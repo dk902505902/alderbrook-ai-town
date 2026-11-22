@@ -546,13 +546,6 @@ export async function createNewTownInFirestore(
     batch.set(doc(db, 'towns', townId, 'agents', agent.id), buildAgentDocPayload(uid, agent));
   }
 
-  batch.set(doc(db, 'towns', townId, 'economy', 'stores'), {
-    ownerId: uid,
-    ...fresh.resources,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
   const seedLog = fresh.logs[0];
   batch.set(doc(db, 'towns', townId, 'logs', seedLog.id), {
     ownerId: uid,
@@ -573,6 +566,9 @@ export async function createNewTownInFirestore(
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, townPath);
   }
+
+  // Separate, non-atomic seed: chartering must not fail if economy rules are not deployed yet
+  void persistTownResources(uid, fresh.resources, townId).catch(() => {});
 
   return fresh;
 }
@@ -619,13 +615,6 @@ export async function loadOrInitializeTown(
       updatedAt: serverTimestamp(),
     });
 
-    batch.set(doc(db, 'towns', townId, 'economy', 'stores'), {
-      ownerId: uid,
-      ...fresh.resources,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
     for (const agent of initialAgents) {
       const agentRef = doc(db, 'towns', townId, 'agents', agent.id);
       batch.set(agentRef, buildAgentDocPayload(uid, agent));
@@ -652,6 +641,9 @@ export async function loadOrInitializeTown(
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, townPath);
     }
+
+    // Separate, non-atomic seed: town creation must not fail if economy rules are not deployed yet
+    void persistTownResources(uid, fresh.resources, townId).catch(() => {});
 
     return fresh;
   }
@@ -1484,8 +1476,6 @@ export async function resetTownInFirestore(
     batch.delete(d.ref);
   });
 
-  batch.delete(doc(db, 'towns', townId, 'economy', 'stores'));
-
   batch.update(townRef, {
     townName: clampStr(townName, 60) || 'Alderbrook',
     turnCount: 0,
@@ -1538,6 +1528,9 @@ export async function resetTownInFirestore(
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `towns/${townId}`);
   }
+
+  // Best effort: a town reset must still succeed when economy rules are not deployed yet
+  void persistTownResources(uid, DEFAULT_TOWN_RESOURCES, townId).catch(() => {});
 
   return fresh;
 }

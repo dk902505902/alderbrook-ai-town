@@ -420,7 +420,7 @@ export function parseLocalIntent(
 
   // 2) Create a NEW saved town / city (non-destructive) — handles "Create moon city", "Create a new town called New Haven", etc.
   if (
-    /\b(create|start|found|charter|make|open|build)\b/.test(lower) &&
+    /\b(create|start|found|charter|make|open|build|add|begin|establish)\b/.test(lower) &&
     /\b(town|city|village|settlement)\b/.test(lower) &&
     !/\b(town hall|town log|town pulse|town status|city hall|in town|in the town|for the town)\b/.test(
       lower,
@@ -481,7 +481,7 @@ export function parseLocalIntent(
   if (
     /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
     !/\b(worker|villager|staff)\b/.test(lower) &&
-    /\b(labs?|laborator(?:y|ies)|research|observator(?:y|ies)|cafes?|coffee|shops?|baker(?:y|ies)|watchtowers?|towers?|greenhouses?|farms?|windmills?|mills?|librar(?:y|ies)|granar(?:y|ies)|pavilions?|clocks?|taverns?|inns?|forges?|smith(?:y|ies)?|guilds?|clinics?|museums?|studios?|cabins?|outposts?|buildings?|plots?|stores?|houses?|schools?|markets?|fountains?|wells?|statues?|bridges?|monuments?|theat(?:er|re)s?|plazas?|gardens?|orchards?|banks?|docks?|piers?|temples?|shrin(?:e|es)|arenas?|lighthouses?|spires?|citadels?|barracks?)\b/.test(
+    /\b(labs?|laborator(?:y|ies)|research|observator(?:y|ies)|cafes?|coffee|shops?|baker(?:y|ies)|watchtowers?|towers?|greenhouses?|farms?|windmills?|mills?|librar(?:y|ies)|granar(?:y|ies)|pavilions?|clocks?|taverns?|inns?|forges?|smith(?:y|ies)?|guilds?|halls?|clinics?|museums?|studios?|cabins?|outposts?|buildings?|plots?|stores?|houses?|schools?|markets?|fountains?|wells?|statues?|bridges?|monuments?|theat(?:er|re)s?|plazas?|gardens?|orchards?|banks?|docks?|piers?|temples?|shrin(?:e|es)|arenas?|lighthouses?|spires?|citadels?|barracks?)\b/.test(
       lower,
     )
   ) {
@@ -516,7 +516,7 @@ export function parseLocalIntent(
   // 9) Generic build request in plain English ("build me a fountain") → procedural custom building
   if (
     /\b(build|construct|erect|create|add|place|put up|open|make)\b/.test(lower) &&
-    !/\b(worker|villager|staff|plan|sure|it|this|that|things?|money|gold|timber|stone|food|better|worse|happy|sad)\b/.test(
+    !/\b(worker|villager|staff|plan|sure|it|this|that|things?|money|gold|timber|stone|food|better|worse|happy|sad|town|city|village|settlement)\b/.test(
       lower,
     ) &&
     extractBuildingName(text).length >= 3
