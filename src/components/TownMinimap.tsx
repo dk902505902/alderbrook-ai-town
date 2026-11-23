@@ -33,6 +33,7 @@ interface TownMinimapProps {
   onFocusBus?: () => void;
   onSelectSignalRelay?: () => void;
   onFocusBattle?: () => void;
+  onFocusEnemyCity?: () => void;
 }
 
 const LANDMARK_MARKERS: Array<{ id: LocationId; label: string; x: number; z: number }> = [
@@ -63,6 +64,7 @@ export function TownMinimap({
   onFocusBus,
   onSelectSignalRelay,
   onFocusBattle,
+  onFocusEnemyCity,
 }: TownMinimapProps) {
   const structureByPlot = new Map<PlotId, TownStructure>();
   for (const s of structures) {
@@ -73,16 +75,22 @@ export function TownMinimap({
     unlockedBiomes.some((b) => b === 'alpine' || b === 'river' || b === 'canyon') ||
     interTownRailBuilt;
   const expandedView = unlockedBiomes.length > 0 || railSpurBuilt || interTownRailBuilt;
-  const raidActive = Boolean(raiderRadar);
-  const worldSpan = hasFarTerrain ? 66 : expandedView ? 46 : raidActive ? 27 : 15;
-  const compactMarkers = expandedView || raidActive;
+  const raidActive = Boolean(raiderRadar?.raidActive);
+  const counterActive = Boolean(raiderRadar?.counterRaidActive);
+  // Minimum span of 34 keeps permanent Ironhold Bastion (-25.2, 14.8) always visible on radar
+  const worldSpan = hasFarTerrain ? 66 : expandedView ? 46 : 34;
+  const compactMarkers = true;
   const toMapCoord = (val: number) => 70 + (val / worldSpan) * 58;
   const visiblePlots = getAvailablePlotIds(unlockedBiomes);
 
   return (
     <div
       className={`rounded-2xl border bg-slate-950/90 p-2 shadow-xl ${
-        raidActive ? 'border-rose-500/60' : 'border-white/15'
+        raidActive
+          ? 'border-rose-500/65'
+          : counterActive
+            ? 'border-cyan-400/65'
+            : 'border-white/15'
       }`}
     >
       <svg
@@ -329,71 +337,125 @@ export function TownMinimap({
           </g>
         )}
 
-        {/* Active Enemy Raider Siege Camp & Pulsing Marching Squad Dots */}
+        {/* Permanent Rival Enemy City (Ironhold Bastion), Ore Railway, Raiders, Air Force & Counter-Raid Squad */}
         {raiderRadar && (() => {
-          const campCx = Math.max(10, Math.min(130, toMapCoord(raiderRadar.campX)));
-          const campCy = Math.max(10, Math.min(130, toMapCoord(raiderRadar.campZ)));
+          const cityCx = Math.max(11, Math.min(129, toMapCoord(raiderRadar.cityX)));
+          const cityCy = Math.max(11, Math.min(129, toMapCoord(raiderRadar.cityZ)));
+          const railRx = (6.8 / worldSpan) * 58;
+          const railRy = (5.4 / worldSpan) * 58;
           return (
-            <g
-              onClick={() => onFocusBattle?.()}
-              className="cursor-pointer"
-            >
-              {/* Pulsing red alert ring around Raider Siege Camp */}
-              <circle cx={campCx} cy={campCy} r="6.5" fill="rgba(239,68,68,0.22)" stroke="#ef4444" strokeWidth="1.2">
-                <animate attributeName="r" values="5.5;11;5.5" dur="1.5s" repeatCount="indefinite" />
-                <animate attributeName="opacity" values="0.9;0.15;0.9" dur="1.5s" repeatCount="indefinite" />
-              </circle>
-              {/* Raider Siege Camp diamond core */}
-              <polygon
-                points={`${campCx},${campCy - 4.6} ${campCx + 4.6},${campCy} ${campCx},${campCy + 4.6} ${campCx - 4.6},${campCy}`}
-                fill="#dc2626"
-                stroke="#fef08a"
-                strokeWidth="1.1"
-              />
-              <text
-                x={campCx}
-                y={campCy + 10.5}
-                textAnchor="middle"
-                fill="#fca5a5"
-                fontSize="6.4"
-                fontWeight="800"
-              >
-                RAIDS
-              </text>
+            <g>
+              {/* Ironhold Enemy Ore Railway Loop (once built by Engineer Vex) */}
+              {raiderRadar.railBuilt && (
+                <ellipse
+                  cx={cityCx}
+                  cy={cityCy}
+                  rx={Math.max(5.5, railRx)}
+                  ry={Math.max(4.5, railRy)}
+                  fill="none"
+                  stroke="#f97316"
+                  strokeWidth="1.2"
+                  strokeDasharray="2.2 1.4"
+                  opacity="0.85"
+                />
+              )}
 
-              {/* Pulsing red enemy dots for each marching Raider in the squad */}
-              {raiderRadar.squad.map((dot, idx) => {
-                const rx = Math.max(8, Math.min(132, toMapCoord(dot.x)));
-                const ry = Math.max(8, Math.min(132, toMapCoord(dot.z)));
+              {/* Permanent Ironhold Bastion Fortress Marker (click to jump camera) */}
+              <g
+                onClick={() => (onFocusEnemyCity ? onFocusEnemyCity() : onFocusBattle?.())}
+                className="cursor-pointer"
+              >
+                {raidActive && (
+                  <circle cx={cityCx} cy={cityCy} r="7" fill="rgba(239,68,68,0.22)" stroke="#ef4444" strokeWidth="1.2">
+                    <animate attributeName="r" values="6;11.5;6" dur="1.5s" repeatCount="indefinite" />
+                    <animate attributeName="opacity" values="0.9;0.15;0.9" dur="1.5s" repeatCount="indefinite" />
+                  </circle>
+                )}
+                <polygon
+                  points={`${cityCx},${cityCy - 5.2} ${cityCx + 5.2},${cityCy} ${cityCx},${cityCy + 5.2} ${cityCx - 5.2},${cityCy}`}
+                  fill={raidActive ? '#dc2626' : '#7f1d1d'}
+                  stroke={raidActive ? '#fef08a' : '#fca5a5'}
+                  strokeWidth="1.2"
+                />
+                <text
+                  x={cityCx}
+                  y={Math.min(134, cityCy + 11.2)}
+                  textAnchor="middle"
+                  fill={raidActive ? '#fca5a5' : '#fda4af'}
+                  fontSize="5.8"
+                  fontWeight="800"
+                >
+                  IRONHOLD
+                </text>
+              </g>
+
+              {/* Active Marching Enemy Raider Squad Dots */}
+              {raidActive &&
+                raiderRadar.squad.map((dot, idx) => {
+                  const rx = Math.max(8, Math.min(132, toMapCoord(dot.x)));
+                  const ry = Math.max(8, Math.min(132, toMapCoord(dot.z)));
+                  return (
+                    <g
+                      key={`raider-dot-${idx}`}
+                      onClick={() => onFocusBattle?.()}
+                      className="cursor-pointer"
+                    >
+                      <circle
+                        cx={rx}
+                        cy={ry}
+                        r={dot.isCaptain ? 3.2 : 2.3}
+                        fill={dot.isCaptain ? '#f97316' : '#ef4444'}
+                        stroke="#ffffff"
+                        strokeWidth="0.7"
+                      />
+                    </g>
+                  );
+                })}
+
+              {/* Airborne Enemy Attack Helicopters & Fighter Jets */}
+              {raiderRadar.aircraft.map((ac, idx) => {
+                const ax = Math.max(8, Math.min(132, toMapCoord(ac.x)));
+                const ay = Math.max(8, Math.min(132, toMapCoord(ac.z)));
                 return (
-                  <g key={`raider-dot-${idx}`}>
-                    <circle cx={rx} cy={ry} r={dot.isCaptain ? 4.4 : 3.2} fill="#ef4444" opacity="0.35">
-                      <animate
-                        attributeName="r"
-                        values={dot.isCaptain ? '3.5;6.2;3.5' : '2.4;4.8;2.4'}
-                        dur="1.2s"
-                        begin={`${(idx * 0.18).toFixed(2)}s`}
-                        repeatCount="indefinite"
+                  <g
+                    key={`enemy-air-${idx}`}
+                    onClick={() => onFocusBattle?.()}
+                    className="cursor-pointer"
+                  >
+                    {ac.kind === 'jet' ? (
+                      <polygon
+                        points={`${ax},${ay - 4.2} ${ax + 3.4},${ay + 3.2} ${ax},${ay + 1.4} ${ax - 3.4},${ay + 3.2}`}
+                        fill="#fb923c"
+                        stroke="#fffbeb"
+                        strokeWidth="0.8"
                       />
-                      <animate
-                        attributeName="opacity"
-                        values="0.65;0.1;0.65"
-                        dur="1.2s"
-                        begin={`${(idx * 0.18).toFixed(2)}s`}
-                        repeatCount="indefinite"
-                      />
-                    </circle>
-                    <circle
-                      cx={rx}
-                      cy={ry}
-                      r={dot.isCaptain ? 3.1 : 2.3}
-                      fill={dot.isCaptain ? '#f97316' : '#ef4444'}
-                      stroke="#ffffff"
-                      strokeWidth="0.7"
-                    />
+                    ) : (
+                      <g>
+                        <circle cx={ax} cy={ay} r="3" fill="#f43f5e" stroke="#fef08a" strokeWidth="0.8" />
+                        <line x1={ax - 4.2} y1={ay} x2={ax + 4.2} y2={ay} stroke="#fef08a" strokeWidth="0.9" />
+                      </g>
+                    )}
                   </g>
                 );
               })}
+
+              {/* Active Alderbrook Counter-Raid Strike Squad Dots */}
+              {counterActive &&
+                raiderRadar.counterSquad.map((dot, idx) => {
+                  const cx = Math.max(8, Math.min(132, toMapCoord(dot.x)));
+                  const cy = Math.max(8, Math.min(132, toMapCoord(dot.z)));
+                  return (
+                    <circle
+                      key={`counter-dot-${idx}`}
+                      cx={cx}
+                      cy={cy}
+                      r="2.6"
+                      fill="#38bdf8"
+                      stroke="#fef08a"
+                      strokeWidth="0.9"
+                    />
+                  );
+                })}
             </g>
           );
         })()}

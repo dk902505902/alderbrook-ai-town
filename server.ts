@@ -1338,6 +1338,16 @@ async function createServer() {
       }>;
       recentLogs?: Array<{ agentName?: string; dialogue?: string }>;
       webResults?: Array<{ title?: string; url?: string; snippet?: string; source?: string }>;
+      enemyCity?: {
+        name?: string;
+        gold?: number;
+        food?: number;
+        railBuilt?: boolean;
+        helicoptersReady?: number;
+        jetsReady?: number;
+        builtCount?: number;
+        counterRaidActive?: boolean;
+      };
     };
 
     const userMessage = String(body.message ?? '').trim().slice(0, 300);
@@ -1382,7 +1392,7 @@ async function createServer() {
         : [
             `You are Mayor Sterling, the warm, decisive Rank 1 leader of ${townName} AI Town.`,
             'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-            'Valid action.type values: "none", "build", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "build_inter_town_rail", "toggle_auto", "trigger_raid", "toggle_raids".',
+            'Valid action.type values: "none", "build", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "build_inter_town_rail", "toggle_auto", "trigger_raid", "toggle_raids", "counter_raid".',
             '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Triple-Gun Defense Tower, Town Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave"|"alpine"|"river"|"canyon") if a biome was specified.',
             '- Use "hire" to recruit workers (e.g. medic, researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
             '- Use "unhire" when asked to unhire, fire, dismiss, let go, or lay off a hired specialist—OR if you decide on your own to dismiss a redundant hired worker to trim upkeep or free a slot. Set action.target to the hired worker\'s name, id, or role. Core council members (Mayor Sterling, Commander Vance, Architect Lyra, Worker Kai, Worker Pip) cannot be unhired.',
@@ -1395,8 +1405,9 @@ async function createServer() {
             '- Use "toggle_auto" when asked to turn Automatic City-Builder mode ON or OFF (e.g., "Mayor go automatic", "Stop automatic"). Set action.autoEnabled (boolean).',
             '- Use "trigger_raid" when asked to trigger/start an enemy raider attack wave.',
             '- Use "toggle_raids" when asked to turn Enemy Raids ON or OFF / switch to peaceful mode. Set action.raidsEnabled (boolean).',
+            '- Use "counter_raid" when asked to counter-attack the rival enemy fortress town (Ironhold Bastion) or loot/reclaim Gold and Food back from their depot.',
             '- Otherwise set action.type to "none".',
-            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|unhire|decree|create_town|expand_biome|build_road|extend_rail|build_inter_town_rail|toggle_auto|trigger_raid|toggle_raids","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|unhire|decree|create_town|expand_biome|build_road|extend_rail|build_inter_town_rail|toggle_auto|trigger_raid|toggle_raids|counter_raid","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
           ].join('\n');
 
     const webResultsBlock =
@@ -1438,6 +1449,9 @@ async function createServer() {
         .join(' | ')}`,
       logsList.length > 0
         ? `Recent Log: ${logsList.map((l) => `${l.agentName}: ${String(l.dialogue ?? '').slice(0, 55)}`).join(' | ')}`
+        : '',
+      body.enemyCity
+        ? `Rival Fortress (${String(body.enemyCity.name ?? 'Ironhold Bastion').slice(0, 32)}): ${Number(body.enemyCity.gold ?? 0)}g Gold, ${Number(body.enemyCity.food ?? 0)} Food, ${Number(body.enemyCity.builtCount ?? 1)} buildings, Rail ${body.enemyCity.railBuilt ? 'BUILT' : 'not built'}, Air Force: ${Number(body.enemyCity.helicoptersReady ?? 0)} Helis / ${Number(body.enemyCity.jetsReady ?? 0)} Jets${body.enemyCity.counterRaidActive ? ' (Counter-Raid underway!)' : ''}`
         : '',
       webResultsBlock,
     ]
@@ -1504,6 +1518,7 @@ async function createServer() {
         'toggle_auto',
         'trigger_raid',
         'toggle_raids',
+        'counter_raid',
       ]);
       const actionType = allowedTypes.has(rawType) ? rawType : 'none';
       const rawBiome = typeof rawAction.biome === 'string' ? rawAction.biome.trim().toLowerCase() : '';
@@ -1551,7 +1566,7 @@ async function createServer() {
     const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
     if (apiKeys.length === 0) {
       res.status(400).json({
-        error: 'No AI API key configured for Enemy Raider Commander.',
+        error: 'No AI API key configured for Supreme Warlord Malakor.',
         code: 'MISSING_API_KEY',
       });
       return;
@@ -1566,25 +1581,50 @@ async function createServer() {
       hasHospital?: unknown;
       injuredCount?: unknown;
       population?: unknown;
+      enemyGold?: unknown;
+      enemyFood?: unknown;
+      builtStructures?: unknown;
+      railBuilt?: unknown;
+      helicoptersReady?: unknown;
+      jetsReady?: unknown;
+      townGold?: unknown;
+      townFood?: unknown;
     };
 
     const townName = String(body.townName ?? 'Alderbrook').trim().slice(0, 48) || 'Alderbrook';
     const waveNumber = Math.max(1, Math.min(99, Number(body.waveNumber ?? 1) || 1));
-    const campHp = Math.max(0, Math.min(500, Number(body.campHp ?? 100) || 100));
-    const campMaxHp = Math.max(1, Math.min(500, Number(body.campMaxHp ?? 100) || 100));
+    const campHp = Math.max(0, Math.min(500, Number(body.campHp ?? 120) || 120));
+    const campMaxHp = Math.max(1, Math.min(500, Number(body.campMaxHp ?? 120) || 120));
     const defenseCount = Math.max(0, Math.min(20, Number(body.defenseCount ?? 0) || 0));
     const hasHospital = Boolean(body.hasHospital);
     const injuredCount = Math.max(0, Math.min(15, Number(body.injuredCount ?? 0) || 0));
     const population = Math.max(1, Math.min(15, Number(body.population ?? 5) || 5));
+    const enemyGold = Math.max(0, Math.min(99999, Number(body.enemyGold ?? 240) || 0));
+    const enemyFood = Math.max(0, Math.min(99999, Number(body.enemyFood ?? 120) || 0));
+    const builtStructures = Array.isArray(body.builtStructures)
+      ? body.builtStructures.map((s) => String(s).slice(0, 32)).slice(0, 8)
+      : ['citadel'];
+    const railBuilt = Boolean(body.railBuilt);
+    const helicoptersReady = Math.max(0, Math.min(4, Number(body.helicoptersReady ?? 0) || 0));
+    const jetsReady = Math.max(0, Math.min(4, Number(body.jetsReady ?? 0) || 0));
+    const townGold = Math.max(0, Math.min(99999, Number(body.townGold ?? 300) || 0));
+    const townFood = Math.max(0, Math.min(99999, Number(body.townFood ?? 40) || 0));
 
     const systemPrompt = [
-      'You are Captain Ironjaw, the playful, dramatic cartoon Raider Commander camping outside a cozy low-poly town.',
-      'Keep everything lighthearted, cartoon, and non-graphic (your iron cannon fires bouncy spark cannonballs to test the town defenses — never lethal or grim).',
-      'Choose ONE tactic from: "shell_perimeter" (rapid volleys across outer plots), "target_workers" (aim playful sparks near busy workers), "siege_plaza" (lob high arcs toward central square), or "regroup" (steady slow shots while bracing camp).',
-      'Return ONLY raw JSON: {"tactic":"shell_perimeter|target_workers|siege_plaza|regroup","commanderOrder":"short playful battle cry under 14 words"}',
+      'You are Supreme Warlord Malakor, the 100% autonomous cartoon commander of Ironhold Bastion, a rival low-poly fortress city on the southwest frontier.',
+      'You take NO orders from the player. You command Chief Siege Engineer Vex (builds factories, loot depots, turrets, and armored ore railway) and Air Marshal Kael (builds & launches attack helicopters and fighter jets).',
+      'Keep everything stylized, dramatic, cartoon, and non-graphic (spark cannons, rocket fireworks, gold/food supply looting — never lethal or grim).',
+      'Choose ONE combat tactic from: "shell_perimeter", "target_workers", "siege_plaza", "air_strike" (use when helicopters or jets are ready!), "loot_raid" (raid rival Gold & Food stockpiles), or "regroup".',
+      'Choose ONE autonomous Ironhold city expansion action from: "build_foundry", "build_depot", "build_rail", "build_airfield", "build_turret_north", "build_turret_south", "upgrade_citadel", "build_helicopter", "build_jet", or "none" (pick something NOT yet maxed if you have enough Gold).',
+      'Return ONLY raw JSON: {"tactic":"shell_perimeter|target_workers|siege_plaza|air_strike|loot_raid|regroup","cityAction":"build_foundry|build_depot|build_rail|build_airfield|build_turret_north|build_turret_south|upgrade_citadel|build_helicopter|build_jet|none","commanderOrder":"<= 14 words battle/expansion decree","vexOrder":"<= 10 words order to Engineer Vex","kaelOrder":"<= 10 words order to Air Marshal Kael"}',
     ].join('\n');
 
-    const userPrompt = `Town: ${townName} | Wave #${waveNumber} | Raider Camp HP: ${campHp}/${campMaxHp} | Town Defense Towers/Walls: ${defenseCount} | Town Hospital Built: ${hasHospital ? 'Yes' : 'No'} | Villagers: ${population} (${injuredCount} resting/injured). Pick your next cartoon raid tactic!`;
+    const userPrompt = [
+      `Target Town: ${townName} (Gold: ${townGold}g, Food: ${townFood}, Defenses: ${defenseCount}, Hospital: ${hasHospital ? 'Yes' : 'No'}, Villagers: ${population}, Injured: ${injuredCount})`,
+      `Ironhold Bastion Status: Wave #${waveNumber}, Bastion Frontline HP ${campHp}/${campMaxHp}, Enemy Gold ${enemyGold}g, Enemy Food ${enemyFood}`,
+      `Built in Ironhold: [${builtStructures.join(', ')}] | Ore Railway: ${railBuilt ? 'Built' : 'Not built'} | Air Force: ${helicoptersReady}/2 Helis, ${jetsReady}/2 Jets`,
+      'Decide your next autonomous raid tactic and city expansion move!',
+    ].join('\n');
 
     try {
       const result = await callChatCompletionsWithKeyPool(
@@ -1597,7 +1637,7 @@ async function createServer() {
             { role: 'user', content: userPrompt },
           ],
           temperature: 0.75,
-          max_tokens: 140,
+          max_tokens: 200,
           response_format: { type: 'json_object' },
         },
         true,
@@ -1605,7 +1645,7 @@ async function createServer() {
 
       if ('errorText' in result && result.errorText) {
         res.status(result.status >= 400 ? result.status : 502).json({
-          error: `Raider AI error (${result.status}): ${result.errorText}`,
+          error: `Warlord AI error (${result.status}): ${result.errorText}`,
         });
         return;
       }
@@ -1613,23 +1653,53 @@ async function createServer() {
       const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
       const content = choices?.[0]?.message?.content || '';
       const parsed = extractJsonObject(content);
-      const rawTactic = String(parsed.tactic ?? 'shell_perimeter').trim().toLowerCase();
-      const tactic =
-        rawTactic === 'target_workers' || rawTactic === 'siege_plaza' || rawTactic === 'regroup'
-          ? rawTactic
-          : 'shell_perimeter';
+      const validTactics = new Set([
+        'shell_perimeter',
+        'target_workers',
+        'siege_plaza',
+        'air_strike',
+        'loot_raid',
+        'regroup',
+      ]);
+      const rawTactic = String(parsed.tactic ?? 'loot_raid').trim().toLowerCase();
+      const tactic = validTactics.has(rawTactic) ? rawTactic : 'loot_raid';
+
+      const validCityActions = new Set([
+        'build_foundry',
+        'build_depot',
+        'build_rail',
+        'build_airfield',
+        'build_turret_north',
+        'build_turret_south',
+        'upgrade_citadel',
+        'build_helicopter',
+        'build_jet',
+        'none',
+      ]);
+      const rawCityAction = String(parsed.cityAction ?? 'none').trim().toLowerCase();
+      const cityAction = validCityActions.has(rawCityAction) ? rawCityAction : 'none';
+
       const commanderOrder =
         String(parsed.commanderOrder ?? '').trim().slice(0, 120) ||
-        'Load the brass cannon — let us test their stone walls!';
+        'Expand Ironhold Bastion and plunder their gold vaults!';
+      const vexOrder =
+        String(parsed.vexOrder ?? '').trim().slice(0, 90) ||
+        'Keep the foundry furnaces hot and ore rails running.';
+      const kaelOrder =
+        String(parsed.kaelOrder ?? '').trim().slice(0, 90) ||
+        'Spin up the rotors and patrol the frontier ridge.';
 
       res.json({
         tactic,
+        cityAction,
         commanderOrder,
+        vexOrder,
+        kaelOrder,
         modelUsed: result.modelUsed || modelName,
       });
     } catch (error) {
       res.status(502).json({
-        error: error instanceof Error ? error.message : 'Failed to reach Raider AI.',
+        error: error instanceof Error ? error.message : 'Failed to reach Warlord AI.',
       });
     }
   });

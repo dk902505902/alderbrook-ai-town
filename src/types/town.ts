@@ -384,7 +384,312 @@ export interface TownExpansionState {
 
 export type AgentHealthStatus = 'healthy' | 'injured';
 
-export type RaiderTactic = 'shell_perimeter' | 'target_workers' | 'siege_plaza' | 'regroup';
+export type RaiderTactic =
+  | 'shell_perimeter'
+  | 'target_workers'
+  | 'siege_plaza'
+  | 'air_strike'
+  | 'loot_raid'
+  | 'regroup';
+
+export type EnemyBuildingId =
+  | 'warlord_citadel'
+  | 'munitions_foundry'
+  | 'war_depot'
+  | 'airfield'
+  | 'enemy_turret_north'
+  | 'enemy_turret_south'
+  | 'supply_railway';
+
+export interface EnemyBuildingRecord {
+  id: EnemyBuildingId;
+  label: string;
+  category: 'command' | 'industry' | 'storage' | 'airforce' | 'defense' | 'rail';
+  built: boolean;
+  level: number;
+  maxLevel: number;
+  hp: number;
+  maxHp: number;
+}
+
+export interface EnemyHierarchyUnit {
+  id: string;
+  name: string;
+  rank: 1 | 2 | 3;
+  role: string;
+  department: string;
+  supervisor: string | null;
+  status: string;
+  lastAction: string;
+}
+
+export interface EnemyCityState {
+  name: string;
+  gold: number;
+  food: number;
+  totalGoldLootedFromUs: number;
+  totalFoodLootedFromUs: number;
+  totalGoldCounterLooted: number;
+  totalFoodCounterLooted: number;
+  buildings: EnemyBuildingRecord[];
+  railBuilt: boolean;
+  helicoptersReady: number;
+  jetsReady: number;
+  autonomousTurnCount: number;
+  warlordDecision: string;
+  warlordModelUsed: string;
+  lastAutonomousTurnMs: number;
+  hierarchy: EnemyHierarchyUnit[];
+  counterRaidActive: boolean;
+  counterRaidEndsAtMs: number | null;
+  lastLootEvent: string;
+}
+
+export function createDefaultEnemyCityState(): EnemyCityState {
+  return {
+    name: 'Ironhold Bastion',
+    gold: 260,
+    food: 95,
+    totalGoldLootedFromUs: 0,
+    totalFoodLootedFromUs: 0,
+    totalGoldCounterLooted: 0,
+    totalFoodCounterLooted: 0,
+    buildings: [
+      {
+        id: 'warlord_citadel',
+        label: 'Warlord Citadel',
+        category: 'command',
+        built: true,
+        level: 1,
+        maxLevel: 3,
+        hp: 160,
+        maxHp: 160,
+      },
+      {
+        id: 'munitions_foundry',
+        label: 'Munitions Foundry',
+        category: 'industry',
+        built: false,
+        level: 0,
+        maxLevel: 3,
+        hp: 0,
+        maxHp: 110,
+      },
+      {
+        id: 'war_depot',
+        label: 'War Loot Depot',
+        category: 'storage',
+        built: false,
+        level: 0,
+        maxLevel: 3,
+        hp: 0,
+        maxHp: 120,
+      },
+      {
+        id: 'airfield',
+        label: 'Airfield Helipad & Runway',
+        category: 'airforce',
+        built: false,
+        level: 0,
+        maxLevel: 3,
+        hp: 0,
+        maxHp: 130,
+      },
+      {
+        id: 'enemy_turret_north',
+        label: 'North Bastion Turret',
+        category: 'defense',
+        built: false,
+        level: 0,
+        maxLevel: 3,
+        hp: 0,
+        maxHp: 100,
+      },
+      {
+        id: 'enemy_turret_south',
+        label: 'South Bastion Turret',
+        category: 'defense',
+        built: false,
+        level: 0,
+        maxLevel: 3,
+        hp: 0,
+        maxHp: 100,
+      },
+      {
+        id: 'supply_railway',
+        label: 'Armored Ore Railway',
+        category: 'rail',
+        built: false,
+        level: 0,
+        maxLevel: 1,
+        hp: 0,
+        maxHp: 100,
+      },
+    ],
+    railBuilt: false,
+    helicoptersReady: 0,
+    jetsReady: 0,
+    autonomousTurnCount: 0,
+    warlordDecision: 'Surveying the southwest ridge and stockpiling ore inside Ironhold Bastion.',
+    warlordModelUsed: 'Instant Tactics · 0 tokens',
+    lastAutonomousTurnMs: 0,
+    hierarchy: [
+      {
+        id: 'warlord_malakor',
+        name: 'Supreme Warlord Malakor',
+        rank: 1,
+        role: 'Supreme Warlord',
+        department: 'Bastion Command',
+        supervisor: null,
+        status: 'Planning autonomous fortress expansion',
+        lastAction: 'Established Ironhold Citadel on the SW frontier',
+      },
+      {
+        id: 'engineer_vex',
+        name: 'Chief Siege Engineer Vex',
+        rank: 2,
+        role: 'Factories, Defenses & Rail',
+        department: 'Ironworks Corps',
+        supervisor: 'Supreme Warlord Malakor',
+        status: 'Drafting Munitions Foundry & Rail blueprints',
+        lastAction: 'Fortified Citadel outer walls',
+      },
+      {
+        id: 'marshal_kael',
+        name: 'Air Marshal Kael',
+        rank: 2,
+        role: 'Helicopter & Jet Wing',
+        department: 'Crimson Air Force',
+        supervisor: 'Supreme Warlord Malakor',
+        status: 'Awaiting Airfield Helipad & Runway construction',
+        lastAction: 'Charted flight corridors over Alderbrook',
+      },
+      {
+        id: 'ironhold_builders',
+        name: 'Ironhold Sappers & Miners',
+        rank: 3,
+        role: 'Builders & Ore Miners',
+        department: 'Ironworks Corps',
+        supervisor: 'Chief Siege Engineer Vex',
+        status: 'Hauling dark iron ore to Citadel',
+        lastAction: 'Cleared foundation pads across SW ridge',
+      },
+      {
+        id: 'crimson_pilots',
+        name: 'Crimson Rotor & Jet Pilots',
+        rank: 3,
+        role: 'Attack Helicopter & Jet Pilots',
+        department: 'Crimson Air Force',
+        supervisor: 'Air Marshal Kael',
+        status: 'Running pre-flight simulator checks',
+        lastAction: 'Calibrating spark-rocket pods',
+      },
+      {
+        id: 'ironjaw_squad',
+        name: 'Ironjaw Raider Squad',
+        rank: 3,
+        role: 'Ground Siege & Loot Raiders',
+        department: 'Bastion Command',
+        supervisor: 'Supreme Warlord Malakor',
+        status: 'Drilling beside the brass siege cannons',
+        lastAction: 'Scouted Alderbrook granary & treasury routes',
+      },
+    ],
+    counterRaidActive: false,
+    counterRaidEndsAtMs: null,
+    lastLootEvent: 'No cross-border looting yet.',
+  };
+}
+
+export function sanitizeEnemyCityState(raw: unknown): EnemyCityState {
+  const fallback = createDefaultEnemyCityState();
+  if (!raw || typeof raw !== 'object') return fallback;
+  const d = raw as Partial<EnemyCityState>;
+
+  const rawBuildings = Array.isArray(d.buildings) ? d.buildings : [];
+  const byId = new Map<string, Partial<EnemyBuildingRecord>>();
+  for (const b of rawBuildings) {
+    if (b && typeof b === 'object' && typeof b.id === 'string') {
+      byId.set(b.id, b);
+    }
+  }
+  const buildings: EnemyBuildingRecord[] = fallback.buildings.map((def) => {
+    const saved = byId.get(def.id);
+    if (!saved) return def;
+    const built = def.id === 'warlord_citadel' ? true : Boolean(saved.built);
+    const level = built
+      ? Math.max(1, Math.min(def.maxLevel, Math.round(Number(saved.level) || 1)))
+      : 0;
+    const maxHp = Math.max(80, Math.round(Number(saved.maxHp) || def.maxHp));
+    const hp = built ? Math.max(10, Math.min(maxHp, Math.round(Number(saved.hp) || maxHp))) : 0;
+    return { ...def, built, level, hp, maxHp };
+  });
+
+  const railBld = buildings.find((b) => b.id === 'supply_railway');
+  const railBuilt = Boolean(d.railBuilt || railBld?.built);
+  if (railBld && railBuilt && !railBld.built) {
+    railBld.built = true;
+    railBld.level = 1;
+    railBld.hp = railBld.maxHp;
+  }
+
+  const rawHier = Array.isArray(d.hierarchy) ? d.hierarchy : [];
+  const hierById = new Map<string, Partial<EnemyHierarchyUnit>>();
+  for (const u of rawHier) {
+    if (u && typeof u === 'object' && typeof u.id === 'string') {
+      hierById.set(u.id, u);
+    }
+  }
+  const hierarchy: EnemyHierarchyUnit[] = fallback.hierarchy.map((def) => {
+    const saved = hierById.get(def.id);
+    if (!saved) return def;
+    return {
+      ...def,
+      status:
+        typeof saved.status === 'string' && saved.status.trim()
+          ? saved.status.trim().slice(0, 140)
+          : def.status,
+      lastAction:
+        typeof saved.lastAction === 'string' && saved.lastAction.trim()
+          ? saved.lastAction.trim().slice(0, 140)
+          : def.lastAction,
+    };
+  });
+
+  return {
+    name:
+      typeof d.name === 'string' && d.name.trim()
+        ? d.name.trim().slice(0, 48)
+        : fallback.name,
+    gold: Math.max(0, Math.round(Number.isFinite(Number(d.gold)) ? Number(d.gold) : fallback.gold)),
+    food: Math.max(0, Math.round(Number.isFinite(Number(d.food)) ? Number(d.food) : fallback.food)),
+    totalGoldLootedFromUs: Math.max(0, Math.round(Number(d.totalGoldLootedFromUs) || 0)),
+    totalFoodLootedFromUs: Math.max(0, Math.round(Number(d.totalFoodLootedFromUs) || 0)),
+    totalGoldCounterLooted: Math.max(0, Math.round(Number(d.totalGoldCounterLooted) || 0)),
+    totalFoodCounterLooted: Math.max(0, Math.round(Number(d.totalFoodCounterLooted) || 0)),
+    buildings,
+    railBuilt,
+    helicoptersReady: Math.max(0, Math.min(2, Math.round(Number(d.helicoptersReady) || 0))),
+    jetsReady: Math.max(0, Math.min(2, Math.round(Number(d.jetsReady) || 0))),
+    autonomousTurnCount: Math.max(0, Math.round(Number(d.autonomousTurnCount) || 0)),
+    warlordDecision:
+      typeof d.warlordDecision === 'string' && d.warlordDecision.trim()
+        ? d.warlordDecision.trim().slice(0, 160)
+        : fallback.warlordDecision,
+    warlordModelUsed:
+      typeof d.warlordModelUsed === 'string' && d.warlordModelUsed.trim()
+        ? d.warlordModelUsed.trim().slice(0, 60)
+        : fallback.warlordModelUsed,
+    lastAutonomousTurnMs: Math.max(0, Number(d.lastAutonomousTurnMs) || 0),
+    hierarchy,
+    counterRaidActive: false,
+    counterRaidEndsAtMs: null,
+    lastLootEvent:
+      typeof d.lastLootEvent === 'string' && d.lastLootEvent.trim()
+        ? d.lastLootEvent.trim().slice(0, 160)
+        : fallback.lastLootEvent,
+  };
+}
 
 export interface EnemyRaidState {
   enabled: boolean;
@@ -406,11 +711,11 @@ export function createDefaultEnemyRaidState(enabled = false): EnemyRaidState {
     enabled,
     active: false,
     waveNumber: 0,
-    campHp: 100,
-    campMaxHp: 100,
+    campHp: 120,
+    campMaxHp: 120,
     tactic: 'shell_perimeter',
-    commanderName: 'Captain Ironjaw',
-    commanderOrder: 'Standing by beyond the western ridge.',
+    commanderName: 'Warlord Malakor',
+    commanderOrder: 'Ironhold Bastion stands ready across the southwest ridge.',
     modelUsed: 'Instant Tactics · 0 tokens',
     raidsRepelled: 0,
     lastEventMs: 0,

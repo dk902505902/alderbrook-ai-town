@@ -30,17 +30,20 @@ import {
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
   CORE_AGENT_IDS,
+  createDefaultEnemyCityState,
   createInitialAgents,
   createInitialLogs,
   DEFAULT_TOWN_METRICS,
   MAX_TOWN_AGENTS,
   normalizeTownTheme,
   normalizeWeatherMode,
+  sanitizeEnemyCityState,
   type AgentId,
   type AgentRecord,
   type BiomeId,
   type CustomBuildingStyle,
   type DecorPackId,
+  type EnemyCityState,
   type HatStyle,
   type LocationId,
   type MilestoneId,
@@ -89,12 +92,41 @@ export interface LoadedTownState {
   structures: TownStructure[];
   relationships: TownRelationship[];
   logs: TownLogItem[];
+  enemyCity?: EnemyCityState;
 }
 
 export const LOCAL_MAIN_TOWN_ID = 'alderbrook_main';
 export const LEGACY_LOCAL_TOWN_KEY = 'alderbrook_local_town_v2';
 const LOCAL_TOWNS_INDEX_KEY = 'alderbrook_local_towns_index_v1';
 const LOCAL_TOWN_PREFIX = 'alderbrook_local_town_slot_';
+const ENEMY_CITY_STORAGE_PREFIX = 'alderbrook_ironhold_city_v1_';
+
+export function loadEnemyCityLocal(townId: string): EnemyCityState {
+  if (typeof window === 'undefined' || !townId) return createDefaultEnemyCityState();
+  try {
+    const raw = window.localStorage.getItem(`${ENEMY_CITY_STORAGE_PREFIX}${townId}`);
+    if (!raw) return createDefaultEnemyCityState();
+    return sanitizeEnemyCityState(JSON.parse(raw));
+  } catch {
+    return createDefaultEnemyCityState();
+  }
+}
+
+export function saveEnemyCityLocal(townId: string, city: EnemyCityState): void {
+  if (typeof window === 'undefined' || !townId) return;
+  try {
+    window.localStorage.setItem(
+      `${ENEMY_CITY_STORAGE_PREFIX}${townId}`,
+      JSON.stringify({
+        ...city,
+        counterRaidActive: false,
+        counterRaidEndsAtMs: null,
+      }),
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 const VALID_PLOT_SET = new Set<string>(ALL_PLOT_IDS);
 const VALID_STRUCTURE_SET = new Set<string>([...ALL_STRUCTURE_TYPES, 'custom']);
@@ -158,7 +190,7 @@ function sanitizeBiomes(val: unknown): BiomeId[] {
       }
     }
   }
-  return out.slice(0, 3);
+  return out.slice(0, 6);
 }
 
 function sanitizeRoads(val: unknown): string[] {
@@ -425,6 +457,7 @@ export function createFreshTownState(
     structures: [],
     relationships: createStarterRelationships(),
     logs,
+    enemyCity: createDefaultEnemyCityState(),
   };
 }
 
@@ -564,6 +597,7 @@ export function loadLocalTown(townId: string): LoadedTownState | null {
           ? d.relationships
           : createStarterRelationships(),
       logs,
+      enemyCity: d.enemyCity ? sanitizeEnemyCityState(d.enemyCity) : loadEnemyCityLocal(townId),
     };
   } catch {
     return null;
@@ -1045,6 +1079,7 @@ export async function loadOrInitializeTown(
     structures,
     relationships: createStarterRelationships(),
     logs: logs.length > 0 ? logs : createInitialLogs(),
+    enemyCity: loadEnemyCityLocal(townId),
   };
 }
 

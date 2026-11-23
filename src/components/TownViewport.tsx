@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Bus,
+  Castle,
   Check,
   Coffee,
+  Coins,
   Compass,
   Cross,
   Crown,
@@ -15,6 +17,7 @@ import {
   MessageCircle,
   Moon,
   Pencil,
+  Plane,
   Shield,
   Swords,
   Target,
@@ -44,6 +47,7 @@ import {
   type BiomeId,
   type CameraMode,
   type DecorPackId,
+  type EnemyCityState,
   type EnemyRaidState,
   type GraphicsQuality,
   type LocationId,
@@ -93,6 +97,7 @@ interface TownViewportProps {
     | { type: 'bus_stop'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
     | { type: 'raider_camp'; nonce: number }
+    | { type: 'enemy_city'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null;
   signalRelayPulseNonce?: number;
@@ -100,10 +105,13 @@ interface TownViewportProps {
   decorPacks?: DecorPackId[];
   triggerCelebrationNonce?: number;
   raidState: EnemyRaidState;
+  enemyCity: EnemyCityState;
   raiderRadar?: RaiderRadarSnapshot | null;
-  onRaiderImpact?: (x: number, z: number) => void;
+  onRaiderImpact?: (x: number, z: number, source: 'ground' | 'helicopter' | 'jet') => void;
   onDefenseHitCamp?: (damage: number) => void;
+  onEnemyAircraftDowned?: (kind: 'helicopter' | 'jet') => void;
   onFocusRaiderCamp?: () => void;
+  onFocusEnemyCity?: () => void;
   onToggleRaids?: (next?: boolean) => void;
   onSelectAgent: (agentId: AgentId) => void;
   onTogglePovAgent: (agentId: AgentId) => void;
@@ -185,10 +193,13 @@ export function TownViewport({
   decorPacks = [],
   triggerCelebrationNonce = 0,
   raidState,
+  enemyCity,
   raiderRadar = null,
   onRaiderImpact,
   onDefenseHitCamp,
+  onEnemyAircraftDowned,
   onFocusRaiderCamp,
+  onFocusEnemyCity,
   onToggleRaids,
   onSelectAgent,
   onTogglePovAgent,
@@ -277,6 +288,7 @@ export function TownViewport({
     onRegisterSnapshotFn,
     onRaiderImpact,
     onDefenseHitCamp,
+    onEnemyAircraftDowned,
   });
   callbacksRef.current = {
     onSelectAgent,
@@ -293,6 +305,7 @@ export function TownViewport({
     onRegisterSnapshotFn,
     onRaiderImpact,
     onDefenseHitCamp,
+    onEnemyAircraftDowned,
   };
 
   useEffect(() => {
@@ -321,8 +334,9 @@ export function TownViewport({
         onRaiderRadarUpdate: (snap) => callbacksRef.current.onRaiderRadarUpdate?.(snap),
         onBusRadarUpdate: (pos) => callbacksRef.current.onBusRadarUpdate?.(pos),
         onUserOrbitStart: () => callbacksRef.current.onUserOrbitStart?.(),
-        onRaiderImpact: (x, z) => callbacksRef.current.onRaiderImpact?.(x, z),
+        onRaiderImpact: (x, z, source) => callbacksRef.current.onRaiderImpact?.(x, z, source),
         onDefenseHitCamp: (dmg) => callbacksRef.current.onDefenseHitCamp?.(dmg),
+        onEnemyAircraftDowned: (kind) => callbacksRef.current.onEnemyAircraftDowned?.(kind),
         onLabelUpdate: (positions: Record<AgentId, ProjectedLabel>) => {
           for (const [id, pos] of Object.entries(positions)) {
             const el = labelRefs.current[id];
@@ -493,6 +507,10 @@ export function TownViewport({
   }, [raidState]);
 
   useEffect(() => {
+    controllerRef.current?.syncEnemyCity(enemyCity);
+  }, [enemyCity]);
+
+  useEffect(() => {
     if (!focusRequest || !controllerRef.current) return;
     if (focusRequest.type === 'agent') {
       controllerRef.current.focusAgent(focusRequest.id);
@@ -512,6 +530,8 @@ export function TownViewport({
       controllerRef.current.focusSignalRelay();
     } else if (focusRequest.type === 'raider_camp') {
       controllerRef.current.focusRaiderCamp();
+    } else if (focusRequest.type === 'enemy_city') {
+      controllerRef.current.focusEnemyCity();
     } else {
       controllerRef.current.resetCamera();
     }
@@ -625,7 +645,7 @@ export function TownViewport({
         })}
       </div>
 
-      {/* Active Raider Alert & Defense Bar (Compact, non-obtrusive, no backdrop-blur) */}
+      {/* Active Raider Alert & Ironhold Assault Bar (Compact, non-obtrusive, no backdrop-blur) */}
       {raidState.active && cameraMode === 'orbit' && !selectedPlotId && (
         <div className="fixed top-18 left-1/2 z-20 flex w-[calc(100%-1rem)] max-w-md -translate-x-1/2 flex-col gap-1.5 rounded-2xl border border-rose-500/55 bg-slate-950/95 px-2.5 py-2 shadow-2xl sm:px-3 md:top-20">
           <div className="flex items-center justify-between gap-1.5 sm:gap-2">
@@ -650,11 +670,22 @@ export function TownViewport({
                 <button
                   type="button"
                   onClick={onFocusRaiderCamp}
-                  title="Swing camera to frame the Raider squad, siege cannons, and defense line"
+                  title="Frame the Raider squad, air strikes, and defense line"
                   className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-amber-400/60 bg-rose-600 px-2 text-[11px] font-semibold whitespace-nowrap text-white shadow hover:bg-rose-500 sm:px-2.5"
                 >
                   <Target className="h-3.5 w-3.5 shrink-0" />
-                  <span>View Battle</span>
+                  <span>Battle</span>
+                </button>
+              )}
+              {onFocusEnemyCity && (
+                <button
+                  type="button"
+                  onClick={onFocusEnemyCity}
+                  title="Jump camera to Ironhold Bastion rival enemy city"
+                  className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-rose-400/45 bg-rose-950 px-2 text-[11px] font-semibold whitespace-nowrap text-rose-100 hover:bg-rose-900"
+                >
+                  <Castle className="h-3.5 w-3.5 shrink-0" />
+                  <span className="hidden sm:inline">Enemy City</span>
                 </button>
               )}
               {onToggleRaids && (
@@ -669,8 +700,8 @@ export function TownViewport({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <div className="h-1.5 min-w-[70px] flex-1 overflow-hidden rounded-full bg-slate-800">
               <div
                 className="h-full rounded-full bg-rose-500 transition-all duration-300"
                 style={{
@@ -679,11 +710,21 @@ export function TownViewport({
               />
             </div>
             <span className="font-mono-tabular text-[10px] font-semibold whitespace-nowrap text-slate-300">
-              Camp {Math.max(0, Math.round(raidState.campHp))}/{raidState.campMaxHp} HP
+              Line {Math.max(0, Math.round(raidState.campHp))}/{raidState.campMaxHp}
             </span>
-            {raiderRadar && (
+            <span className="inline-flex items-center gap-0.5 font-mono-tabular text-[10px] text-amber-300">
+              <Coins className="h-3 w-3 shrink-0" />
+              {enemyCity.gold}g
+            </span>
+            {(enemyCity.helicoptersReady > 0 || enemyCity.jetsReady > 0) && (
+              <span className="inline-flex items-center gap-1 rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap text-orange-200">
+                <Plane className="h-3 w-3 shrink-0" />
+                {enemyCity.helicoptersReady}H · {enemyCity.jetsReady}J
+              </span>
+            )}
+            {raiderRadar && raiderRadar.squad.length > 0 && (
               <span className="hidden rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap text-rose-200 sm:inline">
-                {raiderRadar.squad.length} Raiders · {raiderRadar.activeCannons} Cannons
+                {raiderRadar.squad.length} Raiders
               </span>
             )}
             {agents.some((a) => a.healthStatus === 'injured') && (
@@ -693,6 +734,33 @@ export function TownViewport({
               </span>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Active Alderbrook Counter-Raid Strike Banner (when our squad assaults Ironhold Bastion) */}
+      {enemyCity.counterRaidActive && !raidState.active && cameraMode === 'orbit' && !selectedPlotId && (
+        <div className="fixed top-18 left-1/2 z-20 flex w-[calc(100%-1rem)] max-w-md -translate-x-1/2 items-center justify-between gap-2 rounded-2xl border border-cyan-400/55 bg-slate-950/95 px-3 py-2 shadow-2xl md:top-20">
+          <div className="flex min-w-0 items-center gap-2">
+            <Shield className="h-4 w-4 shrink-0 text-cyan-300" />
+            <div className="min-w-0 leading-tight">
+              <div className="truncate text-xs font-semibold text-white">
+                Counter-Raid on {enemyCity.name}
+              </div>
+              <div className="truncate text-[11px] text-cyan-200/90">
+                Commander Vance&apos;s rangers are raiding enemy Gold &amp; Food vaults!
+              </div>
+            </div>
+          </div>
+          {onFocusEnemyCity && (
+            <button
+              type="button"
+              onClick={onFocusEnemyCity}
+              className="inline-flex min-h-[32px] shrink-0 items-center gap-1 rounded-lg border border-cyan-400/60 bg-cyan-600 px-2.5 text-[11px] font-semibold whitespace-nowrap text-white hover:bg-cyan-500"
+            >
+              <Castle className="h-3.5 w-3.5 shrink-0" />
+              <span>Watch Assault</span>
+            </button>
+          )}
         </div>
       )}
 

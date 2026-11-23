@@ -44,6 +44,7 @@ import {
   type AIProviderConfig,
   type BiomeId,
   type CustomBuildingStyle,
+  type EnemyCityState,
   type EnemyRaidState,
   type StructureType,
   type TimeOfDay,
@@ -78,6 +79,7 @@ interface MayorChatModalProps {
   interTownRailTarget: string;
   autoMode: boolean;
   raidState: EnemyRaidState;
+  enemyCity: EnemyCityState;
   agents: AgentRecord[];
   structures: TownStructure[];
   logs: TownLogItem[];
@@ -93,6 +95,7 @@ interface MayorChatModalProps {
   onToggleAutoMode: (next?: boolean) => void;
   onToggleEnemyRaids: (next?: boolean) => void;
   onTriggerEnemyRaid: () => Promise<MayorBuildResult>;
+  onLaunchCounterRaid: () => Promise<MayorBuildResult>;
   onSwitchTown: (townId: string) => Promise<void>;
   onCreateTown: (name: string) => Promise<MayorBuildResult>;
   onExpandBiome: (biome: BiomeId) => Promise<MayorBuildResult>;
@@ -138,7 +141,8 @@ interface MayorActionPlan {
     | 'build_inter_town_rail'
     | 'toggle_auto'
     | 'trigger_raid'
-    | 'toggle_raids';
+    | 'toggle_raids'
+    | 'counter_raid';
   target?: string;
   workerPrompt?: string;
   decree?: string;
@@ -161,11 +165,11 @@ interface BrowserSpeechRecognition {
 }
 
 const BASE_STARTER_CHIPS = [
+  'Counter-attack enemy town',
   'Build 3-gun tower',
   'Build Town Hospital',
   'Trigger enemy raid',
   'Expand map further',
-  'Rail to other town',
   'Status report',
 ];
 
@@ -453,14 +457,27 @@ function parseLocalIntent(
 ): { reply: string; action: MayorActionPlan } | null {
   const lower = text.toLowerCase();
 
-  // 0) Enemy Raids trigger / toggle
+  // 0a) Counter-Attack / Loot Enemy Fortress Town (Ironhold Bastion) — checked BEFORE generic raid trigger
+  if (
+    /\b(counter[- ]?attack|counter[- ]?raid|strike back|retaliate|loot enemy|raid ironhold|attack ironhold|attack enemy|raid enemy|steal back|reclaim.*gold|reclaim.*food|plunder ironhold)\b/.test(
+      lower,
+    )
+  ) {
+    return {
+      reply:
+        'Rally the rangers! Commander Vance is leading a counter-raid straight into Ironhold Bastion to reclaim our Gold and Food!',
+      action: { type: 'counter_raid' },
+    };
+  }
+
+  // 0b) Enemy Raids trigger / toggle
   if (
     /\b(raid|raids|raider|raiders|attack|invade|enemy)\b/.test(lower) &&
     /\b(trigger|start|launch|spawn|send|begin|test|incoming)\b/.test(lower)
   ) {
     return {
       reply:
-        'Sound the bells! Raiders spotted on the southwest ridge! Mobilizing Commander Vance, Town Hospital medics, and defense turrets immediately!',
+        'Sound the bells! Warlord Malakor is mobilizing from Ironhold Bastion! Rallying Commander Vance, Town Hospital medics, and defense turrets immediately!',
       action: { type: 'trigger_raid' },
     };
   }
@@ -662,6 +679,7 @@ export function MayorChatModal({
   interTownRailTarget,
   autoMode,
   raidState,
+  enemyCity,
   agents,
   structures,
   logs,
@@ -677,6 +695,7 @@ export function MayorChatModal({
   onToggleAutoMode,
   onToggleEnemyRaids,
   onTriggerEnemyRaid,
+  onLaunchCounterRaid,
   onSwitchTown,
   onCreateTown,
   onExpandBiome,
@@ -792,6 +811,14 @@ export function MayorChatModal({
     action: MayorActionPlan,
     fallbackText: string,
   ): Promise<{ badge?: string; extraNote?: string }> => {
+    if (action.type === 'counter_raid') {
+      const res = await onLaunchCounterRaid();
+      return {
+        badge: res.ok ? `🛡️ ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.detail,
+      };
+    }
+
     if (action.type === 'trigger_raid') {
       const res = await onTriggerEnemyRaid();
       return {
@@ -1148,6 +1175,16 @@ export function MayorChatModal({
                 agentName: l.agentName,
                 dialogue: l.dialogue,
               })),
+              enemyCity: {
+                name: enemyCity.name,
+                gold: enemyCity.gold,
+                food: enemyCity.food,
+                railBuilt: enemyCity.railBuilt,
+                helicoptersReady: enemyCity.helicoptersReady,
+                jetsReady: enemyCity.jetsReady,
+                builtCount: enemyCity.buildings.filter((b) => b.built).length,
+                counterRaidActive: enemyCity.counterRaidActive,
+              },
             }),
           });
 

@@ -4,6 +4,7 @@ import {
   Building2,
   Bus,
   Camera,
+  Castle,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -67,6 +68,7 @@ import {
   importTownToLocalSlot,
   listLocalTowns,
   listUserTowns,
+  loadEnemyCityLocal,
   loadLocalTown,
   loadOrInitializeTown,
   LOCAL_MAIN_TOWN_ID,
@@ -85,6 +87,7 @@ import {
   persistWeatherShift,
   persistWorkerAssignment,
   resetTownInFirestore,
+  saveEnemyCityLocal,
   saveLocalTown,
   subscribePendingRemoteCommands,
   type LoadedTownState,
@@ -121,6 +124,7 @@ import {
   BIOME_META,
   BIOME_PLOT_IDS,
   CORE_AGENT_IDS,
+  createDefaultEnemyCityState,
   createDefaultEnemyRaidState,
   createHiredAgentRecord,
   DEFAULT_PROVIDER_CONFIG,
@@ -147,6 +151,8 @@ import {
   type AIProviderConfig,
   type BiomeId,
   type CameraMode,
+  type EnemyBuildingId,
+  type EnemyCityState,
   type EnemyRaidState,
   type RaiderTactic,
   type CliAgentActivity,
@@ -504,6 +510,10 @@ export default function App() {
       return createDefaultEnemyRaidState(false);
     }
   });
+  const initLocalForEnemy = initialLocal.current;
+  const [enemyCity, setEnemyCity] = useState<EnemyCityState>(() =>
+    initLocalForEnemy.enemyCity ?? loadEnemyCityLocal(initLocalForEnemy.townId),
+  );
   const [treasuryGold, setTreasuryGold] = useState<number>(initialLocal.current.treasuryGold);
   const [resources, setResources] = useState<TownResources>(initialLocal.current.resources);
   const [activePolicies, setActivePolicies] = useState<PolicyId[]>(
@@ -568,7 +578,10 @@ export default function App() {
     null,
   );
   const lastRaiderInjuryMsRef = useRef<number>(0);
+  const lastRaiderLootMsRef = useRef<number>(0);
   const lastDefenseAutoOrderMsRef = useRef<number>(0);
+  const lastEnemyTurnMsRef = useRef<number>(0);
+  const counterRaidTimerRef = useRef<number | null>(null);
   const [communicationEvent, setCommunicationEvent] = useState<{
     speakerId: AgentId;
     targetAgentName: string | null;
@@ -586,6 +599,7 @@ export default function App() {
     | { type: 'bus_stop'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
     | { type: 'raider_camp'; nonce: number }
+    | { type: 'enemy_city'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null
   >(null);
@@ -673,6 +687,7 @@ export default function App() {
     setAgents(loaded.agents);
     setStructures(loaded.structures);
     setLogs(loaded.logs);
+    setEnemyCity(loaded.enemyCity ?? loadEnemyCityLocal(loaded.townId));
     setSelectedPlotId(null);
     setSelectedAgentId('mayor_sterling');
     setRecentSpeakerId(null);
@@ -753,6 +768,7 @@ export default function App() {
       structures,
       relationships,
       logs: logs.slice(0, 40),
+      enemyCity,
     };
     saveLocalTown(snapshot);
     if (!user) {
@@ -790,8 +806,23 @@ export default function App() {
     structures,
     relationships,
     logs,
+    enemyCity,
     mergeCloudAndLocalTowns,
   ]);
+
+  // Persist permanent Ironhold Bastion rival city sidecar for both local and cloud-synced towns
+  useEffect(() => {
+    if (!activeTownId) return;
+    saveEnemyCityLocal(activeTownId, enemyCity);
+  }, [activeTownId, enemyCity]);
+
+  useEffect(() => {
+    return () => {
+      if (counterRaidTimerRef.current !== null) {
+        window.clearTimeout(counterRaidTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (nextUser) => {
@@ -842,6 +873,7 @@ export default function App() {
     interTownRailTarget,
     autoMode,
     raidState,
+    enemyCity,
     hasServerDefaultKey,
     treasuryGold,
     resources,
@@ -880,6 +912,7 @@ export default function App() {
     interTownRailTarget,
     autoMode,
     raidState,
+    enemyCity,
     hasServerDefaultKey,
     treasuryGold,
     resources,
@@ -3876,15 +3909,23 @@ export default function App() {
     [],
   );
 
-  // --- Enemy Raider AI Commander, Non-Lethal Injury/Hospital Healing & Mayor Auto-Defense ---
+  // --- Autonomous Rival Fortress Town (Ironhold Bastion), Warlord Malakor AI, Air Force & Two-Way Looting ---
   const consultRaiderCommanderAI = useCallback(
     async (
       waveNumber: number,
       campHp: number,
       campMaxHp: number,
-    ): Promise<{ tactic: RaiderTactic; commanderOrder: string; modelUsed: string }> => {
+    ): Promise<{
+      tactic: RaiderTactic;
+      cityAction: string;
+      commanderOrder: string;
+      vexOrder: string;
+      kaelOrder: string;
+      modelUsed: string;
+    }> => {
       const snap = stateRef.current;
       const resolved = resolveInferenceConfig(snap.providerConfig, ENEMY_RAIDER_AGENT_ID);
+      const ec = snap.enemyCity;
       const defenseCount = snap.structures.filter(
         (s) => s.status === 'complete' && isDefenseStructure(s),
       ).length;
@@ -3892,37 +3933,73 @@ export default function App() {
         (s) => s.status === 'complete' && isHospitalStructure(s),
       );
       const injuredCount = snap.agents.filter((a) => a.healthStatus === 'injured').length;
+      const builtIds = ec.buildings.filter((b) => b.built).map((b) => b.id);
+      const hasAirfield = builtIds.includes('airfield');
 
-      const pickZeroTokenTactic = (): {
-        tactic: RaiderTactic;
-        commanderOrder: string;
-        modelUsed: string;
-      } => {
-        const label = resolved.isExternalCli ? 'External CLI · 0 tokens' : 'Instant Tactics · 0 tokens';
+      const pickNextCityAction = (): string => {
+        if (!builtIds.includes('munitions_foundry') && ec.gold >= 130) return 'build_foundry';
+        if (!builtIds.includes('war_depot') && ec.gold >= 110) return 'build_depot';
+        if (!ec.railBuilt && ec.gold >= 150) return 'build_rail';
+        if (!hasAirfield && ec.gold >= 170) return 'build_airfield';
+        if (hasAirfield && ec.helicoptersReady < 2 && ec.gold >= 120) return 'build_helicopter';
+        if (!builtIds.includes('enemy_turret_north') && ec.gold >= 120) return 'build_turret_north';
+        if (hasAirfield && ec.jetsReady < 2 && ec.gold >= 150) return 'build_jet';
+        if (!builtIds.includes('enemy_turret_south') && ec.gold >= 120) return 'build_turret_south';
+        const citadel = ec.buildings.find((b) => b.id === 'warlord_citadel');
+        if (citadel && citadel.level < 3 && ec.gold >= 170) return 'upgrade_citadel';
+        return 'none';
+      };
+
+      const pickZeroTokenPlan = () => {
+        const label = resolved.isExternalCli ? 'External CLI · 0 tokens' : 'Instant AI · 0 tokens';
+        const cityAction = pickNextCityAction();
+        if (ec.helicoptersReady > 0 || ec.jetsReady > 0) {
+          return {
+            tactic: 'air_strike' as RaiderTactic,
+            cityAction,
+            commanderOrder:
+              'Air Marshal Kael, scramble helicopters and jets — raid their vaults from above!',
+            vexOrder: 'Keep the armored ore train hauling steel to our foundry!',
+            kaelOrder: 'Attack rotors & swept-wing jets airborne over rival skies!',
+            modelUsed: label,
+          };
+        }
         if (campHp < campMaxHp * 0.35) {
           return {
-            tactic: 'regroup',
-            commanderOrder: 'Hold the ridge, crew! Keep our brass cannon steady!',
+            tactic: 'regroup' as RaiderTactic,
+            cityAction,
+            commanderOrder: 'Hold the Ironhold ridge while our foundry reforges the siege line!',
+            vexOrder: 'Reinforce our bastion turrets and stockpile gold ore.',
+            kaelOrder: 'Prep the airfield runway for future air sorties.',
+            modelUsed: label,
+          };
+        }
+        if (snap.treasuryGold >= 160 || snap.resources.harvest >= 15) {
+          return {
+            tactic: 'loot_raid' as RaiderTactic,
+            cityAction,
+            commanderOrder: 'Raider squads, advance and plunder their Gold and Food stores!',
+            vexOrder: 'Expand our War Loot Depot to haul more rival supplies.',
+            kaelOrder: 'Survey their defense towers for air-strike corridors.',
             modelUsed: label,
           };
         }
         if (defenseCount >= 2) {
           return {
-            tactic: 'siege_plaza',
-            commanderOrder: 'Aim high over their stone turrets — test the town square!',
-            modelUsed: label,
-          };
-        }
-        if (waveNumber % 2 === 0) {
-          return {
-            tactic: 'target_workers',
-            commanderOrder: 'Lob bouncy spark-shells near the busy work crews!',
+            tactic: 'siege_plaza' as RaiderTactic,
+            cityAction,
+            commanderOrder: 'Arc brass cannon volleys over their turrets into the town square!',
+            vexOrder: 'Construct forward barricades and load high-arc shells.',
+            kaelOrder: 'Ready air wing to bypass ground fortifications.',
             modelUsed: label,
           };
         }
         return {
-          tactic: 'shell_perimeter',
-          commanderOrder: 'Fire a cheerful volley over the meadow perimeter!',
+          tactic: (waveNumber % 2 === 0 ? 'target_workers' : 'shell_perimeter') as RaiderTactic,
+          cityAction,
+          commanderOrder: 'Ironhold Bastion marches! Test their perimeter and seize supplies!',
+          vexOrder: 'Expand Ironhold factories and supply tracks autonomously.',
+          kaelOrder: 'Calibrate airfield radar for upcoming sorties.',
           modelUsed: label,
         };
       };
@@ -3934,7 +4011,7 @@ export default function App() {
           (resolved.providerId === 'gemini' && snap.hasServerDefaultKey));
 
       if (!hasUsableKey) {
-        return pickZeroTokenTactic();
+        return pickZeroTokenPlan();
       }
 
       try {
@@ -3951,34 +4028,411 @@ export default function App() {
             hasHospital,
             injuredCount,
             population: snap.agents.length,
+            enemyGold: ec.gold,
+            enemyFood: ec.food,
+            builtStructures: builtIds,
+            railBuilt: ec.railBuilt,
+            helicoptersReady: ec.helicoptersReady,
+            jetsReady: ec.jetsReady,
+            townGold: snap.treasuryGold,
+            townFood: snap.resources.harvest,
           }),
         });
         if (res.ok) {
           const data = (await res.json()) as {
             tactic?: string;
+            cityAction?: string;
             commanderOrder?: string;
+            vexOrder?: string;
+            kaelOrder?: string;
             modelUsed?: string;
           };
-          const validTactic: RaiderTactic =
-            data.tactic === 'target_workers' ||
-            data.tactic === 'siege_plaza' ||
-            data.tactic === 'regroup'
-              ? data.tactic
-              : 'shell_perimeter';
+          const validTactics = new Set<RaiderTactic>([
+            'shell_perimeter',
+            'target_workers',
+            'siege_plaza',
+            'air_strike',
+            'loot_raid',
+            'regroup',
+          ]);
+          const validTactic: RaiderTactic = validTactics.has(data.tactic as RaiderTactic)
+            ? (data.tactic as RaiderTactic)
+            : 'loot_raid';
+          const fallbackAction = pickNextCityAction();
+          const chosenAction =
+            typeof data.cityAction === 'string' && data.cityAction !== 'none'
+              ? data.cityAction
+              : fallbackAction;
           return {
             tactic: validTactic,
+            cityAction: chosenAction,
             commanderOrder:
-              data.commanderOrder || 'Fire the brass cannon — let us test their walls!',
+              data.commanderOrder || 'Ironhold expands — launch the raid and seize their Gold!',
+            vexOrder: data.vexOrder || 'Fortify Ironhold Bastion and run the ore railway.',
+            kaelOrder: data.kaelOrder || 'Prepare attack helicopters and swept-wing fighter jets.',
             modelUsed: formatCompactModelName(data.modelUsed || resolved.modelName),
           };
         }
       } catch {
-        // Fallback to zero-token local tactics cleanly
+        // Fallback cleanly to zero-token autonomous Warlord AI
       }
-      return pickZeroTokenTactic();
+      return pickZeroTokenPlan();
     },
     [],
   );
+
+  const applyAutonomousEnemyTurn = useCallback(
+    (plan: {
+      tactic: RaiderTactic;
+      cityAction: string;
+      commanderOrder: string;
+      vexOrder: string;
+      kaelOrder: string;
+      modelUsed: string;
+    }) => {
+      const now = Date.now();
+      const snap = stateRef.current;
+      let announcement: string | null = null;
+
+      setEnemyCity((prev) => {
+        const hasFoundry = prev.buildings.some((b) => b.id === 'munitions_foundry' && b.built);
+        const hasDepot = prev.buildings.some((b) => b.id === 'war_depot' && b.built);
+        const hasAirfield = prev.buildings.some((b) => b.id === 'airfield' && b.built);
+
+        // Autonomous resource extraction by Ironhold miners & ore train
+        let gold = prev.gold + 32 + (hasFoundry ? 24 : 0) + (prev.railBuilt ? 28 : 0);
+        let food = prev.food + 16 + (hasDepot ? 10 : 0);
+        let railBuilt = prev.railBuilt;
+        let helicoptersReady = prev.helicoptersReady;
+        let jetsReady = prev.jetsReady;
+        let buildings = prev.buildings.map((b) => ({ ...b }));
+        let vexAction = plan.vexOrder;
+        let kaelAction = plan.kaelOrder;
+
+        const markBuilt = (id: EnemyBuildingId, cost: number, msg: string): boolean => {
+          const target = buildings.find((b) => b.id === id);
+          if (!target || target.built || gold < cost) return false;
+          gold -= cost;
+          target.built = true;
+          target.level = 1;
+          target.hp = target.maxHp;
+          announcement = msg;
+          return true;
+        };
+
+        // Execute Warlord Malakor's chosen autonomous city action (with smart fallback progression)
+        let action = plan.cityAction;
+        if (action === 'none') {
+          if (!hasFoundry && gold >= 130) action = 'build_foundry';
+          else if (!hasDepot && gold >= 110) action = 'build_depot';
+          else if (!railBuilt && gold >= 150) action = 'build_rail';
+          else if (!hasAirfield && gold >= 170) action = 'build_airfield';
+          else if (hasAirfield && helicoptersReady < 2 && gold >= 120) action = 'build_helicopter';
+          else if (hasAirfield && jetsReady < 2 && gold >= 150) action = 'build_jet';
+        }
+
+        if (action === 'build_foundry') {
+          if (
+            markBuilt(
+              'munitions_foundry',
+              130,
+              'Engineer Vex constructed the Munitions Foundry in Ironhold Bastion!',
+            )
+          ) {
+            vexAction = 'Completed Munitions Foundry — smelting brass shells & armor!';
+          }
+        } else if (action === 'build_depot') {
+          if (
+            markBuilt(
+              'war_depot',
+              110,
+              'Ironhold Bastion built a War Loot Depot to hoard stolen Gold & Food!',
+            )
+          ) {
+            vexAction = 'Constructed War Loot Depot for raided Gold & Food crates.';
+          }
+        } else if (action === 'build_rail' && !railBuilt && gold >= 150) {
+          gold -= 150;
+          railBuilt = true;
+          const railRec = buildings.find((b) => b.id === 'supply_railway');
+          if (railRec) {
+            railRec.built = true;
+            railRec.level = 1;
+            railRec.hp = railRec.maxHp;
+          }
+          announcement =
+            'Engineer Vex laid the Ironhold Armored Ore Railway — an enemy supply train is now rolling!';
+          vexAction = 'Armored Ore Railway complete — enemy locomotive active!';
+        } else if (action === 'build_airfield') {
+          if (
+            markBuilt(
+              'airfield',
+              170,
+              'Air Marshal Kael completed the Ironhold Airfield & Helipad! Enemy aircraft incoming soon!',
+            )
+          ) {
+            kaelAction = 'Airfield Helipad & Runway online — assembling helicopters & jets!';
+          }
+        } else if (action === 'build_turret_north') {
+          if (
+            markBuilt(
+              'enemy_turret_north',
+              120,
+              'Ironhold Bastion raised its North Bastion Defense Turret!',
+            )
+          ) {
+            vexAction = 'North Bastion Turret armed and guarding Ironhold.';
+          }
+        } else if (action === 'build_turret_south') {
+          if (
+            markBuilt(
+              'enemy_turret_south',
+              120,
+              'Ironhold Bastion raised its South Bastion Defense Turret!',
+            )
+          ) {
+            vexAction = 'South Bastion Turret armed and guarding Ironhold.';
+          }
+        } else if (action === 'build_helicopter' && hasAirfield && helicoptersReady < 2 && gold >= 120) {
+          gold -= 120;
+          helicoptersReady += 1;
+          announcement = `Air Marshal Kael built an Ironhold Attack Helicopter (${helicoptersReady}/2 ready)!`;
+          kaelAction = `Launched Attack Helicopter #${helicoptersReady} from Ironhold Helipad!`;
+        } else if (action === 'build_jet' && hasAirfield && jetsReady < 2 && gold >= 150) {
+          gold -= 150;
+          jetsReady += 1;
+          announcement = `Air Marshal Kael rolled out a Swept-Wing Fighter Jet (${jetsReady}/2 ready)!`;
+          kaelAction = `Fighter Jet #${jetsReady} fueled on runway for supersonic strike!`;
+        } else if (action === 'upgrade_citadel' && gold >= 170) {
+          const cit = buildings.find((b) => b.id === 'warlord_citadel');
+          if (cit && cit.level < 3) {
+            gold -= 170;
+            cit.level += 1;
+            cit.maxHp = 160 + (cit.level - 1) * 45;
+            cit.hp = cit.maxHp;
+            announcement = `Supreme Warlord Malakor upgraded the Warlord Citadel to Level ${cit.level}!`;
+            vexAction = `Fortified Warlord Citadel towers to Level ${cit.level}.`;
+          }
+        }
+
+        const nextHierarchy = prev.hierarchy.map((u) => {
+          if (u.id === 'warlord_malakor') {
+            return {
+              ...u,
+              status: snap.raidState.active ? 'Commanding Raid' : 'Expanding Fortress',
+              lastAction: plan.commanderOrder,
+            };
+          }
+          if (u.id === 'engineer_vex') {
+            return {
+              ...u,
+              status: railBuilt ? 'Running Ore Rail' : 'Building Works',
+              lastAction: vexAction,
+            };
+          }
+          if (u.id === 'marshal_kael') {
+            return {
+              ...u,
+              status:
+                helicoptersReady > 0 || jetsReady > 0
+                  ? `${helicoptersReady}H · ${jetsReady}J Ready`
+                  : hasAirfield
+                    ? 'Assembling Fleet'
+                    : 'Awaiting Airfield',
+              lastAction: kaelAction,
+            };
+          }
+          if (u.id === 'ironhold_builders') {
+            return {
+              ...u,
+              status: railBuilt ? 'Ore Train Active' : 'Mining & Building',
+              lastAction: railBuilt
+                ? 'Hauling iron ore & timber along Ironhold supply tracks.'
+                : 'Quarrying stone and smelting iron for Ironhold expansion.',
+            };
+          }
+          if (u.id === 'crimson_pilots') {
+            return {
+              ...u,
+              status:
+                snap.raidState.active && (helicoptersReady > 0 || jetsReady > 0)
+                  ? 'Air Sortie Live'
+                  : helicoptersReady > 0 || jetsReady > 0
+                    ? 'On Runway'
+                    : 'Training',
+              lastAction:
+                helicoptersReady > 0 || jetsReady > 0
+                  ? `Piloting ${helicoptersReady} Attack Helicopter(s) & ${jetsReady} Fighter Jet(s).`
+                  : 'Waiting on Air Marshal Kael to complete aircraft assembly.',
+            };
+          }
+          return {
+            ...u,
+            status: snap.raidState.active ? 'Raiding & Looting' : 'Garrisoned',
+            lastAction: snap.raidState.active
+              ? `Executing "${plan.tactic.replace('_', ' ')}" against ${snap.townName}.`
+              : 'Sharpening gear around Ironhold Bastion ramparts.',
+          };
+        });
+
+        return {
+          ...prev,
+          gold: Math.min(9999, Math.round(gold)),
+          food: Math.min(9999, Math.round(food)),
+          railBuilt,
+          helicoptersReady,
+          jetsReady,
+          buildings,
+          hierarchy: nextHierarchy,
+          autonomousTurnCount: prev.autonomousTurnCount + 1,
+          warlordDecision: plan.commanderOrder,
+          warlordModelUsed: plan.modelUsed,
+          lastAutonomousTurnMs: now,
+        };
+      });
+
+      if (announcement) {
+        const msg = announcement;
+        setLogs((prev) =>
+          [
+            {
+              id: `enemy-city-build-${now}`,
+              turnNumber: snap.turnCount,
+              agentId: 'commander_vance',
+              agentName: 'Rival Intel (Ironhold)',
+              rank: 2 as const,
+              location: 'town_hall' as const,
+              targetAgent: 'Mayor Sterling',
+              thought: `Scout report from Ironhold Bastion (${plan.modelUsed}).`,
+              dialogue: msg,
+              newTask: 'Monitoring rival fortress expansion',
+              timestampMs: now,
+            },
+            ...prev,
+          ].slice(0, 50),
+        );
+      }
+    },
+    [],
+  );
+
+  const handleLaunchCounterRaid = useCallback(async (): Promise<MayorBuildResult> => {
+    const snap = stateRef.current;
+    if (snap.enemyCity.counterRaidActive) {
+      setFocusRequest({ type: 'enemy_city', nonce: Date.now() });
+      return {
+        ok: true,
+        badge: 'Counter-Raid In Progress',
+        detail: `Commander Vance's rangers are already raiding ${snap.enemyCity.name}!`,
+      };
+    }
+
+    const now = Date.now();
+    const assaultDurationMs = 11000;
+    const targetGoldLoot = Math.min(
+      Math.max(45, Math.round(snap.enemyCity.gold * 0.32)),
+      Math.max(0, snap.enemyCity.gold - 40),
+    );
+    const targetFoodLoot = Math.min(
+      Math.max(12, Math.round(snap.enemyCity.food * 0.3)),
+      Math.max(0, snap.enemyCity.food - 20),
+    );
+
+    setEnemyCity((prev) => ({
+      ...prev,
+      counterRaidActive: true,
+      counterRaidEndsAtMs: now + assaultDurationMs,
+    }));
+    setFocusRequest({ type: 'enemy_city', nonce: now });
+    soundscape.playAgentChime(1);
+
+    setAgents((prev) =>
+      prev.map((a) =>
+        a.id === 'commander_vance'
+          ? {
+              ...a,
+              currentTask: `Leading Counter-Raid on ${snap.enemyCity.name} to reclaim Gold & Food!`,
+              dialogue: `Rangers, charge ${snap.enemyCity.name}! Smash their loot depot and bring our gold home!`,
+            }
+          : a,
+      ),
+    );
+
+    setLogs((prev) =>
+      [
+        {
+          id: `counter-raid-start-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'commander_vance',
+          agentName: 'Commander Vance',
+          rank: 2 as const,
+          location: 'town_hall' as const,
+          targetAgent: 'Mayor Sterling',
+          thought: `Leading Alderbrook counter-raid squad against ${snap.enemyCity.name}.`,
+          dialogue: `Counter-attack launched! Our strike squad is charging ${snap.enemyCity.name} to loot back Gold & Food!`,
+          newTask: `Counter-raiding ${snap.enemyCity.name}`,
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+
+    if (counterRaidTimerRef.current !== null) {
+      window.clearTimeout(counterRaidTimerRef.current);
+    }
+    counterRaidTimerRef.current = window.setTimeout(() => {
+      counterRaidTimerRef.current = null;
+      const doneMs = Date.now();
+      const latest = stateRef.current;
+      const goldWon = Math.max(25, Math.min(targetGoldLoot, Math.max(0, latest.enemyCity.gold - 25)));
+      const foodWon = Math.max(8, Math.min(targetFoodLoot, Math.max(0, latest.enemyCity.food - 10)));
+
+      setEnemyCity((prev) => ({
+        ...prev,
+        counterRaidActive: false,
+        counterRaidEndsAtMs: null,
+        gold: Math.max(0, prev.gold - goldWon),
+        food: Math.max(0, prev.food - foodWon),
+        totalGoldCounterLooted: prev.totalGoldCounterLooted + goldWon,
+        totalFoodCounterLooted: prev.totalFoodCounterLooted + foodWon,
+        lastLootEvent: `Counter-raid reclaimed +${goldWon}g Gold & +${foodWon} Food from ${prev.name}.`,
+      }));
+      setTreasuryGold((g) => g + goldWon);
+      setResources((r) => ({ ...r, harvest: r.harvest + foodWon }));
+      setMetrics((m) => ({
+        ...m,
+        morale: Math.min(100, m.morale + 4),
+        orderLevel: Math.min(100, m.orderLevel + 3),
+      }));
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+
+      setLogs((prev) =>
+        [
+          {
+            id: `counter-raid-win-${doneMs}`,
+            turnNumber: latest.turnCount,
+            agentId: 'commander_vance',
+            agentName: 'Commander Vance',
+            rank: 2 as const,
+            location: 'town_hall' as const,
+            targetAgent: 'Mayor Sterling',
+            thought: `Counter-raid on ${latest.enemyCity.name} succeeded!`,
+            dialogue: `Counter-Raid Victory! Looted +${goldWon}g Gold & +${foodWon} Food back from ${latest.enemyCity.name}'s depot!`,
+            newTask: 'Returning to Alderbrook with reclaimed supplies',
+            timestampMs: doneMs,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+    }, assaultDurationMs);
+
+    return {
+      ok: true,
+      badge: `Counter-Raid on ${snap.enemyCity.name}`,
+      detail: `Commander Vance & our rangers are assaulting ${snap.enemyCity.name} right now to reclaim Gold & Food!`,
+    };
+  }, []);
 
   const triggerMayorDefenseResponse = useCallback(
     async (reason: 'raid_started' | 'worker_injured') => {
@@ -3993,8 +4447,8 @@ export default function App() {
           a.id === 'commander_vance'
             ? {
                 ...a,
-                currentTask: 'Defending perimeter & directing turret counter-fire!',
-                dialogue: 'All hands clear! Watchtowers & turrets, return fire on the Raider Camp!',
+                currentTask: 'Defending perimeter & directing anti-air / turret counter-fire!',
+                dialogue: 'All hands clear! Triple-gun turrets & watchtowers, fire on Ironhold forces!',
               }
             : a,
         ),
@@ -4004,22 +4458,18 @@ export default function App() {
       const defenseWall = snap.structures.find((s) => isDefenseStructure(s));
 
       // Priority 1: Ensure Town Hospital exists (or finishes building) so medics can rescue injured workers
-      if (!hospital) {
-        await handleMayorBuildStructure('hospital', 'Town Hospital');
-        return;
-      }
-      if (hospital.status === 'building') {
+      if (!hospital || hospital.status === 'building') {
         await handleMayorBuildStructure('hospital', 'Town Hospital');
         return;
       }
 
-      // Priority 2: Ensure Defense Wall & Cannon Turret exists to fire back at Raider Camp
+      // Priority 2: Ensure Defense Wall & Cannon Turret exists to fire back at Ironhold
       if (!defenseWall || defenseWall.status === 'building') {
         await handleMayorBuildStructure('defense_wall', 'Defense Wall & Turret');
         return;
       }
 
-      // Priority 3: Build a Triple-Gun Defense Tower for heavy 3-shot counter-volleys
+      // Priority 3: Build a Triple-Gun Defense Tower for heavy 3-shot ground + anti-air counter-volleys
       const tripleTower = snap.structures.find((s) => s.structureType === 'triple_gun_tower');
       if (!tripleTower || tripleTower.status === 'building') {
         await handleMayorBuildStructure('triple_gun_tower', 'Triple-Gun Defense Tower');
@@ -4037,9 +4487,9 @@ export default function App() {
               rank: 1 as const,
               location: 'town_hall' as const,
               targetAgent: 'Commander Vance',
-              thought: 'Town Hospital and Defense Walls are ready — coordinate counter-fire!',
+              thought: 'Town Hospital and Defense Turrets are ready — coordinate ground & anti-air fire!',
               dialogue:
-                'Commander Vance, man the defense turrets! Medics stand by at Town Hospital!',
+                'Commander Vance, man the defense turrets & anti-air guns! Medics stand by at Town Hospital!',
               newTask: 'Coordinating town defense',
               timestampMs: now,
             },
@@ -4054,13 +4504,14 @@ export default function App() {
   const launchRaidWave = useCallback(
     async (waveNum: number) => {
       const now = Date.now();
-      const maxHp = 100 + (waveNum - 1) * 30;
+      const maxHp = 120 + (waveNum - 1) * 35;
       const snap = stateRef.current;
 
       setRaidState((prev) => ({
         ...prev,
         enabled: true,
         active: true,
+        commanderName: 'Warlord Malakor',
         waveNumber: waveNum,
         campHp: maxHp,
         campMaxHp: maxHp,
@@ -4070,10 +4521,14 @@ export default function App() {
       soundscape.playAgentChime(2);
 
       const aiPlan = await consultRaiderCommanderAI(waveNum, maxHp, maxHp);
+      applyAutonomousEnemyTurn(aiPlan);
+      lastEnemyTurnMsRef.current = Date.now();
+
       setRaidState((prev) =>
         prev.active
           ? {
               ...prev,
+              commanderName: 'Warlord Malakor',
               tactic: aiPlan.tactic,
               commanderOrder: aiPlan.commanderOrder,
               modelUsed: aiPlan.modelUsed,
@@ -4092,8 +4547,8 @@ export default function App() {
             rank: 2 as const,
             location: 'town_hall' as const,
             targetAgent: 'Mayor Sterling',
-            thought: `Raider Wave #${waveNum} spotted on the southwest ridge (${aiPlan.modelUsed}).`,
-            dialogue: `Raider Alert! Captain Ironjaw (${aiPlan.modelUsed}): "${aiPlan.commanderOrder}"`,
+            thought: `Ironhold Wave #${waveNum} launched autonomously (${aiPlan.modelUsed}).`,
+            dialogue: `Ironhold Raid W${waveNum}! Warlord Malakor (${aiPlan.modelUsed}): "${aiPlan.commanderOrder}"`,
             newTask: 'Defending perimeter & directing turret counter-fire!',
             timestampMs: now,
           },
@@ -4103,7 +4558,7 @@ export default function App() {
 
       void triggerMayorDefenseResponse('raid_started');
     },
-    [consultRaiderCommanderAI, triggerMayorDefenseResponse],
+    [consultRaiderCommanderAI, applyAutonomousEnemyTurn, triggerMayorDefenseResponse],
   );
 
   const handleToggleEnemyRaids = useCallback(
@@ -4163,18 +4618,109 @@ export default function App() {
     setFocusRequest({ type: 'raider_camp', nonce: Date.now() });
     return {
       ok: true,
-      badge: `Raid Wave #${waveNum} Active`,
-      detail: 'Raider Camp spotted on the southwest ridge! Mayor Sterling & Commander Vance are mobilizing Town Hospital and Defense Walls.',
+      badge: `Ironhold Raid W${waveNum}`,
+      detail: `Warlord Malakor launched Wave #${waveNum} from ${snap.enemyCity.name}! Mayor Sterling & Commander Vance are mobilizing defenses.`,
     };
   }, [launchRaidWave]);
 
-  const handleRaiderImpact = useCallback(
-    (impactX: number, impactZ: number) => {
-      const now = Date.now();
-      if (now - lastRaiderInjuryMsRef.current < 6500) return;
+  const handleEnemyAircraftDowned = useCallback((kind: 'helicopter' | 'jet') => {
+    const now = Date.now();
+    const snap = stateRef.current;
+    const bounty = kind === 'jet' ? 50 : 35;
+    const label = kind === 'jet' ? 'Fighter Jet' : 'Attack Helicopter';
 
+    setEnemyCity((prev) => ({
+      ...prev,
+      helicoptersReady:
+        kind === 'helicopter' ? Math.max(0, prev.helicoptersReady - 1) : prev.helicoptersReady,
+      jetsReady: kind === 'jet' ? Math.max(0, prev.jetsReady - 1) : prev.jetsReady,
+    }));
+    setTreasuryGold((g) => g + bounty);
+    soundscape.playAgentChime(2);
+
+    setLogs((prev) =>
+      [
+        {
+          id: `aa-downed-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'commander_vance',
+          agentName: 'Commander Vance',
+          rank: 2 as const,
+          location: 'town_hall' as const,
+          targetAgent: 'Mayor Sterling',
+          thought: `Anti-air flak from our defense towers downed an Ironhold ${label}!`,
+          dialogue: `Splash one! Anti-air flak sent an Ironhold ${label} spinning back to base (+${bounty}g bounty)!`,
+          newTask: 'Scanning skies for enemy air sorties',
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+  }, []);
+
+  const handleRaiderImpact = useCallback(
+    (impactX: number, impactZ: number, source: 'ground' | 'helicopter' | 'jet' = 'ground') => {
+      const now = Date.now();
       const snap = stateRef.current;
       if (!snap.raidState.active) return;
+
+      // 1) Enemy Gold & Food Looting (mitigated by defense towers, with safe town floors)
+      if (now - lastRaiderLootMsRef.current >= 5500) {
+        const defenseCount = snap.structures.filter(
+          (s) => s.status === 'complete' && isDefenseStructure(s),
+        ).length;
+        const mitigation = Math.max(0.45, 1 - defenseCount * 0.14);
+        const baseGoldSteal = source === 'jet' ? 24 : source === 'helicopter' ? 18 : 14;
+        const baseFoodSteal = source === 'jet' ? 8 : source === 'helicopter' ? 6 : 5;
+        const stolenGold = Math.min(
+          Math.max(0, snap.treasuryGold - 40),
+          Math.round(baseGoldSteal * mitigation),
+        );
+        const stolenFood = Math.min(
+          Math.max(0, snap.resources.harvest - 5),
+          Math.round(baseFoodSteal * mitigation),
+        );
+        if (stolenGold > 0 || stolenFood > 0) {
+          lastRaiderLootMsRef.current = now;
+          setTreasuryGold((g) => Math.max(40, g - stolenGold));
+          setResources((r) => ({ ...r, harvest: Math.max(5, r.harvest - stolenFood) }));
+          setEnemyCity((prev) => ({
+            ...prev,
+            gold: prev.gold + stolenGold,
+            food: prev.food + stolenFood,
+            totalGoldLootedFromUs: prev.totalGoldLootedFromUs + stolenGold,
+            totalFoodLootedFromUs: prev.totalFoodLootedFromUs + stolenFood,
+            lastLootEvent: `Ironhold raided ${stolenGold}g Gold & ${stolenFood} Food from ${snap.townName}.`,
+          }));
+          const sourceLabel =
+            source === 'jet'
+              ? 'Ironhold Fighter Jet'
+              : source === 'helicopter'
+                ? 'Ironhold Attack Helicopter'
+                : 'Ironhold Raiders';
+          setLogs((prev) =>
+            [
+              {
+                id: `enemy-loot-${now}`,
+                turnNumber: snap.turnCount,
+                agentId: 'commander_vance',
+                agentName: sourceLabel,
+                rank: 2 as const,
+                location: 'market' as const,
+                targetAgent: 'Mayor Sterling',
+                thought: `${sourceLabel} looted supplies back toward Ironhold Bastion.`,
+                dialogue: `${sourceLabel} raided ${stolenGold}g Gold & ${stolenFood} Food into Ironhold's War Depot!`,
+                newTask: 'Defending supply vaults',
+                timestampMs: now,
+              },
+              ...prev,
+            ].slice(0, 50),
+          );
+        }
+      }
+
+      // 2) Non-lethal worker injury / Town Hospital rescue check
+      if (now - lastRaiderInjuryMsRef.current < 6500) return;
 
       const injuredNow = snap.agents.filter((a) => a.healthStatus === 'injured').length;
       if (injuredNow >= 3) return;
@@ -4219,8 +4765,8 @@ export default function App() {
                 injuredAtMs: now,
                 currentTask: 'Injured (Needs Hospital) — heading to safety',
                 dialogue: hasHospital
-                  ? 'Whoa, cannonball spark grazed me! Walking to Town Hospital!'
-                  : 'Ouch! Caught a spark volley — we need a Town Hospital!',
+                  ? 'Whoa, spark shell grazed me! Walking to Town Hospital!'
+                  : 'Ouch! Caught an Ironhold volley — we need a Town Hospital!',
               }
             : a,
         ),
@@ -4236,7 +4782,7 @@ export default function App() {
             rank: nearest.rank,
             location: nearest.location,
             targetAgent: 'Mayor Sterling',
-            thought: 'Grazed by cartoon cannonball — heading safely to Town Hospital for bandages.',
+            thought: 'Grazed by cartoon volley — heading safely to Town Hospital for bandages.',
             dialogue: hasHospital
               ? `${nearest.name} is Injured (Needs Hospital) and walking to Town Hospital for care.`
               : `${nearest.name} is Injured (Needs Hospital) — Mayor Sterling is rushing a Hospital!`,
@@ -4262,6 +4808,7 @@ export default function App() {
     const nextHp = Math.max(0, snap.raidState.campHp - damage);
     if (nextHp <= 0) {
       const rewardGold = 120 + snap.raidState.waveNumber * 25;
+      const reclaimedFood = Math.min(14, Math.max(0, snap.enemyCity.food - 15));
       const repelledWave = snap.raidState.waveNumber;
       setRaidState((prev) => ({
         ...prev,
@@ -4271,6 +4818,15 @@ export default function App() {
         nextWaveAtMs: prev.enabled ? now + 45000 : null,
       }));
       setTreasuryGold((g) => g + rewardGold);
+      if (reclaimedFood > 0) {
+        setResources((r) => ({ ...r, harvest: r.harvest + reclaimedFood }));
+        setEnemyCity((prev) => ({
+          ...prev,
+          food: Math.max(0, prev.food - reclaimedFood),
+          totalFoodCounterLooted: prev.totalFoodCounterLooted + reclaimedFood,
+          lastLootEvent: `Repelled Wave #${repelledWave} & recovered +${reclaimedFood} Food from Ironhold.`,
+        }));
+      }
       setMetrics((m) => ({
         ...m,
         orderLevel: Math.min(100, m.orderLevel + 4),
@@ -4289,8 +4845,8 @@ export default function App() {
             rank: 2 as const,
             location: 'town_hall' as const,
             targetAgent: 'Mayor Sterling',
-            thought: `Raider Wave #${repelledWave} repelled by our watchtowers and defense turrets!`,
-            dialogue: `Victory! Wave #${repelledWave} Raiders sent packing! Town earned +${rewardGold}g Treasury reward!`,
+            thought: `Ironhold Wave #${repelledWave} pushed back to their southwest fortress!`,
+            dialogue: `Victory! Ironhold Wave #${repelledWave} repelled! Reclaimed +${rewardGold}g Gold${reclaimedFood > 0 ? ` & +${reclaimedFood} Food` : ''}!`,
             newTask: 'Patrolling peaceful perimeter',
             timestampMs: now,
           },
@@ -4369,7 +4925,7 @@ export default function App() {
     return () => window.clearInterval(healInterval);
   }, []);
 
-  // Raider Wave Scheduler & AI Tactic Refresh Loop (runs only when Enemy Raids are ON)
+  // Autonomous Ironhold Bastion Turn Loop & Raid Wave Scheduler (100% autonomous when Enemy Raids are ON)
   useEffect(() => {
     if (!raidState.enabled) return;
 
@@ -4378,20 +4934,43 @@ export default function App() {
       if (!snap.raidState.enabled) return;
       const now = Date.now();
 
+      // Between raid waves, Warlord Malakor still builds Ironhold factories, ore railway, airfield & jets!
       if (!snap.raidState.active) {
         if (snap.raidState.nextWaveAtMs && now >= snap.raidState.nextWaveAtMs) {
           void launchRaidWave(snap.raidState.waveNumber + 1);
+          return;
+        }
+        if (now - lastEnemyTurnMsRef.current >= 18000) {
+          lastEnemyTurnMsRef.current = now;
+          void consultRaiderCommanderAI(
+            Math.max(1, snap.raidState.waveNumber),
+            snap.raidState.campMaxHp,
+            snap.raidState.campMaxHp,
+          ).then((plan) => {
+            applyAutonomousEnemyTurn(plan);
+          });
+        }
+        // In Auto Mode, if Ironhold stole gold from us and isn't currently attacking, launch an autonomous Counter-Raid!
+        if (
+          snap.autoMode &&
+          !snap.enemyCity.counterRaidActive &&
+          snap.enemyCity.gold >= 260 &&
+          snap.enemyCity.totalGoldLootedFromUs > snap.enemyCity.totalGoldCounterLooted + 35
+        ) {
+          void handleLaunchCounterRaid();
         }
         return;
       }
 
-      // Periodically ask the selected Enemy Raider Commander AI model to adapt tactics
-      if (now - snap.raidState.lastEventMs >= 22000) {
+      // During an active raid, periodically consult Warlord Malakor's configured AI model to adapt tactics & expand Ironhold
+      if (now - snap.raidState.lastEventMs >= 20000) {
+        lastEnemyTurnMsRef.current = now;
         void consultRaiderCommanderAI(
           snap.raidState.waveNumber,
           snap.raidState.campHp,
           snap.raidState.campMaxHp,
         ).then((plan) => {
+          applyAutonomousEnemyTurn(plan);
           setRaidState((prev) =>
             prev.active
               ? {
@@ -4408,7 +4987,13 @@ export default function App() {
     }, 5000);
 
     return () => window.clearInterval(raidTickId);
-  }, [raidState.enabled, launchRaidWave, consultRaiderCommanderAI]);
+  }, [
+    raidState.enabled,
+    launchRaidWave,
+    consultRaiderCommanderAI,
+    applyAutonomousEnemyTurn,
+    handleLaunchCounterRaid,
+  ]);
 
   // Automatic City-Builder Loop (lightweight, zero-token civic progression when Auto + Play are ON)
   useEffect(() => {
@@ -4902,6 +5487,14 @@ export default function App() {
     setFocusRequest({ type: 'raider_camp', nonce: Date.now() });
   }, []);
 
+  const handleFocusEnemyCity = useCallback(() => {
+    setSelectedPlotId(null);
+    setCameraMode('orbit');
+    setPovVillagerId(null);
+    setFollowActive(false);
+    setFocusRequest({ type: 'enemy_city', nonce: Date.now() });
+  }, []);
+
   const activeSpeaker = agents.find((a) => a.id === activeAgentId);
   const isMainTown = user ? activeTownId === user.uid : activeTownId === LOCAL_MAIN_TOWN_ID;
   const nextSavedTown = useMemo(
@@ -4948,10 +5541,13 @@ export default function App() {
         decorPacks={decorPacks}
         triggerCelebrationNonce={triggerCelebrationNonce}
         raidState={raidState}
-        raiderRadar={raidState.active ? raiderRadar : null}
+        enemyCity={enemyCity}
+        raiderRadar={raiderRadar}
         onRaiderImpact={handleRaiderImpact}
         onDefenseHitCamp={handleDefenseHitCamp}
+        onEnemyAircraftDowned={handleEnemyAircraftDowned}
         onFocusRaiderCamp={handleFocusBattle}
+        onFocusEnemyCity={handleFocusEnemyCity}
         onToggleRaids={handleToggleEnemyRaids}
         onSelectAgent={handleSelectAgent}
         onTogglePovAgent={handleTogglePovAgent}
@@ -5307,7 +5903,7 @@ export default function App() {
             interTownRailBuilt={interTownRailBuilt}
             busPos={busRadarPos}
             coords={minimapCoords}
-            raiderRadar={raidState.active ? raiderRadar : null}
+            raiderRadar={raiderRadar}
             activeAgentId={activeAgentId}
             selectedAgentId={selectedAgentId}
             selectedPlotId={selectedPlotId}
@@ -5316,6 +5912,7 @@ export default function App() {
             onSelectPlot={handleSelectPlot}
             onSelectSignalRelay={handleSelectSignalRelay}
             onFocusBattle={handleFocusBattle}
+            onFocusEnemyCity={handleFocusEnemyCity}
             onFocusBiome={(biome) => {
               setSelectedPlotId(null);
               setCameraMode('orbit');
@@ -5355,6 +5952,16 @@ export default function App() {
           >
             <MapIcon className="h-4 w-4" />
             <span className="hidden sm:inline">{raidState.active ? 'Radar !' : 'Radar'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleFocusEnemyCity}
+            title={`Jump camera to rival fortress ${enemyCity.name}`}
+            aria-label={`View Enemy City ${enemyCity.name}`}
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-rose-200 transition-colors hover:bg-rose-500/20 hover:text-white"
+          >
+            <Castle className="h-4 w-4 text-rose-400" />
+            <span className="hidden sm:inline">Enemy City</span>
           </button>
           <button
             type="button"
@@ -5510,6 +6117,8 @@ export default function App() {
                 relationships={relationships}
                 weather={weather}
                 providerConfig={providerConfig}
+                enemyCity={enemyCity}
+                raidState={raidState}
                 activeAgentId={activeAgentId}
                 selectedAgentId={selectedAgentId}
                 povVillagerId={povVillagerId}
@@ -5525,6 +6134,7 @@ export default function App() {
                 onFocusLocation={handleFocusLocation}
                 onSelectPlot={handleSelectPlot}
                 onSelectSignalRelay={handleSelectSignalRelay}
+                onFocusEnemyCity={handleFocusEnemyCity}
                 onOpenChronicle={(tab) => {
                   setChronicleInitialTab(tab);
                   setChronicleOpen(true);
@@ -5668,6 +6278,8 @@ export default function App() {
                   relationships={relationships}
                   weather={weather}
                   providerConfig={providerConfig}
+                  enemyCity={enemyCity}
+                  raidState={raidState}
                   activeAgentId={activeAgentId}
                   selectedAgentId={selectedAgentId}
                   povVillagerId={povVillagerId}
@@ -5692,6 +6304,10 @@ export default function App() {
                     setMobileTab(null);
                   }}
                   onSelectSignalRelay={handleSelectSignalRelay}
+                  onFocusEnemyCity={() => {
+                    handleFocusEnemyCity();
+                    setMobileTab(null);
+                  }}
                   onOpenChronicle={(tab) => {
                     setChronicleInitialTab(tab);
                     setChronicleOpen(true);
@@ -5877,6 +6493,7 @@ export default function App() {
         interTownRailTarget={interTownRailTarget}
         autoMode={autoMode}
         raidState={raidState}
+        enemyCity={enemyCity}
         agents={agents}
         structures={structures}
         logs={logs}
@@ -5895,6 +6512,7 @@ export default function App() {
         onToggleAutoMode={handleToggleAutoMode}
         onToggleEnemyRaids={handleToggleEnemyRaids}
         onTriggerEnemyRaid={handleTriggerEnemyRaid}
+        onLaunchCounterRaid={handleLaunchCounterRaid}
         onSwitchTown={handleSwitchTown}
         onCreateTown={handleCreateNewTown}
         onExpandBiome={handleExpandBiome}

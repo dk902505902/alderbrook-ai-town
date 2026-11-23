@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   Award,
+  Castle,
   CloudRain,
   Coins,
   Compass,
@@ -10,13 +11,18 @@ import {
   Gem,
   HeartHandshake,
   HeartPulse,
+  Lock,
   MapPin,
   MessageCircle,
   Mountain,
+  Plane,
   Radio,
   Send,
   Snowflake,
   Sun,
+  Swords,
+  Target,
+  TrainFront,
   Trees,
   UserMinus,
   UserPlus,
@@ -26,6 +32,7 @@ import { formatCompactModelName, resolveInferenceConfig } from '../lib/aiRouting
 import { getAgentTopBonds } from '../lib/townSystems.ts';
 import {
   CORE_AGENT_IDS,
+  ENEMY_RAIDER_AGENT_ID,
   getStructureDisplayLabel,
   getWeatherSeasonEffect,
   LOCATION_LABELS,
@@ -34,6 +41,8 @@ import {
   type AgentId,
   type AgentRecord,
   type AIProviderConfig,
+  type EnemyCityState,
+  type EnemyRaidState,
   type LocationId,
   type PlotId,
   type TownEconomySummary,
@@ -58,6 +67,8 @@ interface HierarchyPanelProps {
   relationships: TownRelationship[];
   weather: WeatherMode;
   providerConfig: AIProviderConfig;
+  enemyCity: EnemyCityState;
+  raidState: EnemyRaidState;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
   povVillagerId?: AgentId | null;
@@ -71,6 +82,7 @@ interface HierarchyPanelProps {
   onFocusLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
+  onFocusEnemyCity?: () => void;
   onOpenChronicle?: (tab: ChronicleTab) => void;
   onResetCamera: () => void;
 }
@@ -105,6 +117,8 @@ export function HierarchyPanel({
   relationships,
   weather,
   providerConfig,
+  enemyCity,
+  raidState,
   activeAgentId,
   selectedAgentId,
   povVillagerId = null,
@@ -118,13 +132,22 @@ export function HierarchyPanel({
   onFocusLocation,
   onSelectPlot,
   onSelectSignalRelay,
+  onFocusEnemyCity,
   onOpenChronicle,
   onResetCamera,
 }: HierarchyPanelProps) {
+  const [activeTab, setActiveTab] = useState<'town' | 'rival'>('town');
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const [hirePrompt, setHirePrompt] = useState('');
   const [confirmUnhireId, setConfirmUnhireId] = useState<AgentId | null>(null);
   const coreAgentSet = new Set<string>(CORE_AGENT_IDS);
+  const enemyAiResolved = resolveInferenceConfig(providerConfig, ENEMY_RAIDER_AGENT_ID);
+  const enemyModelLabel = enemyAiResolved.isInstantTactics
+    ? 'Instant Zero-Token AI'
+    : enemyAiResolved.isExternalCli
+      ? 'External CLI AI'
+      : `${formatCompactModelName(enemyAiResolved.modelName)} · ${enemyAiResolved.providerLabel}`;
+  const enemyBuiltCount = enemyCity.buildings.filter((b) => b.built).length;
 
   const metricRows = [
     { label: 'Prosperity', value: metrics.prosperity, barClass: 'bg-amber-400' },
@@ -155,6 +178,218 @@ export function HierarchyPanel({
 
   return (
     <div className="flex h-full flex-col">
+      {/* Top 2-Tab Switcher: Alderbrook Town vs Read-Only Rival Intel (Ironhold Bastion) */}
+      <div className="flex shrink-0 gap-1 border-b border-white/10 bg-slate-950/75 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setActiveTab('town')}
+          className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition-colors ${
+            activeTab === 'town'
+              ? 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/45'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+          }`}
+        >
+          <span>Our Town</span>
+          <span className="font-mono-tabular text-[10px] opacity-80">
+            {agents.length}/{MAX_TOWN_AGENTS}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('rival')}
+          className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition-colors ${
+            activeTab === 'rival'
+              ? 'bg-rose-500/20 text-rose-200 ring-1 ring-rose-400/50'
+              : 'text-slate-400 hover:bg-white/5 hover:text-rose-200'
+          }`}
+        >
+          <Swords className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+          <span>Rival Intel</span>
+          {raidState.active && (
+            <span className="rounded bg-rose-600 px-1 py-0.5 text-[9px] font-bold text-white">
+              LIVE
+            </span>
+          )}
+        </button>
+      </div>
+
+      {activeTab === 'rival' ? (
+        <div className="hud-scroll flex-1 space-y-3 overflow-y-auto p-3.5">
+          {/* Read-Only Fortress Header */}
+          <div className="rounded-xl border border-rose-500/35 bg-rose-950/30 p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <Castle className="h-4 w-4 shrink-0 text-rose-400" />
+                  <h3 className="truncate font-display text-sm font-semibold text-white">
+                    {enemyCity.name}
+                  </h3>
+                </div>
+                <p className="mt-0.5 flex items-center gap-1 text-[11px] text-rose-200/85">
+                  <Lock className="h-3 w-3 shrink-0" />
+                  <span>100% Autonomous Enemy AI · Read-Only Intel</span>
+                </p>
+              </div>
+              {onFocusEnemyCity && (
+                <button
+                  type="button"
+                  onClick={onFocusEnemyCity}
+                  className="inline-flex min-h-[34px] shrink-0 items-center gap-1 rounded-lg border border-rose-400/50 bg-rose-600 px-2.5 text-[11px] font-semibold text-white hover:bg-rose-500"
+                >
+                  <Target className="h-3.5 w-3.5 shrink-0" />
+                  <span>View City</span>
+                </button>
+              )}
+            </div>
+
+            <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-rose-500/20 pt-2 text-[11px]">
+              <span className="inline-flex items-center gap-1 text-slate-400">
+                <Cpu className="h-3 w-3 shrink-0 text-rose-300" />
+                <span>Warlord AI</span>
+              </span>
+              <span className="truncate font-mono text-[10px] text-amber-200">
+                {enemyModelLabel}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] leading-snug text-rose-100/90">
+              “{enemyCity.warlordDecision}”
+            </p>
+          </div>
+
+          {/* Enemy Stockpiles & Two-Way Loot Ledger */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-xl border border-white/10 bg-slate-900/85 p-2.5">
+              <div className="flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                <Coins className="h-3 w-3 text-amber-300" />
+                <span>Enemy Gold Vault</span>
+              </div>
+              <div className="mt-1 font-mono-tabular text-base font-bold text-amber-200">
+                {enemyCity.gold}g
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-400">
+                Looted us: <span className="text-rose-300">+{enemyCity.totalGoldLootedFromUs}g</span>
+              </div>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-slate-900/85 p-2.5">
+              <div className="flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                <Wheat className="h-3 w-3 text-emerald-300" />
+                <span>Enemy Food Stores</span>
+              </div>
+              <div className="mt-1 font-mono-tabular text-base font-bold text-emerald-200">
+                {enemyCity.food}
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-400">
+                Reclaimed: <span className="text-cyan-300">{enemyCity.totalGoldCounterLooted}g / {enemyCity.totalFoodCounterLooted}f</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Autonomous Fortress Infrastructure & Air Force */}
+          <div className="rounded-xl border border-white/10 bg-slate-900/80 p-3">
+            <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-200">
+              <span>Fortress Works ({enemyBuiltCount}/{enemyCity.buildings.length})</span>
+              <span className="font-mono-tabular text-[10px] text-slate-400">
+                Turn {enemyCity.autonomousTurnCount}
+              </span>
+            </div>
+
+            <div className="mb-2 grid grid-cols-2 gap-1.5 text-[11px]">
+              <div className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5">
+                <span className="inline-flex items-center gap-1 text-slate-300">
+                  <TrainFront className="h-3.5 w-3.5 text-orange-300" />
+                  <span>Ore Rail</span>
+                </span>
+                <span className={enemyCity.railBuilt ? 'font-semibold text-emerald-300' : 'text-slate-500'}>
+                  {enemyCity.railBuilt ? 'ACTIVE' : 'Unbuilt'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5">
+                <span className="inline-flex items-center gap-1 text-slate-300">
+                  <Plane className="h-3.5 w-3.5 text-rose-300" />
+                  <span>Air Fleet</span>
+                </span>
+                <span className="font-mono-tabular font-semibold text-orange-200">
+                  {enemyCity.helicoptersReady}H · {enemyCity.jetsReady}J
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              {enemyCity.buildings.map((b) => (
+                <div
+                  key={b.id}
+                  className="flex items-center justify-between rounded-lg border border-white/5 bg-slate-950/55 px-2 py-1 text-[11px]"
+                >
+                  <span className={b.built ? 'text-slate-200' : 'text-slate-500'}>
+                    {b.label}
+                  </span>
+                  <span
+                    className={`font-mono-tabular text-[10px] font-semibold ${
+                      b.built ? 'text-rose-300' : 'text-slate-500'
+                    }`}
+                  >
+                    {b.built ? `Built · L${b.level}` : 'Planned'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Read-Only 4-Rank Autonomous Enemy Command Hierarchy */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs font-semibold text-slate-200">
+              <span>Autonomous Enemy Hierarchy</span>
+              <span className="text-[10px] font-normal text-slate-400">No player orders</span>
+            </div>
+            {enemyCity.hierarchy.map((unit) => {
+              const indent = unit.rank === 1 ? '' : unit.rank === 2 ? 'ml-3' : 'ml-6';
+              const width =
+                unit.rank === 1
+                  ? '100%'
+                  : unit.rank === 2
+                    ? 'calc(100% - 0.75rem)'
+                    : 'calc(100% - 1.5rem)';
+              return (
+                <div
+                  key={unit.id}
+                  style={{ width }}
+                  className={`rounded-xl border border-rose-500/25 bg-slate-900/85 p-2.5 ${indent}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{
+                          backgroundColor:
+                            unit.rank === 1
+                              ? '#f43f5e'
+                              : unit.rank === 2
+                                ? '#f97316'
+                                : '#fbbf24',
+                        }}
+                      />
+                      <span className="truncate font-display text-xs font-semibold text-white">
+                        {unit.name}
+                      </span>
+                    </div>
+                    <span className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-200">
+                      R{unit.rank} · {unit.status}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-slate-400">
+                    {unit.role}
+                    {unit.supervisor ? ` · Reports to ${unit.supervisor}` : ''}
+                  </div>
+                  <p className="mt-1 text-[11px] leading-snug text-slate-200">
+                    {unit.lastAction}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <>
       {/* Town Pulse Metrics Strip + Weather Effect Badge + Expansion Summary */}
       <div className="shrink-0 space-y-2 border-b border-white/10 px-3.5 py-2.5">
         <div className="flex items-center justify-between gap-2">
@@ -666,8 +901,20 @@ export function HierarchyPanel({
               <span>The Signal Relay (CLI Agent Hub)</span>
             </button>
           )}
+          {onFocusEnemyCity && (
+            <button
+              type="button"
+              onClick={onFocusEnemyCity}
+              className="col-span-2 inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-950/35 px-3 text-xs font-semibold text-rose-200 transition-colors hover:border-rose-400/60 hover:bg-rose-900/40"
+            >
+              <Castle className="h-3.5 w-3.5 text-rose-300" />
+              <span>View Enemy City ({enemyCity.name})</span>
+            </button>
+          )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

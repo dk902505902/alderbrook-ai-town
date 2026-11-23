@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ALL_PLOT_IDS,
   BIOME_META,
+  createDefaultEnemyCityState,
   createDefaultEnemyRaidState,
   getAvailablePlotIds,
   isDefenseStructure,
@@ -15,6 +16,7 @@ import {
   type BiomeId,
   type CameraMode,
   type DecorPackId,
+  type EnemyCityState,
   type EnemyRaidState,
   type GraphicsQuality,
   type HatStyle,
@@ -40,6 +42,7 @@ import { buildTownLifeAndDecor, type TownLifeHandle } from './townLife.ts';
 import {
   BATTLE_FOCUS_TARGET,
   buildTownRaidersSystem,
+  ENEMY_CITY_FOCUS_TARGET,
   RAIDER_CAMP_POS,
   type DefenseTowerAnchor,
   type RaiderRadarSnapshot,
@@ -91,8 +94,9 @@ export interface TownSceneCallbacks {
   onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
   onBusRadarUpdate?: (pos: { x: number; z: number; atStop: boolean } | null) => void;
   onUserOrbitStart?: () => void;
-  onRaiderImpact?: (x: number, z: number) => void;
+  onRaiderImpact?: (x: number, z: number, source: 'ground' | 'helicopter' | 'jet') => void;
   onDefenseHitCamp?: (damage: number) => void;
+  onEnemyAircraftDowned?: (kind: 'helicopter' | 'jet') => void;
 }
 
 interface LandmarkConfig {
@@ -1657,6 +1661,7 @@ export class TownSceneController {
   private dogVillagerCoords: Array<{ x: number; z: number }> = [];
   private raiderHandle: TownRaidersHandle | null = null;
   private raidState: EnemyRaidState = createDefaultEnemyRaidState(false);
+  private enemyCityState: EnemyCityState = createDefaultEnemyCityState();
   private defenseTurrets: THREE.Group[] = [];
   private defenseTowers: DefenseTowerAnchor[] = [];
   private raiderVillagerCoords: Array<{ id: string; x: number; z: number; injured: boolean }> = [];
@@ -3358,12 +3363,26 @@ export class TownSceneController {
     this.povReturnActive = false;
     this.followActive = false;
     this.focusedCutawayId = null;
-    // Frame both the Raider Siege Camp + forward cannons/barricades + marching squad AND the SW town defense line
+    // Frame both Ironhold's forward assault line + marching squad AND Alderbrook's SW defense line
     this.cameraTargetGoal = BATTLE_FOCUS_TARGET.clone();
     const isNarrowPortrait = this.camera.aspect < 0.85;
     this.cameraPosGoal = isNarrowPortrait
-      ? new THREE.Vector3(-2.8, 15.2, 26.8)
-      : new THREE.Vector3(-4.2, 11.8, 22.6);
+      ? new THREE.Vector3(-2.8, 15.6, 27.6)
+      : new THREE.Vector3(-4.2, 12.2, 23.4);
+  }
+
+  public focusEnemyCity(): void {
+    if (this.cameraMode !== 'orbit') {
+      this.setCameraMode('orbit');
+    }
+    this.povReturnActive = false;
+    this.followActive = false;
+    this.focusedCutawayId = null;
+    this.cameraTargetGoal = ENEMY_CITY_FOCUS_TARGET.clone();
+    const isNarrowPortrait = this.camera.aspect < 0.85;
+    this.cameraPosGoal = isNarrowPortrait
+      ? new THREE.Vector3(-10.5, 16.5, 32.5)
+      : new THREE.Vector3(-12.2, 13.4, 29.2);
   }
 
   public focusBiome(biomeId: BiomeId): void {
@@ -4228,15 +4247,23 @@ export class TownSceneController {
         if (this.busHandle) {
           this.callbacks.onBusRadarUpdate?.(this.busHandle.getBusRadarPos());
         }
-        if (this.raidState.active && this.raiderHandle) {
+        if (this.raiderHandle) {
           const snap = this.raiderHandle.getRadarSnapshot();
           this.lastEmittedRaiderActive = true;
           this.callbacks.onRaiderRadarUpdate?.({
             campX: snap.campX,
             campZ: snap.campZ,
+            cityX: snap.cityX,
+            cityZ: snap.cityZ,
             siegeBuiltCount: snap.siegeBuiltCount,
             activeCannons: snap.activeCannons,
+            railBuilt: snap.railBuilt,
+            buildingCount: snap.buildingCount,
+            raidActive: snap.raidActive,
+            counterRaidActive: snap.counterRaidActive,
             squad: snap.squad.map((d) => ({ x: d.x, z: d.z, isCaptain: d.isCaptain })),
+            aircraft: snap.aircraft.map((a) => ({ kind: a.kind, x: a.x, z: a.z })),
+            counterSquad: snap.counterSquad.map((c) => ({ x: c.x, z: c.z })),
           });
         } else if (this.lastEmittedRaiderActive) {
           this.lastEmittedRaiderActive = false;
@@ -4288,14 +4315,16 @@ export class TownSceneController {
           waveNumber: this.raidState.waveNumber,
           tactic: this.raidState.tactic,
           campHpRatio: this.raidState.campHp / Math.max(1, this.raidState.campMaxHp),
+          enemyCity: this.enemyCityState,
           villagerCoords: this.raiderVillagerCoords,
           defenseTowers: this.defenseTowers,
           vanceDefending,
           vancePos: vanceRig
             ? { x: vanceRig.root.position.x, z: vanceRig.root.position.z }
             : null,
-          onRaiderImpact: (x, z) => this.callbacks.onRaiderImpact?.(x, z),
+          onRaiderImpact: (x, z, source) => this.callbacks.onRaiderImpact?.(x, z, source),
           onDefenseHitCamp: (dmg) => this.callbacks.onDefenseHitCamp?.(dmg),
+          onEnemyAircraftDowned: (kind) => this.callbacks.onEnemyAircraftDowned?.(kind),
         });
       }
 
@@ -4316,6 +4345,18 @@ export class TownSceneController {
     this.raidState = next;
     if (wasActive && !next.active && next.campHp <= 0) {
       this.raiderHandle?.triggerCampVictoryBurst();
+    }
+  }
+
+  public syncEnemyCity(next: EnemyCityState): void {
+    const wasCounterActive = this.enemyCityState.counterRaidActive;
+    const prevLootedBack = this.enemyCityState.totalGoldCounterLooted;
+    this.enemyCityState = next;
+    if (
+      (wasCounterActive && !next.counterRaidActive) ||
+      next.totalGoldCounterLooted > prevLootedBack
+    ) {
+      this.raiderHandle?.triggerCounterLootBurst();
     }
   }
 

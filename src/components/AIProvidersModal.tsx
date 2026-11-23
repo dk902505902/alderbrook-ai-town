@@ -1311,16 +1311,16 @@ export function AIProvidersModal({
                           <Swords className="h-3.5 w-3.5 shrink-0 text-rose-400" />
                           <div className="min-w-0">
                             <div className="truncate text-xs font-semibold text-rose-100">
-                              Enemy Raider Commander
+                              Supreme Warlord Malakor (Ironhold AI)
                             </div>
                             <div className="truncate text-[10px] text-rose-300/80">
-                              Enemy AI · Controls raid tactics &amp; cannon volleys
+                              100% Autonomous Enemy · Builds rival city, rail, jets, helis &amp; raids (no player orders)
                             </div>
                           </div>
                         </div>
 
                         <select
-                          aria-label="AI model for Enemy Raider Commander"
+                          aria-label="AI model for Supreme Warlord Malakor"
                           value={raiderSelectVal}
                           onChange={(e) =>
                             handleCharacterSelectChange(ENEMY_RAIDER_AGENT_ID, e.target.value)
