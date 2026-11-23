@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CloudRain, Compass, Cpu, MapPin, Radio, Send, Snowflake, Sun, UserPlus } from 'lucide-react';
+import { CloudRain, Compass, Cpu, Eye, EyeOff, MapPin, Radio, Send, Snowflake, Sun, UserPlus } from 'lucide-react';
 import { formatCompactModelName, resolveInferenceConfig } from '../lib/aiRouting.ts';
 import {
   getStructureDisplayLabel,
@@ -25,8 +25,10 @@ interface HierarchyPanelProps {
   providerConfig: AIProviderConfig;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
+  povVillagerId?: AgentId | null;
   isHiring: boolean;
   onSelectAgent: (agentId: AgentId) => void;
+  onTogglePovAgent?: (agentId: AgentId) => void;
   onSendAgentNote: (agentId: AgentId, note: string) => void;
   onHireWorker: (prompt: string) => void;
   onFocusLocation: (locationId: LocationId) => void;
@@ -62,8 +64,10 @@ export function HierarchyPanel({
   providerConfig,
   activeAgentId,
   selectedAgentId,
+  povVillagerId = null,
   isHiring,
   onSelectAgent,
+  onTogglePovAgent,
   onSendAgentNote,
   onHireWorker,
   onFocusLocation,
@@ -357,6 +361,31 @@ export function HierarchyPanel({
                     <p className="mt-1 text-sky-300">
                       Queued Whisper: “{agent.userNote}”
                     </p>
+                  )}
+
+                  {/* 1-Tap First-Person Character POV Camera Button */}
+                  {onTogglePovAgent && (
+                    <button
+                      type="button"
+                      onClick={() => onTogglePovAgent(agent.id)}
+                      className={`mt-2.5 inline-flex min-h-[38px] w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors ${
+                        povVillagerId === agent.id
+                          ? 'border-amber-400 bg-amber-500 text-slate-950 hover:bg-amber-400'
+                          : 'border-amber-400/35 bg-amber-500/12 text-amber-200 hover:bg-amber-500/22'
+                      }`}
+                    >
+                      {povVillagerId === agent.id ? (
+                        <>
+                          <EyeOff className="h-3.5 w-3.5" />
+                          <span>Exit First-Person View</span>
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="h-3.5 w-3.5" />
+                          <span>First-Person View</span>
+                        </>
+                      )}
+                    </button>
                   )}
 
                   {/* Direct Agent Whisper Form */}

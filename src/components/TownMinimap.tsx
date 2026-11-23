@@ -25,6 +25,7 @@ interface TownMinimapProps {
   onFocusLocation: (loc: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onFocusBiome?: (biome: BiomeId) => void;
+  onFocusRailSpur?: () => void;
   onSelectSignalRelay?: () => void;
 }
 
@@ -48,6 +49,7 @@ export function TownMinimap({
   onFocusLocation,
   onSelectPlot,
   onFocusBiome,
+  onFocusRailSpur,
   onSelectSignalRelay,
 }: TownMinimapProps) {
   const structureByPlot = new Map<PlotId, TownStructure>();
@@ -56,7 +58,7 @@ export function TownMinimap({
   }
 
   const expandedView = unlockedBiomes.length > 0 || railSpurBuilt;
-  const worldSpan = expandedView ? 36 : 15;
+  const worldSpan = expandedView ? 46 : 15;
   const toMapCoord = (val: number) => 70 + (val / worldSpan) * 58;
   const visiblePlots = getAvailablePlotIds(unlockedBiomes);
 
@@ -106,28 +108,36 @@ export function TownMinimap({
           );
         })}
 
-        {/* Railway Ring & Optional East Spur */}
+        {/* Railway Ring & Connected East Outer Railway Loop + Frontier Station */}
         {expandedView && (
           <circle
             cx="70"
             cy="70"
             r={(19.6 / worldSpan) * 58}
             fill="none"
-            stroke="rgba(148,163,184,0.3)"
+            stroke="rgba(148,163,184,0.32)"
             strokeWidth="1.2"
             strokeDasharray="3 2"
           />
         )}
         {railSpurBuilt && (
-          <line
-            x1={toMapCoord(19.6)}
-            y1={toMapCoord(2.2)}
-            x2={toMapCoord(28.5)}
-            y2={toMapCoord(5.2)}
-            stroke="#22d3ee"
-            strokeWidth="2"
-            strokeLinecap="round"
-          />
+          <g onClick={() => onFocusRailSpur?.()} className="cursor-pointer">
+            <path
+              d={`M ${toMapCoord(13.9).toFixed(1)} ${toMapCoord(-13.9).toFixed(1)} C ${toMapCoord(28.5).toFixed(1)} ${toMapCoord(-11.5).toFixed(1)}, ${toMapCoord(35.0).toFixed(1)} ${toMapCoord(-4.0).toFixed(1)}, ${toMapCoord(33.2).toFixed(1)} ${toMapCoord(2.2).toFixed(1)} C ${toMapCoord(32.0).toFixed(1)} ${toMapCoord(9.0).toFixed(1)}, ${toMapCoord(26.0).toFixed(1)} ${toMapCoord(12.2).toFixed(1)}, ${toMapCoord(13.9).toFixed(1)} ${toMapCoord(13.9).toFixed(1)}`}
+              fill="none"
+              stroke="#22d3ee"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
+            <circle
+              cx={toMapCoord(35.0)}
+              cy={toMapCoord(2.2)}
+              r="3.2"
+              fill="#083344"
+              stroke="#22d3ee"
+              strokeWidth="1.2"
+            />
+          </g>
         )}
 
         {/* Walkways */}

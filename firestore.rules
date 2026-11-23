@@ -58,9 +58,9 @@ service cloud.firestore {
       return plotId in [
         'plot_nw', 'plot_ne', 'plot_sw', 'plot_se',
         'plot_n_west', 'plot_n_east', 'plot_s_west', 'plot_s_east',
-        'plot_forest_1', 'plot_forest_2',
-        'plot_desert_1', 'plot_desert_2',
-        'plot_cave_1', 'plot_cave_2'
+        'plot_forest_1', 'plot_forest_2', 'plot_forest_3', 'plot_forest_4', 'plot_outer_nw', 'plot_outer_n',
+        'plot_desert_1', 'plot_desert_2', 'plot_desert_3', 'plot_desert_4', 'plot_outer_s', 'plot_outer_sw',
+        'plot_cave_1', 'plot_cave_2', 'plot_cave_3', 'plot_cave_4', 'plot_outer_ne', 'plot_outer_w'
       ];
     }
 
@@ -115,7 +115,7 @@ service cloud.firestore {
         && (!('theme' in data) || (data.theme is string && data.theme.size() <= 24 && isValidTownTheme(data.theme)))
         && (!('townName' in data) || (data.townName is string && data.townName.size() >= 1 && data.townName.size() <= 60))
         && (!('unlockedBiomes' in data) || (data.unlockedBiomes is list && data.unlockedBiomes.size() <= 3 && data.unlockedBiomes.hasOnly(['forest', 'desert', 'cave'])))
-        && (!('roads' in data) || (data.roads is list && data.roads.size() <= 24))
+        && (!('roads' in data) || (data.roads is list && data.roads.size() <= 40))
         && (!('railSpurBuilt' in data) || data.railSpurBuilt is bool)
         && (!('autoMode' in data) || data.autoMode is bool)
         && data.createdAt is timestamp

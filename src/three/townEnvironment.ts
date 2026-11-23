@@ -709,9 +709,9 @@ export function buildExpandableBiomesAndRoads(
   const color = new THREE.Color();
 
   // -------------------------------------------------------------------------
-  // 1. AI-Built Instanced Cobblestone Roads (Single InstancedMesh, 420 cap)
+  // 1. AI-Built Instanced Cobblestone Roads (Single InstancedMesh, 680 cap)
   // -------------------------------------------------------------------------
-  const MAX_ROAD_TILES = 420;
+  const MAX_ROAD_TILES = 680;
   const roadTileGeo = new THREE.BoxGeometry(1.05, 0.045, 0.74);
   const roadTileMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -731,6 +731,16 @@ export function buildExpandableBiomesAndRoads(
 
   let currentRoads: string[] = [];
   let currentTheme: TownTheme = initialTheme;
+
+  const isNearAnyPlot = (x: number, z: number, minClearance = 3.8): boolean => {
+    const minSq = minClearance * minClearance;
+    for (const pm of Object.values(PLOT_META)) {
+      const dx = x - pm.x;
+      const dz = z - pm.z;
+      if (dx * dx + dz * dz < minSq) return true;
+    }
+    return false;
+  };
 
   const ROAD_SEGMENTS: Record<string, Array<[number, number]>> = {
     plaza_to_forest: [
@@ -756,9 +766,9 @@ export function buildExpandableBiomesAndRoads(
     ],
     plaza_to_spur: [
       [10.5, -0.5],
-      [16.5, 1.5],
-      [22.5, 3.6],
-      [26.4, 5.0],
+      [17.5, 0.5],
+      [24.5, 1.5],
+      [30.6, 2.2],
     ],
   };
 
@@ -840,7 +850,7 @@ export function buildExpandableBiomesAndRoads(
   forestGroup.name = 'biome:forest';
   forestGroup.visible = false;
 
-  const forestGroundGeo = new THREE.CircleGeometry(14.2, 24);
+  const forestGroundGeo = new THREE.CircleGeometry(17.5, 24);
   const forestGroundMat = new THREE.MeshStandardMaterial({
     color: 0x3f6234,
     roughness: 0.96,
@@ -849,7 +859,7 @@ export function buildExpandableBiomesAndRoads(
   });
   const forestGround = new THREE.Mesh(forestGroundGeo, forestGroundMat);
   forestGround.rotation.x = -Math.PI / 2;
-  forestGround.position.set(-28.0, 0.015, -22.0);
+  forestGround.position.set(-28.5, 0.015, -22.5);
   forestGround.receiveShadow = true;
   forestGroup.add(forestGround);
   disposables.push(forestGroundGeo, forestGroundMat);
@@ -871,14 +881,13 @@ export function buildExpandableBiomesAndRoads(
   disposables.push(pineTrunkGeo, pineCanopyGeo, pineTrunkMat, pineCanopyMat, mossRockGeo, mossRockMat);
 
   const pineCoords: Array<[number, number, number]> = [];
-  for (let i = 0; i < 42; i++) {
+  for (let i = 0; i < 52; i++) {
     const angle = (i * 2.39996) % (Math.PI * 2);
-    const rad = 3.2 + ((i * 3.7) % 10.6);
-    const px = -28.0 + Math.cos(angle) * rad;
-    const pz = -22.0 + Math.sin(angle) * rad;
-    // Keep plots and main approach trail clear
-    if (Math.hypot(px - (-24.8), pz - (-22.2)) < 3.6) continue;
-    if (Math.hypot(px - (-30.5), pz - (-17.0)) < 3.6) continue;
+    const rad = 3.2 + ((i * 3.9) % 13.6);
+    const px = -28.5 + Math.cos(angle) * rad;
+    const pz = -22.5 + Math.sin(angle) * rad;
+    // Keep all plots (including outer expansion ring) and inner railway clear
+    if (isNearAnyPlot(px, pz, 4.0)) continue;
     if (Math.hypot(px, pz) < 22.8) continue; // Outside railway
     pineCoords.push([px, pz, 0.85 + (i % 5) * 0.14]);
   }
@@ -900,6 +909,8 @@ export function buildExpandableBiomesAndRoads(
   pineTrunkMesh.instanceMatrix.needsUpdate = true;
   pineCanopyMesh.instanceMatrix.needsUpdate = true;
   if (pineCanopyMesh.instanceColor) pineCanopyMesh.instanceColor.needsUpdate = true;
+  pineTrunkMesh.computeBoundingSphere();
+  pineCanopyMesh.computeBoundingSphere();
   forestGroup.add(pineTrunkMesh, pineCanopyMesh);
 
   const rockCount = 14;
@@ -926,7 +937,7 @@ export function buildExpandableBiomesAndRoads(
   desertGroup.name = 'biome:desert';
   desertGroup.visible = false;
 
-  const desertGroundGeo = new THREE.CircleGeometry(14.5, 24);
+  const desertGroundGeo = new THREE.CircleGeometry(17.5, 24);
   const desertGroundMat = new THREE.MeshStandardMaterial({
     color: 0xe6be7a,
     roughness: 0.94,
@@ -935,21 +946,21 @@ export function buildExpandableBiomesAndRoads(
   });
   const desertGround = new THREE.Mesh(desertGroundGeo, desertGroundMat);
   desertGround.rotation.x = -Math.PI / 2;
-  desertGround.position.set(28.0, 0.016, 21.5);
+  desertGround.position.set(28.5, 0.016, 22.5);
   desertGround.receiveShadow = true;
   desertGroup.add(desertGround);
   disposables.push(desertGroundGeo, desertGroundMat);
 
-  // Sculpted sand dunes (InstancedMesh)
+  // Sculpted sand dunes (InstancedMesh, kept clear of outer plots & outer railway loop)
   const duneGeo = new THREE.SphereGeometry(2.8, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
   const duneMat = new THREE.MeshStandardMaterial({ color: 0xdcb065, roughness: 0.95 });
   const duneCoords: Array<[number, number, number, number]> = [
-    [35.2, 26.5, 1.5, 0.6],
-    [36.5, 19.2, 1.3, 0.52],
-    [29.8, 30.8, 1.4, 0.58],
-    [22.4, 30.2, 1.2, 0.48],
-    [35.8, 12.6, 1.1, 0.46],
-    [19.5, 27.6, 1.0, 0.42],
+    [40.8, 30.2, 1.5, 0.6],
+    [39.8, 19.8, 1.3, 0.52],
+    [29.8, 32.8, 1.4, 0.58],
+    [26.4, 34.4, 1.2, 0.48],
+    [40.6, 12.6, 1.1, 0.46],
+    [15.8, 28.4, 1.0, 0.42],
   ];
   const duneMesh = new THREE.InstancedMesh(duneGeo, duneMat, duneCoords.length);
   duneCoords.forEach(([x, z, sx, sy], i) => {
@@ -960,6 +971,7 @@ export function buildExpandableBiomesAndRoads(
     duneMesh.setMatrixAt(i, dummy.matrix);
   });
   duneMesh.instanceMatrix.needsUpdate = true;
+  duneMesh.computeBoundingSphere();
   desertGroup.add(duneMesh);
   disposables.push(duneGeo, duneMat);
 
@@ -985,14 +997,14 @@ export function buildExpandableBiomesAndRoads(
   disposables.push(cactusGeo, cactusMat);
 
   const cactusCoords: Array<[number, number, number]> = [];
-  for (let i = 0; i < 24; i++) {
+  for (let i = 0; i < 30; i++) {
     const a = (i * 2.39996) % (Math.PI * 2);
-    const r = 3.8 + ((i * 2.9) % 9.8);
-    const cx = 28.0 + Math.cos(a) * r;
-    const cz = 21.5 + Math.sin(a) * r;
-    if (Math.hypot(cx - 25.2, cz - 22.4) < 3.6) continue;
-    if (Math.hypot(cx - 30.8, cz - 16.8) < 3.6) continue;
+    const r = 3.8 + ((i * 3.1) % 13.0);
+    const cx = 28.5 + Math.cos(a) * r;
+    const cz = 22.5 + Math.sin(a) * r;
+    if (isNearAnyPlot(cx, cz, 4.0)) continue;
     if (Math.hypot(cx, cz) < 22.8) continue;
+    if (cx > 17 && cx < 37 && cz < 13.5) continue; // Keep East outer railway loop clear
     cactusCoords.push([cx, cz, 0.78 + (i % 4) * 0.16]);
   }
   const cactusMesh = new THREE.InstancedMesh(cactusGeo, cactusMat, Math.max(1, cactusCoords.length));
@@ -1005,6 +1017,7 @@ export function buildExpandableBiomesAndRoads(
   });
   cactusMesh.count = cactusCoords.length;
   cactusMesh.instanceMatrix.needsUpdate = true;
+  cactusMesh.computeBoundingSphere();
   desertGroup.add(cactusMesh);
 
   // Sandstone Arch Landmark near Desert Dunes edge

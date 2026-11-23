@@ -61,6 +61,7 @@ export interface AgentWorldCoord {
 
 export interface TownSceneCallbacks {
   onSelectAgent: (agentId: AgentId) => void;
+  onToggleAgentPov?: (agentId: AgentId) => void;
   onSelectLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
@@ -304,6 +305,9 @@ const _arcStart = new THREE.Vector3();
 const _arcMid = new THREE.Vector3();
 const _arcEnd = new THREE.Vector3();
 const _slotOffset = new THREE.Vector3();
+const _povForward = new THREE.Vector3();
+const _povEye = new THREE.Vector3();
+const _povLookTarget = new THREE.Vector3();
 
 function detectSoftwareWebGL(): boolean {
   try {
@@ -1647,6 +1651,22 @@ export class TownSceneController {
   private activeAgentId: AgentId | null = null;
   private followActive = false;
   private cameraTargetGoal: THREE.Vector3 | null = null;
+
+  // 1-Tap First-Person Character POV Camera Mode
+  private povAgentId: AgentId | null = null;
+  private savedOrbitPos = new THREE.Vector3(16, 13.5, 19.5);
+  private savedOrbitTarget = new THREE.Vector3(0, 0.8, 0);
+  private povHasSavedOrbit = false;
+  private povReturnActive = false;
+  private povCurrentLook = new THREE.Vector3();
+
+  // Dynamic Terrain & Camera Bounds Expansion
+  private groundMesh!: THREE.Mesh;
+  private perimeterHills: Array<{ mesh: THREE.Mesh; angle: number }> = [];
+  private railSpurBuilt = false;
+  private maxPanRadius = 34;
+  private expandedFogFactor = 1.0;
+
   private lastMinimapEmit = 0;
   private frameId = 0;
   private disposed = false;
@@ -1749,6 +1769,7 @@ export class TownSceneController {
     };
     this.controls.addEventListener('start', () => {
       this.cameraTargetGoal = null;
+      this.povReturnActive = false;
       if (this.followActive) {
         this.followActive = false;
         this.callbacks.onUserOrbitStart?.();
@@ -1785,6 +1806,7 @@ export class TownSceneController {
     const ground = new THREE.Mesh(groundGeo, this.groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
+    this.groundMesh = ground;
     this.scene.add(ground);
 
     this.plazaMat = new THREE.MeshStandardMaterial({
@@ -1842,7 +1864,10 @@ export class TownSceneController {
 
     // Build Scenic Perimeter Railway & Wooden Station first so outer trees stay clear of the rails
     this.railwayHandle = buildTownRailway(this.scene, this.lanternMaterials, this.townTheme);
-    this.clickableObjects.push(this.railwayHandle.stationGroup);
+    this.clickableObjects.push(
+      this.railwayHandle.stationGroup,
+      this.railwayHandle.outerStationGroup,
+    );
     this.disposables.push(this.railwayHandle);
 
     const treePositions: Array<[number, number]> = [];
@@ -1916,6 +1941,7 @@ export class TownSceneController {
       const hill = new THREE.Mesh(new THREE.ConeGeometry(13 + (i % 3) * 4, 7 + (i % 2) * 3, 7), this.hillMat);
       hill.position.set(hx, 2.4, hz);
       hill.rotation.y = i;
+      this.perimeterHills.push({ mesh: hill, angle });
       this.scene.add(hill);
     }
 
@@ -2344,6 +2370,95 @@ export class TownSceneController {
     }
   }
 
+  public setPovAgent(agentId: AgentId | null): void {
+    if (agentId === this.povAgentId) return;
+
+    // Restore previously hidden POV head mesh if any
+    if (this.povAgentId) {
+      const prevRig = this.rigs.get(this.povAgentId);
+      if (prevRig) {
+        prevRig.headGroup.visible = true;
+      }
+    }
+
+    if (agentId) {
+      const targetRig = this.rigs.get(agentId);
+      if (!targetRig) {
+        this.povAgentId = null;
+        this.controls.enabled = true;
+        return;
+      }
+
+      // Save the player's exact current orbit camera position/target before entering POV
+      if (!this.povAgentId && !this.povReturnActive) {
+        this.savedOrbitPos.copy(this.camera.position);
+        this.savedOrbitTarget.copy(this.controls.target);
+        this.povHasSavedOrbit = true;
+      }
+
+      this.povAgentId = agentId;
+      this.povReturnActive = false;
+      this.followActive = false;
+      this.cameraTargetGoal = null;
+      this.controls.enabled = false;
+
+      // Hide this villager's own head locally so it never clips the first-person camera
+      targetRig.headGroup.visible = false;
+
+      // Lower near clip plane for crisp close-up interior & street-level viewing
+      if (this.camera.near !== 0.15) {
+        this.camera.near = 0.15;
+        this.camera.updateProjectionMatrix();
+      }
+
+      // Seed look-at smoothly from current camera target so transition sweeps naturally into POV
+      this.povCurrentLook.copy(this.controls.target);
+      return;
+    }
+
+    // Exiting POV -> smoothly restore exact previous overview position and target
+    this.povAgentId = null;
+    if (this.camera.near !== 0.5) {
+      this.camera.near = 0.5;
+      this.camera.updateProjectionMatrix();
+    }
+    this.controls.enabled = true;
+    if (this.povHasSavedOrbit) {
+      this.povReturnActive = true;
+      this.cameraTargetGoal = null;
+    }
+  }
+
+  private applyMapExpansionBounds(): void {
+    const biomeCount = this.unlockedBiomes.length;
+    const expanded = biomeCount > 0 || this.railSpurBuilt;
+    const tier = Math.min(3, biomeCount + (this.railSpurBuilt ? 1 : 0));
+
+    // Scale ground disk, push perimeter hills outward, expand orbit pan/zoom bounds & camera far plane
+    const groundScale = expanded ? 1.25 + tier * 0.12 : 1.0;
+    const hillRadius = expanded ? 72 + tier * 7.5 : 58;
+    const maxDist = expanded ? 96 + tier * 11 : 74;
+    const camFar = expanded ? 280 + tier * 30 : 220;
+
+    if (this.groundMesh) {
+      this.groundMesh.scale.setScalar(groundScale);
+    }
+    for (let i = 0; i < this.perimeterHills.length; i++) {
+      const h = this.perimeterHills[i];
+      h.mesh.position.x = Math.cos(h.angle) * hillRadius;
+      h.mesh.position.z = Math.sin(h.angle) * hillRadius;
+    }
+
+    this.controls.maxDistance = maxDist;
+    this.maxPanRadius = expanded ? 48 + tier * 5 : 34;
+    this.expandedFogFactor = expanded ? Math.max(0.68, 0.9 - tier * 0.06) : 1.0;
+
+    if (this.camera.far !== camFar) {
+      this.camera.far = camFar;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
   public triggerCommunicationArc(speakerId: AgentId, targetAgentName: string | null, accentHex: string): void {
     if (!targetAgentName) {
       this.commArcTimer = 0;
@@ -2460,7 +2575,19 @@ export class TownSceneController {
       this.railwayHandle.group.visible = params.isMainTown || params.railSpurBuilt;
     }
 
-    // 3. Clear transient visual effects & cached cutaway/plot state
+    // 3. Clear transient visual effects, POV state & cached cutaway/plot state
+    if (this.povAgentId) {
+      const prevPovRig = this.rigs.get(this.povAgentId);
+      if (prevPovRig) prevPovRig.headGroup.visible = true;
+    }
+    this.povAgentId = null;
+    this.povReturnActive = false;
+    this.povHasSavedOrbit = false;
+    this.controls.enabled = true;
+    if (this.camera.near !== 0.5) {
+      this.camera.near = 0.5;
+      this.camera.updateProjectionMatrix();
+    }
     this.commArcTimer = 0;
     this.commSpeakerId = null;
     this.commTargetId = null;
@@ -2485,6 +2612,8 @@ export class TownSceneController {
 
     // 5. Apply outer biomes, instanced cobblestone roads, railway spur & active town's structures
     this.unlockedBiomes = [...params.unlockedBiomes];
+    this.railSpurBuilt = params.railSpurBuilt;
+    this.applyMapExpansionBounds();
     this.expansionHandle?.setUnlockedBiomes(params.unlockedBiomes);
     this.expansionHandle?.setRoads(params.roads);
     this.railwayHandle?.setRailSpurBuilt(params.railSpurBuilt);
@@ -2545,6 +2674,8 @@ export class TownSceneController {
     const prevKey = this.unlockedBiomes.join(',');
     const nextKey = unlockedBiomes.join(',');
     this.unlockedBiomes = [...unlockedBiomes];
+    this.railSpurBuilt = railSpurBuilt;
+    this.applyMapExpansionBounds();
     this.expansionHandle?.setUnlockedBiomes(unlockedBiomes);
     this.expansionHandle?.setRoads(roads);
     this.railwayHandle?.setRailSpurBuilt(railSpurBuilt);
@@ -2707,6 +2838,9 @@ export class TownSceneController {
     // Remove departed / reset agents cleanly without disposing shared geometries
     this.rigs.forEach((rig, id) => {
       if (!activeIds.has(id)) {
+        if (this.povAgentId === id) {
+          this.setPovAgent(null);
+        }
         this.scene.remove(rig.root);
         const clickIdx = this.clickableObjects.indexOf(rig.root);
         if (clickIdx !== -1) {
@@ -2865,7 +2999,12 @@ export class TownSceneController {
       let obj: THREE.Object3D | null = visibleHit.object;
       while (obj) {
         if (obj.userData?.agentId) {
-          this.callbacks.onSelectAgent(obj.userData.agentId as AgentId);
+          const aid = obj.userData.agentId as AgentId;
+          if (this.callbacks.onToggleAgentPov) {
+            this.callbacks.onToggleAgentPov(aid);
+          } else {
+            this.callbacks.onSelectAgent(aid);
+          }
           return;
         }
         if (obj.userData?.plotId) {
@@ -2894,9 +3033,13 @@ export class TownSceneController {
           return;
         }
         if (obj.userData?.stationId) {
+          const sid = obj.userData.stationId as string;
           this.focusedCutawayId = null;
           this.followActive = false;
-          this.cameraTargetGoal = this.railwayHandle.stationFocusTarget.clone();
+          this.cameraTargetGoal =
+            sid === 'outer_frontier_station'
+              ? this.railwayHandle.frontierDepotFocusTarget.clone()
+              : this.railwayHandle.stationFocusTarget.clone();
           return;
         }
         if (obj.userData?.locationId) {
@@ -2985,7 +3128,7 @@ export class TownSceneController {
         this.scene.fog.color.lerp(_targetColor, atmoLerp);
         this.scene.fog.density = THREE.MathUtils.lerp(
           this.scene.fog.density,
-          spec.fogDensity,
+          spec.fogDensity * this.expandedFogFactor,
           atmoLerp,
         );
       }
@@ -3064,24 +3207,73 @@ export class TownSceneController {
         this.waterJetMat.color.lerp(_targetColor, atmoLerp);
       }
 
-      // 2. Smooth camera tracking (Follow Mode or Focus Goal)
-      if (this.followActive && this.activeAgentId) {
-        const followRig = this.rigs.get(this.activeAgentId);
-        if (followRig) {
-          this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, followRig.root.position.x, 4.5, delta);
-          this.controls.target.y = THREE.MathUtils.damp(this.controls.target.y, 1.1, 4.5, delta);
-          this.controls.target.z = THREE.MathUtils.damp(this.controls.target.z, followRig.root.position.z, 4.5, delta);
+      // 2. Smooth camera tracking (First-Person POV, POV Overview Return, Follow Mode, or Focus Goal)
+      const povRig = this.povAgentId ? this.rigs.get(this.povAgentId) ?? null : null;
+      if (povRig) {
+        // Dynamically track the villager's walking direction, head height & bob at eye level
+        _povForward.set(0, 0, 1).applyQuaternion(povRig.root.quaternion).normalize();
+        const eyeY = povRig.root.position.y + 1.56 + povRig.bodyGroup.position.y;
+        _povEye.set(
+          povRig.root.position.x + _povForward.x * 0.24,
+          eyeY,
+          povRig.root.position.z + _povForward.z * 0.24,
+        );
+        _povLookTarget.set(
+          _povEye.x + _povForward.x * 8.5,
+          eyeY - 0.32,
+          _povEye.z + _povForward.z * 8.5,
+        );
+        this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, _povEye.x, 9, delta);
+        this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, _povEye.y, 9, delta);
+        this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, _povEye.z, 9, delta);
+        this.povCurrentLook.x = THREE.MathUtils.damp(this.povCurrentLook.x, _povLookTarget.x, 8, delta);
+        this.povCurrentLook.y = THREE.MathUtils.damp(this.povCurrentLook.y, _povLookTarget.y, 8, delta);
+        this.povCurrentLook.z = THREE.MathUtils.damp(this.povCurrentLook.z, _povLookTarget.z, 8, delta);
+        this.camera.lookAt(this.povCurrentLook);
+      } else if (this.povReturnActive) {
+        this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, this.savedOrbitPos.x, 7.5, delta);
+        this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, this.savedOrbitPos.y, 7.5, delta);
+        this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, this.savedOrbitPos.z, 7.5, delta);
+        this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, this.savedOrbitTarget.x, 7.5, delta);
+        this.controls.target.y = THREE.MathUtils.damp(this.controls.target.y, this.savedOrbitTarget.y, 7.5, delta);
+        this.controls.target.z = THREE.MathUtils.damp(this.controls.target.z, this.savedOrbitTarget.z, 7.5, delta);
+        this.controls.update();
+        if (
+          this.camera.position.distanceTo(this.savedOrbitPos) < 0.08 &&
+          this.controls.target.distanceTo(this.savedOrbitTarget) < 0.08
+        ) {
+          this.camera.position.copy(this.savedOrbitPos);
+          this.controls.target.copy(this.savedOrbitTarget);
+          this.controls.update();
+          this.povReturnActive = false;
         }
-      } else if (this.cameraTargetGoal) {
-        this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, this.cameraTargetGoal.x, 6, delta);
-        this.controls.target.y = THREE.MathUtils.damp(this.controls.target.y, this.cameraTargetGoal.y, 6, delta);
-        this.controls.target.z = THREE.MathUtils.damp(this.controls.target.z, this.cameraTargetGoal.z, 6, delta);
-        if (this.controls.target.distanceTo(this.cameraTargetGoal) < 0.04) {
-          this.cameraTargetGoal = null;
+      } else {
+        if (this.followActive && this.activeAgentId) {
+          const followRig = this.rigs.get(this.activeAgentId);
+          if (followRig) {
+            this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, followRig.root.position.x, 4.5, delta);
+            this.controls.target.y = THREE.MathUtils.damp(this.controls.target.y, 1.1, 4.5, delta);
+            this.controls.target.z = THREE.MathUtils.damp(this.controls.target.z, followRig.root.position.z, 4.5, delta);
+          }
+        } else if (this.cameraTargetGoal) {
+          this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, this.cameraTargetGoal.x, 6, delta);
+          this.controls.target.y = THREE.MathUtils.damp(this.controls.target.y, this.cameraTargetGoal.y, 6, delta);
+          this.controls.target.z = THREE.MathUtils.damp(this.controls.target.z, this.cameraTargetGoal.z, 6, delta);
+          if (this.controls.target.distanceTo(this.cameraTargetGoal) < 0.04) {
+            this.cameraTargetGoal = null;
+          }
         }
-      }
 
-      this.controls.update();
+        // Keep orbit pan target within active map expansion bounds
+        const panDist = Math.hypot(this.controls.target.x, this.controls.target.z);
+        if (panDist > this.maxPanRadius) {
+          const clampScale = this.maxPanRadius / panDist;
+          this.controls.target.x *= clampScale;
+          this.controls.target.z *= clampScale;
+        }
+
+        this.controls.update();
+      }
 
       // 3. Park Fountain Shimmering Ripples, Water Jet, Windmill Sails & 1-Minute Scenic Railway
       if (this.waterMesh) {
@@ -3105,12 +3297,12 @@ export class TownSceneController {
       }
       this.expansionHandle?.update(elapsed);
 
-      // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom)
+      // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom; solid roofs in POV)
       const updateCutaway = (entry: CutawayEntry, idx: number) => {
         const isFocused = this.focusedCutawayId === entry.id;
         const camDist = this.camera.position.distanceTo(entry.center);
         const isCloseZoom = camDist < entry.triggerRadius;
-        const targetOpacity = isFocused || isCloseZoom ? 0.15 : 1.0;
+        const targetOpacity = this.povAgentId ? 1.0 : isFocused || isCloseZoom ? 0.15 : 1.0;
 
         entry.currentOpacity = THREE.MathUtils.damp(entry.currentOpacity, targetOpacity, 7.5, delta);
         const openCutaway = entry.currentOpacity < 0.985;
@@ -3348,7 +3540,7 @@ export class TownSceneController {
 
         _projVec.set(rig.root.position.x, 2.38, rig.root.position.z);
         _projVec.project(this.camera);
-        const visible = _projVec.z > -1 && _projVec.z < 1;
+        const visible = rig.id !== this.povAgentId && _projVec.z > -1 && _projVec.z < 1;
         labelPositions[rig.id] = {
           x: ((_projVec.x + 1) / 2) * width,
           y: ((-_projVec.y + 1) / 2) * height,

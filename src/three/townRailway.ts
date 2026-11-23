@@ -5,6 +5,7 @@ import { applyThemeToObjectTree, tagThemeMaterial } from './townThemes.ts';
 export interface TownRailwayHandle {
   group: THREE.Group;
   stationGroup: THREE.Group;
+  outerStationGroup: THREE.Group;
   stationFocusTarget: THREE.Vector3;
   frontierDepotFocusTarget: THREE.Vector3;
   isNearTrackOrStation: (x: number, z: number, pad?: number) => boolean;
@@ -53,6 +54,40 @@ function createSoftSteamTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+function evaluateSmoothLeg(
+  elapsedInLeg: number,
+  legDuration: number,
+  accelSec: number,
+  decelSec: number,
+): { s: number; vNorm: number } {
+  if (legDuration <= 0.01) return { s: 1, vNorm: 0 };
+  const tau = Math.min(1, Math.max(0, elapsedInLeg / legDuration));
+  const aFrac = Math.min(0.4, accelSec / legDuration);
+  const dFrac = Math.min(0.4, decelSec / legDuration);
+  const vCruise = 1.0 / (1.0 - 0.5 * aFrac - 0.5 * dFrac);
+
+  if (tau < aFrac) {
+    const k = tau / aFrac;
+    return {
+      s: vCruise * (0.5 * tau - (aFrac / (2 * Math.PI)) * Math.sin(Math.PI * k)),
+      vNorm: vCruise * 0.5 * (1 - Math.cos(Math.PI * k)),
+    };
+  }
+  if (tau <= 1 - dFrac) {
+    return {
+      s: vCruise * (0.5 * aFrac + (tau - aFrac)),
+      vNorm: vCruise,
+    };
+  }
+  const q = tau - (1 - dFrac);
+  const k = q / dFrac;
+  const baseS = 1 - vCruise * 0.5 * dFrac;
+  return {
+    s: baseS + vCruise * (0.5 * q + (dFrac / (2 * Math.PI)) * Math.sin(Math.PI * k)),
+    vNorm: vCruise * 0.5 * (1 + Math.cos(Math.PI * k)),
+  };
+}
+
 /**
  * Analytic C2-smooth loop progress s in [0, 1] and normalized speed v in [0, CRUISE_VEL].
  * Guarantees exact station alignment every 60 seconds with zero cumulative drift.
@@ -97,6 +132,27 @@ function evaluateTrainSchedule(cycleTime: number): {
     isStopped: false,
     stopElapsed: 0,
   };
+}
+
+function findClosestCurveU(
+  curve: THREE.CatmullRomCurve3,
+  target: THREE.Vector3,
+  samples = 480,
+): number {
+  let bestU = 0;
+  let bestDistSq = Infinity;
+  for (let i = 0; i < samples; i++) {
+    const u = i / samples;
+    curve.getPointAt(u, _pos);
+    const dx = _pos.x - target.x;
+    const dz = _pos.z - target.z;
+    const dSq = dx * dx + dz * dz;
+    if (dSq < bestDistSq) {
+      bestDistSq = dSq;
+      bestU = u;
+    }
+  }
+  return bestU;
 }
 
 function buildBallastRibbon(
@@ -604,28 +660,56 @@ export function buildTownRailway(
   root.add(stationGroup);
 
   const stationFocusTarget = new THREE.Vector3(stationPos.x, 1.2, stationPos.z);
+  const mainStationTrackPt = trackCurve.getPointAt(STATION_U).clone();
 
-  // 5b. Extendable Railway Spur & Outer Frontier Depot Stop (East Frontier)
+  // 5b. Connected Extended Outer Railway Loop & Outer Frontier Station (East Frontier)
+  // Shares exact inner-loop control points from i=2 (SE, 45°) through i=14 (NE, 315°),
+  // then smoothly branches outward through East Frontier & merges back into the inner loop!
+  const extControlPts: THREE.Vector3[] = [];
+  for (let i = 2; i <= 14; i++) {
+    extControlPts.push(controlPts[i].clone());
+  }
+  const frontierTrackTarget = new THREE.Vector3(33.2, 0, 2.2);
+  extControlPts.push(
+    new THREE.Vector3(19.6, 0, -11.4),
+    new THREE.Vector3(27.2, 0, -9.0),
+    new THREE.Vector3(32.2, 0, -3.4),
+    frontierTrackTarget.clone(),
+    new THREE.Vector3(31.6, 0, 7.8),
+    new THREE.Vector3(25.8, 0, 11.2),
+    new THREE.Vector3(19.0, 0, 11.6),
+  );
+  const extendedLoopCurve = new THREE.CatmullRomCurve3(extControlPts, true, 'catmullrom', 0.5);
+  const extendedTrackLength = extendedLoopCurve.getLength();
+
+  const extMainStationU = findClosestCurveU(extendedLoopCurve, mainStationTrackPt);
+  const extFrontierStationU = findClosestCurveU(extendedLoopCurve, frontierTrackTarget);
+  const extBranchStartU = findClosestCurveU(extendedLoopCurve, controlPts[14]);
+
+  // Sample exact points from extendedLoopCurve along the East outer branch [extBranchStartU -> 1.0]
+  // so visible ballast, instanced sleepers, and steel rails align with the train's exact path!
+  const outerArcPts: THREE.Vector3[] = [];
+  const arcSampleCount = 44;
+  for (let i = 0; i <= arcSampleCount; i++) {
+    const u = extBranchStartU + (1.0 - extBranchStartU) * (i / arcSampleCount);
+    outerArcPts.push(extendedLoopCurve.getPointAt(u % 1).clone());
+  }
+  const outerArcCurve = new THREE.CatmullRomCurve3(outerArcPts, false, 'catmullrom', 0.5);
+
   const spurGroup = new THREE.Group();
-  spurGroup.name = 'railway:frontier_spur';
+  spurGroup.name = 'railway:frontier_outer_loop';
   spurGroup.visible = false;
 
-  const SPUR_JUNCTION_U = 0.03;
-  const junctionPt = trackCurve.getPointAt(SPUR_JUNCTION_U);
-  const spurCurve = new THREE.CatmullRomCurve3(
-    [
-      new THREE.Vector3(junctionPt.x, 0, junctionPt.z),
-      new THREE.Vector3(junctionPt.x + 3.2, 0, junctionPt.z + 1.0),
-      new THREE.Vector3(junctionPt.x + 6.4, 0, junctionPt.z + 2.4),
-      new THREE.Vector3(junctionPt.x + 9.2, 0, junctionPt.z + 3.2),
-    ],
-    false,
-    'catmullrom',
-    0.4,
-  );
-  const spurBallastGeo = buildBallastRibbon(spurCurve, 24, 0.92);
+  const spurBallastGeo = buildBallastRibbon(outerArcCurve, 64, 0.86);
   const spurBallastMat = tagThemeMaterial(
-    new THREE.MeshStandardMaterial({ color: 0x78716c, roughness: 0.96 }),
+    new THREE.MeshStandardMaterial({
+      color: 0x94a3b8,
+      roughness: 0.95,
+      metalness: 0.02,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    }),
     'stone',
   );
   const spurBallast = new THREE.Mesh(spurBallastGeo, spurBallastMat);
@@ -633,124 +717,169 @@ export function buildTownRailway(
   spurGroup.add(spurBallast);
   disposables.push(spurBallastGeo, spurBallastMat);
 
-  // Instanced wooden sleepers along the spur (1 draw call!)
-  const SPUR_TIES = 22;
-  const spurTieGeo = new THREE.BoxGeometry(1.18, 0.07, 0.22);
+  // Instanced wooden sleepers along the connected outer railway arc (1 draw call!)
+  const SPUR_TIES = 62;
+  const spurTieGeo = new THREE.BoxGeometry(1.32, 0.075, 0.22);
   const spurTieMat = tagThemeMaterial(
-    new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.88 }),
+    new THREE.MeshStandardMaterial({ color: 0x5c2b0c, roughness: 0.88, metalness: 0.03 }),
     'darkWood',
   );
   const spurTieMesh = new THREE.InstancedMesh(spurTieGeo, spurTieMat, SPUR_TIES);
+  spurTieMesh.receiveShadow = true;
   const tieDummy = new THREE.Object3D();
   for (let i = 0; i < SPUR_TIES; i++) {
     const u = i / (SPUR_TIES - 1);
-    spurCurve.getPointAt(u, _pos);
-    spurCurve.getTangentAt(u, _tan).normalize();
-    tieDummy.position.set(_pos.x, 0.055, _pos.z);
+    outerArcCurve.getPointAt(u, _pos);
+    outerArcCurve.getTangentAt(u, _tan).normalize();
+    tieDummy.position.set(_pos.x, 0.068, _pos.z);
     tieDummy.rotation.set(0, Math.atan2(_tan.x, _tan.z), 0);
     tieDummy.scale.set(1, 1, 1);
     tieDummy.updateMatrix();
     spurTieMesh.setMatrixAt(i, tieDummy.matrix);
   }
   spurTieMesh.instanceMatrix.needsUpdate = true;
+  spurTieMesh.computeBoundingSphere();
   spurGroup.add(spurTieMesh);
   disposables.push(spurTieGeo, spurTieMat);
 
-  // Twin steel rails along the spur
-  const spurRailMat = new THREE.MeshStandardMaterial({
-    color: 0x94a3b8,
-    roughness: 0.36,
-    metalness: 0.78,
-  });
-  for (const offset of [-0.38, 0.38]) {
+  // Twin metallic steel rails along the outer connected loop (2 TubeGeometry draw calls)
+  const spurRailMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.3, metalness: 0.85 }),
+    'metal',
+  );
+  for (const offset of [-0.42, 0.42]) {
     const railPts: THREE.Vector3[] = [];
-    for (let i = 0; i <= 20; i++) {
-      const u = i / 20;
-      spurCurve.getPointAt(u, _pos);
-      spurCurve.getTangentAt(u, _tan).normalize();
+    for (let i = 0; i <= 48; i++) {
+      const u = i / 48;
+      outerArcCurve.getPointAt(u, _pos);
+      outerArcCurve.getTangentAt(u, _tan).normalize();
       _side.crossVectors(_up, _tan).normalize();
-      railPts.push(new THREE.Vector3(_pos.x + _side.x * offset, 0.11, _pos.z + _side.z * offset));
+      railPts.push(new THREE.Vector3(_pos.x + _side.x * offset, 0.135, _pos.z + _side.z * offset));
     }
-    const rCurve = new THREE.CatmullRomCurve3(railPts, false);
-    const rGeo = new THREE.TubeGeometry(rCurve, 22, 0.032, 5, false);
+    const rCurve = new THREE.CatmullRomCurve3(railPts, false, 'catmullrom', 0.5);
+    const rGeo = new THREE.TubeGeometry(rCurve, 64, 0.036, 5, false);
     const rMesh = new THREE.Mesh(rGeo, spurRailMat);
     spurGroup.add(rMesh);
     disposables.push(rGeo);
   }
   disposables.push(spurRailMat);
 
-  // Frontier Depot Platform + Timber Shelter + Pulsing Signal Lantern
-  const depotEnd = spurCurve.getPointAt(0.86);
-  const depotTan = spurCurve.getTangentAt(0.86).normalize();
-  const depotSide = new THREE.Vector3().crossVectors(_up, depotTan).normalize();
-  const depotCenter = depotEnd.clone().addScaledVector(depotSide, 2.05);
-  const depotYaw = Math.atan2(depotTan.x, depotTan.z);
+  // Outer Frontier Station tucked alongside the extended loop's eastern straightaway
+  const frontierPt = extendedLoopCurve.getPointAt(extFrontierStationU).clone();
+  const frontierTan = extendedLoopCurve.getTangentAt(extFrontierStationU).normalize();
+  const frontierOutward = new THREE.Vector3(frontierPt.x, 0, frontierPt.z).normalize();
+  const depotCenter = frontierPt.clone().addScaledVector(frontierOutward, 2.25);
+  const depotYaw = Math.atan2(frontierTan.x, frontierTan.z);
 
-  const depotGroup = new THREE.Group();
-  depotGroup.position.set(depotCenter.x, 0, depotCenter.z);
-  depotGroup.rotation.y = depotYaw;
+  const outerStationGroup = new THREE.Group();
+  outerStationGroup.name = 'landmark:outer_frontier_station';
+  outerStationGroup.userData = { stationId: 'outer_frontier_station' };
+  outerStationGroup.position.set(depotCenter.x, 0, depotCenter.z);
+  outerStationGroup.rotation.y = depotYaw;
 
-  const depotWoodMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.8 }), 'wood');
-  const depotRoofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.58 }), 'roofSecondary');
-  const depotStoneMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.86 }), 'stone');
+  const depotWoodMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.78 }),
+    'wood',
+  );
+  const depotDarkWoodMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x5c2b0c, roughness: 0.85 }),
+    'darkWood',
+  );
+  const depotRoofMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.56, metalness: 0.14 }),
+    'roofSecondary',
+  );
+  const depotStoneMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.86 }),
+    'stone',
+  );
+  const depotTrimMat = tagThemeMaterial(
+    new THREE.MeshStandardMaterial({ color: 0xe2dcd0, roughness: 0.75 }),
+    'trim',
+  );
   const frontierSignalMat = new THREE.MeshStandardMaterial({
     color: 0x67e8f9,
     emissive: 0x06b6d4,
-    emissiveIntensity: 1.0,
-    roughness: 0.22,
+    emissiveIntensity: 0.95,
+    roughness: 0.2,
   });
   lanternMaterials.push(frontierSignalMat);
-  disposables.push(depotWoodMat, depotRoofMat, depotStoneMat, frontierSignalMat);
+  disposables.push(
+    depotWoodMat,
+    depotDarkWoodMat,
+    depotRoofMat,
+    depotStoneMat,
+    depotTrimMat,
+    frontierSignalMat,
+  );
 
-  const platDeck = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.34, 4.8), depotStoneMat);
+  // Raised Frontier boarding deck + trackside edge trim
+  const platDeck = new THREE.Mesh(new THREE.BoxGeometry(2.25, 0.34, 5.2), depotStoneMat);
   platDeck.position.set(0, 0.17, 0);
-  depotGroup.add(platDeck);
+  platDeck.receiveShadow = true;
+  outerStationGroup.add(platDeck);
 
-  // 4 awning posts + pitched wooden canopy
-  const pGeo = new THREE.BoxGeometry(0.14, 1.8, 0.14);
-  for (const [px, pz] of [[-0.65, -1.5], [0.65, -1.5], [-0.65, 1.5], [0.65, 1.5]]) {
-    const post = new THREE.Mesh(pGeo, depotWoodMat);
-    post.position.set(px, 1.24, pz);
-    depotGroup.add(post);
+  const deckEdge = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.09, 5.26), depotTrimMat);
+  deckEdge.position.set(-1.05, 0.35, 0);
+  outerStationGroup.add(deckEdge);
+
+  // 4 awning posts + sloped canopy roof + back wall + timetable board
+  const pGeo = new THREE.CylinderGeometry(0.08, 0.09, 2.1, 6);
+  for (const [px, pz] of [
+    [-0.72, -1.95],
+    [0.72, -1.95],
+    [-0.72, 1.95],
+    [0.72, 1.95],
+  ] as Array<[number, number]>) {
+    const post = new THREE.Mesh(pGeo, depotDarkWoodMat);
+    post.position.set(px, 1.38, pz);
+    outerStationGroup.add(post);
   }
-  const depotRoof = new THREE.Mesh(new THREE.BoxGeometry(2.35, 0.14, 4.1), depotRoofMat);
-  depotRoof.position.set(0, 2.18, 0);
-  depotRoof.rotation.z = 0.12;
-  depotGroup.add(depotRoof);
+  const depotRoof = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.16, 5.5), depotRoofMat);
+  depotRoof.position.set(0.05, 2.48, 0);
+  depotRoof.rotation.z = -0.14;
+  outerStationGroup.add(depotRoof);
 
-  // Cargo crates + signal lantern post + expanding halo
-  const crate = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.58, 0.58), depotWoodMat);
-  crate.position.set(0.35, 0.63, 1.55);
-  depotGroup.add(crate);
+  const depotBack = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.35, 3.2), depotWoodMat);
+  depotBack.position.set(0.82, 1.0, 0);
+  const depotSign = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.44, 1.75), depotTrimMat);
+  depotSign.position.set(0.82, 1.96, 0);
+  outerStationGroup.add(depotBack, depotSign);
 
-  const sigPost = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 2.45, 6), depotStoneMat);
-  sigPost.position.set(-0.78, 1.4, -2.05);
-  depotGroup.add(sigPost);
+  // Cargo crates + waiting bench + Frontier Signal Lantern post
+  const crate = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.52, 0.58), depotWoodMat);
+  crate.position.set(0.24, 0.6, 1.65);
+  const bench = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.12, 1.55), depotDarkWoodMat);
+  bench.position.set(0.32, 0.66, -0.55);
+  outerStationGroup.add(crate, bench);
 
-  const sigLamp = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 6), frontierSignalMat);
-  sigLamp.position.set(-0.78, 2.68, -2.05);
-  depotGroup.add(sigLamp);
+  const sigPost = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 2.6, 6), depotStoneMat);
+  sigPost.position.set(-0.82, 1.6, -2.32);
+  outerStationGroup.add(sigPost);
+
+  const sigLamp = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), frontierSignalMat);
+  sigLamp.position.set(-0.82, 2.86, -2.32);
+  outerStationGroup.add(sigLamp);
 
   const frontierHaloMat = new THREE.MeshBasicMaterial({
     color: 0x22d3ee,
     transparent: true,
-    opacity: 0.45,
+    opacity: 0,
     side: THREE.DoubleSide,
     depthWrite: false,
   });
-  const frontierHalo = new THREE.Mesh(new THREE.RingGeometry(0.24, 0.36, 18), frontierHaloMat);
-  frontierHalo.rotation.x = -Math.PI / 2;
-  frontierHalo.position.set(-0.78, 2.68, -2.05);
-  depotGroup.add(frontierHalo);
-  disposables.push(frontierHaloMat);
+  const frontierHalo = new THREE.Mesh(new THREE.RingGeometry(0.26, 0.38, 18), frontierHaloMat);
+  frontierHalo.position.set(-0.82, 2.86, -2.32);
+  frontierHalo.visible = false;
+  outerStationGroup.add(frontierHalo);
 
-  // Wooden rail buffer stop at end of spur
-  const endPt = spurCurve.getPointAt(1);
-  const bufferBar = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.45, 0.35), depotWoodMat);
-  bufferBar.position.set(endPt.x, 0.3, endPt.z);
-  bufferBar.rotation.y = depotYaw;
-  spurGroup.add(depotGroup, bufferBar);
+  const frontierSignalLight = new THREE.PointLight(0x22d3ee, 0, 11, 1.6);
+  frontierSignalLight.position.set(-0.82, 2.86, -2.32);
+  frontierSignalLight.castShadow = false;
+  outerStationGroup.add(frontierSignalLight);
+  disposables.push(frontierHaloMat, pGeo);
 
+  spurGroup.add(outerStationGroup);
   root.add(spurGroup);
   const frontierDepotFocusTarget = new THREE.Vector3(depotCenter.x, 1.2, depotCenter.z);
 
@@ -795,36 +924,45 @@ export function buildTownRailway(
 
   scene.add(root);
 
-  // Start at 53s so the player gets to watch the train smoothly pull into the station
-  // ~7 seconds after opening the app, then repeat on the exact 60-second schedule!
+  // Extended 2-stop loop timing (10s stop at Alderbrook Station + proportional leg1 + 10s stop at Outer Frontier Station + proportional leg2)
+  const EXT_MOVE_TOTAL = 52.0;
+  const leg1UDelta = ((extFrontierStationU - extMainStationU) + 1) % 1;
+  const leg2UDelta = 1.0 - leg1UDelta;
+  const EXT_LEG1_DUR = EXT_MOVE_TOTAL * leg1UDelta;
+  const EXT_LEG2_DUR = EXT_MOVE_TOTAL * leg2UDelta;
+  const EXT_FRONTIER_STOP_START = STOP_DURATION + EXT_LEG1_DUR;
+  const EXT_LEG2_START = EXT_FRONTIER_STOP_START + STOP_DURATION;
+  const EXT_CYCLE_DURATION = EXT_LEG2_START + EXT_LEG2_DUR;
+
+  // Start at 53s so the player gets to watch the train smoothly pull into Alderbrook Station ~7s after opening
   let cycleTime = 53.0;
+  let extCycleTime = EXT_FRONTIER_STOP_START - 4.0;
   let activeQuality: GraphicsQuality = 'medium';
   let activeTheme: TownTheme = initialTheme;
   let railSpurEnabled = false;
-  let frontierStopRemaining = 0;
-  let frontierStopCooldown = 0;
+  let triggerToggle = false;
 
-  const carSpacingsU = [
-    2.65 / trackLength, // Carriage 1 trailing behind locomotive
-    5.15 / trackLength, // Carriage 2 trailing behind carriage 1
-  ];
-
-  const placeCarOnTrack = (obj: THREE.Object3D, uRaw: number) => {
+  const placeCarOnCurve = (
+    curve: THREE.CatmullRomCurve3,
+    obj: THREE.Object3D,
+    uRaw: number,
+  ) => {
     const u = ((uRaw % 1) + 1) % 1;
-    trackCurve.getPointAt(u, _pos);
-    trackCurve.getTangentAt(u, _tan).normalize();
+    curve.getPointAt(u, _pos);
+    curve.getTangentAt(u, _tan).normalize();
     obj.position.set(_pos.x, 0.14, _pos.z);
     _look.copy(_pos).add(_tan);
     _look.y = 0.14;
     obj.lookAt(_look);
   };
 
-  // Initialize consist position immediately
+  // Initialize consist position immediately on inner loop
   const initSched = evaluateTrainSchedule(cycleTime);
   const initHeadU = (STATION_U + initSched.progress) % 1;
-  placeCarOnTrack(consist.locomotive, initHeadU);
+  placeCarOnCurve(trackCurve, consist.locomotive, initHeadU);
   consist.carriages.forEach((car, idx) => {
-    placeCarOnTrack(car, initHeadU - carSpacingsU[idx]);
+    const distBehind = idx === 0 ? 2.65 : 5.15;
+    placeCarOnCurve(trackCurve, car, initHeadU - distBehind / trackLength);
   });
 
   const applyTheme = (theme: TownTheme) => {
@@ -834,14 +972,20 @@ export function buildTownRailway(
       puffMat.color.setHex(0xe0e7ff);
       stationBuilt.signalHaloMat.color.setHex(0xc084fc);
       stationBuilt.signalLight.color.setHex(0xc084fc);
+      frontierHaloMat.color.setHex(0xc084fc);
+      frontierSignalLight.color.setHex(0xc084fc);
     } else if (theme === 'solarpunk_oasis') {
       puffMat.color.setHex(0xfef3c7);
       stationBuilt.signalHaloMat.color.setHex(0x22d3ee);
       stationBuilt.signalLight.color.setHex(0x22d3ee);
+      frontierHaloMat.color.setHex(0x2dd4bf);
+      frontierSignalLight.color.setHex(0x2dd4bf);
     } else {
       puffMat.color.setHex(0xf8fafc);
       stationBuilt.signalHaloMat.color.setHex(0xfde047);
       stationBuilt.signalLight.color.setHex(0xfbbf24);
+      frontierHaloMat.color.setHex(0x22d3ee);
+      frontierSignalLight.color.setHex(0x22d3ee);
     }
   };
 
@@ -852,10 +996,14 @@ export function buildTownRailway(
   return {
     group: root,
     stationGroup,
+    outerStationGroup,
     stationFocusTarget,
     frontierDepotFocusTarget,
     isNearTrackOrStation: (x: number, z: number, pad = 2.6) => {
       if (Math.hypot(x - stationPos.x, z - stationPos.z) < 4.5 + pad * 0.5) {
+        return true;
+      }
+      if (Math.hypot(x - depotCenter.x, z - depotCenter.z) < 4.5 + pad * 0.5) {
         return true;
       }
       const padSq = pad * pad;
@@ -870,15 +1018,27 @@ export function buildTownRailway(
       return false;
     },
     triggerTrainNow: () => {
-      // Smoothly pull into Alderbrook Station over ~3.2s, ring the signal lantern, and hold for 10s
-      frontierStopRemaining = 0;
-      cycleTime = 56.8;
+      if (railSpurEnabled) {
+        // Alternate pulling into Outer Frontier Station (first!) and Alderbrook Station
+        if (!triggerToggle) {
+          extCycleTime = Math.max(STOP_DURATION + 1, EXT_FRONTIER_STOP_START - 4.2);
+        } else {
+          extCycleTime = Math.max(EXT_LEG2_START + 1, EXT_CYCLE_DURATION - 3.6);
+        }
+        triggerToggle = !triggerToggle;
+      } else {
+        // Smoothly pull into Alderbrook Station over ~3.2s, ring the signal lantern, and hold for 10s
+        cycleTime = 56.8;
+      }
     },
     setRailSpurBuilt: (enabled: boolean) => {
+      const wasEnabled = railSpurEnabled;
       railSpurEnabled = enabled;
       spurGroup.visible = enabled;
-      if (!enabled) {
-        frontierStopRemaining = 0;
+      if (enabled && !wasEnabled) {
+        // Seamlessly route the existing train onto the newly connected outer loop approaching Outer Frontier Station!
+        extCycleTime = Math.max(STOP_DURATION + 1, EXT_FRONTIER_STOP_START - 5.5);
+        triggerToggle = false;
       }
     },
     setGraphicsQuality: (quality: GraphicsQuality) => {
@@ -887,69 +1047,77 @@ export function buildTownRailway(
       stationGroup.traverse((obj) => {
         if ((obj as THREE.Mesh).isMesh) obj.castShadow = enableShadows;
       });
+      outerStationGroup.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) obj.castShadow = enableShadows;
+      });
       trainGroup.traverse((obj) => {
         if ((obj as THREE.Mesh).isMesh) obj.castShadow = enableShadows;
       });
       puffGeo.setDrawRange(0, quality === 'low' ? 14 : MAX_PUFFS);
       if (quality === 'low') {
         stationBuilt.signalLight.intensity = 0;
+        frontierSignalLight.intensity = 0;
       }
     },
     applyTheme,
     update: (delta: number, elapsed: number) => {
-      if (frontierStopCooldown > 0) {
-        frontierStopCooldown = Math.max(0, frontierStopCooldown - delta);
-      }
+      let activeCurve = trackCurve;
+      let activeLen = trackLength;
+      let headU = 0;
+      let linearSpeed = 0;
+      let isStoppedAtMain = false;
+      let mainStopElapsed = 0;
+      let isStoppedAtFrontier = false;
+      let frontierStopElapsed = 0;
 
-      // Secondary 5-second Frontier Depot whistle-stop when Railway Spur is built
-      if (frontierStopRemaining > 0) {
-        frontierStopRemaining = Math.max(0, frontierStopRemaining - delta);
+      if (railSpurEnabled) {
+        // Drive the existing steam locomotive + 2 carriages continuously on the connected outer railway loop!
+        activeCurve = extendedLoopCurve;
+        activeLen = extendedTrackLength;
+        extCycleTime = (extCycleTime + delta) % EXT_CYCLE_DURATION;
+
+        if (extCycleTime < STOP_DURATION) {
+          // 10-second stop at Alderbrook Station
+          headU = extMainStationU;
+          linearSpeed = 0;
+          isStoppedAtMain = true;
+          mainStopElapsed = extCycleTime;
+        } else if (extCycleTime < EXT_FRONTIER_STOP_START) {
+          // Cruise clockwise from Alderbrook Station onto the connected East Outer Frontier Loop
+          const leg = evaluateSmoothLeg(extCycleTime - STOP_DURATION, EXT_LEG1_DUR, 6.0, 6.0);
+          headU = (extMainStationU + leg.s * leg1UDelta) % 1;
+          linearSpeed = (leg.vNorm * (leg1UDelta * extendedTrackLength)) / EXT_LEG1_DUR;
+        } else if (extCycleTime < EXT_LEG2_START) {
+          // 10-second stop at the new Outer Frontier Station!
+          headU = extFrontierStationU;
+          linearSpeed = 0;
+          isStoppedAtFrontier = true;
+          frontierStopElapsed = extCycleTime - EXT_FRONTIER_STOP_START;
+        } else {
+          // Depart Outer Frontier Station, merge back onto inner loop, and pull into Alderbrook Station
+          const leg = evaluateSmoothLeg(extCycleTime - EXT_LEG2_START, EXT_LEG2_DUR, 4.0, 4.5);
+          headU = (extFrontierStationU + leg.s * leg2UDelta) % 1;
+          linearSpeed = (leg.vNorm * (leg2UDelta * extendedTrackLength)) / EXT_LEG2_DUR;
+        }
       } else {
         cycleTime = (cycleTime + delta) % CYCLE_DURATION;
+        const sched = evaluateTrainSchedule(cycleTime);
+        headU = (STATION_U + sched.progress) % 1;
+        linearSpeed = (sched.speedNorm * trackLength) / MOVE_DURATION;
+        isStoppedAtMain = sched.isStopped;
+        mainStopElapsed = sched.stopElapsed;
       }
 
-      const schedRaw = evaluateTrainSchedule(cycleTime);
-      const headU = (STATION_U + schedRaw.progress) % 1;
+      const isStoppedAny = isStoppedAtMain || isStoppedAtFrontier;
 
-      if (
-        railSpurEnabled &&
-        !schedRaw.isStopped &&
-        frontierStopRemaining <= 0 &&
-        frontierStopCooldown <= 0
-      ) {
-        const distToJunction = Math.min(
-          Math.abs(headU - SPUR_JUNCTION_U),
-          1 - Math.abs(headU - SPUR_JUNCTION_U),
-        );
-        if (distToJunction < 0.008) {
-          frontierStopRemaining = 5.0;
-          frontierStopCooldown = 25.0;
-        }
-      }
-
-      const isAtFrontierStop = frontierStopRemaining > 0;
-      const sched = isAtFrontierStop
-        ? { ...schedRaw, speedNorm: 0, isStopped: true }
-        : schedRaw;
-
-      // Animate Frontier Depot lantern & halo when spur is visible
-      if (railSpurEnabled) {
-        const wave = (elapsed * (isAtFrontierStop ? 2.4 : 0.9)) % 1;
-        frontierSignalMat.emissiveIntensity = isAtFrontierStop ? 1.8 + Math.sin(elapsed * 10) * 0.6 : 0.75 + Math.sin(elapsed * 2.5) * 0.2;
-        frontierHalo.visible = activeQuality !== 'low' || isAtFrontierStop;
-        const hs = 1 + wave * (isAtFrontierStop ? 3.2 : 1.1);
-        frontierHalo.scale.set(hs, hs, 1);
-        frontierHaloMat.opacity = (1 - wave) * (isAtFrontierStop ? 0.8 : 0.25);
-      }
-
-      // 1. Place locomotive and 2 carriages smoothly along the curve
-      placeCarOnTrack(consist.locomotive, headU);
-      for (let i = 0; i < consist.carriages.length; i++) {
-        placeCarOnTrack(consist.carriages[i], headU - carSpacingsU[i]);
-      }
+      // 1. Place locomotive and 2 carriages smoothly along the active curve (inner or extended loop)
+      placeCarOnCurve(activeCurve, consist.locomotive, headU);
+      const carDist1 = 2.65 / activeLen;
+      const carDist2 = 5.15 / activeLen;
+      placeCarOnCurve(activeCurve, consist.carriages[0], headU - carDist1);
+      placeCarOnCurve(activeCurve, consist.carriages[1], headU - carDist2);
 
       // 2. Rotate wheels proportional to linear speed
-      const linearSpeed = (sched.speedNorm * trackLength) / MOVE_DURATION;
       const wheelRotStep = (linearSpeed / 0.24) * delta;
       if (wheelRotStep > 0.0001) {
         for (let i = 0; i < consist.wheels.length; i++) {
@@ -957,10 +1125,10 @@ export function buildTownRailway(
         }
       }
 
-      // 3. Visual Station Lantern Pulse (rings brightly during arrival 0-3s & departure warning 7-10s)
-      const isRinging =
-        sched.isStopped && (sched.stopElapsed < 3.2 || sched.stopElapsed > 6.8);
-      if (isRinging) {
+      // 3. Alderbrook Station Signal Lantern Pulse (arrival 0-3.2s & departure 6.8-10s)
+      const isMainRinging =
+        isStoppedAtMain && (mainStopElapsed < 3.2 || mainStopElapsed > 6.8);
+      if (isMainRinging) {
         const pulseWave = (elapsed * 2.4) % 1;
         const glowBoost = 0.65 + Math.sin(elapsed * 14.0) * 0.35;
         stationBuilt.signalLanternMat.emissiveIntensity = 1.4 + glowBoost * 1.1;
@@ -972,8 +1140,7 @@ export function buildTownRailway(
         if (activeQuality !== 'low') {
           stationBuilt.signalLight.intensity = 1.2 + glowBoost * 1.4;
         }
-      } else if (sched.isStopped) {
-        // Soft steady boarding beacon while paused at platform
+      } else if (isStoppedAtMain) {
         stationBuilt.signalLanternMat.emissiveIntensity = 1.15 + Math.sin(elapsed * 3.5) * 0.2;
         stationBuilt.signalHalo.visible = false;
         if (activeQuality !== 'low') {
@@ -991,44 +1158,80 @@ export function buildTownRailway(
         }
       }
 
+      // 3b. Outer Frontier Station Signal Lantern Pulse (when extended loop is active)
+      if (railSpurEnabled) {
+        const isFrontierRinging =
+          isStoppedAtFrontier && (frontierStopElapsed < 3.2 || frontierStopElapsed > 6.8);
+        if (isFrontierRinging) {
+          const pulseWave = (elapsed * 2.4) % 1;
+          const glowBoost = 0.65 + Math.sin(elapsed * 14.0) * 0.35;
+          frontierSignalMat.emissiveIntensity = 1.5 + glowBoost * 1.1;
+          frontierHalo.visible = true;
+          const hs = 1.0 + pulseWave * 3.4;
+          frontierHalo.scale.set(hs, hs, 1);
+          frontierHalo.rotation.y = elapsed * 2.2;
+          frontierHaloMat.opacity = (1 - pulseWave) * 0.82;
+          if (activeQuality !== 'low') {
+            frontierSignalLight.intensity = 1.3 + glowBoost * 1.4;
+          }
+        } else if (isStoppedAtFrontier) {
+          frontierSignalMat.emissiveIntensity = 1.25 + Math.sin(elapsed * 3.8) * 0.2;
+          frontierHalo.visible = false;
+          if (activeQuality !== 'low') {
+            frontierSignalLight.intensity = 0.95;
+          }
+        } else {
+          frontierSignalMat.emissiveIntensity = 0.8 + Math.sin(elapsed * 2.4) * 0.18;
+          frontierHalo.visible = false;
+          if (activeQuality !== 'low') {
+            const idleGlow = activeTheme === 'fantasy_night' ? 0.55 : 0.2;
+            frontierSignalLight.intensity = THREE.MathUtils.lerp(
+              frontierSignalLight.intensity,
+              idleGlow,
+              1 - Math.exp(-4 * delta),
+            );
+          }
+        }
+      }
+
       // 4. Rising Steam Puffs from Locomotive Smokestack (THREE.Points)
       consist.locomotive.updateMatrixWorld();
       consist.smokestackTip.getWorldPosition(_stackWorld);
-      trackCurve.getTangentAt(headU, _tan).normalize();
+      activeCurve.getTangentAt(headU, _tan).normalize();
 
       const activePuffCount = activeQuality === 'low' ? 14 : MAX_PUFFS;
-      // Puff emission rate: cozy gentle chug at station, lively chug on departure/cruise
-      const puffRate = sched.isStopped ? 0.42 : 0.65 + sched.speedNorm * 0.3;
+      const speedRatio = Math.min(1.5, linearSpeed / 2.6);
+      const puffRate = isStoppedAny ? 0.45 : 0.65 + speedRatio * 0.3;
       const puffAttr = puffGeo.getAttribute('position') as THREE.BufferAttribute;
 
       for (let i = 0; i < activePuffCount; i++) {
         let age = puffAges[i] + delta * puffRate;
         if (age >= 1.0) {
           age = age % 1.0;
-          puffOrigins[i * 3] = _stackWorld.x + (Math.sin(i * 12.7 + elapsed) * 0.06);
+          puffOrigins[i * 3] = _stackWorld.x + Math.sin(i * 12.7 + elapsed) * 0.06;
           puffOrigins[i * 3 + 1] = _stackWorld.y;
-          puffOrigins[i * 3 + 2] = _stackWorld.z + (Math.cos(i * 9.3 + elapsed) * 0.06);
-          // Slight trailing drift opposite the train's travel tangent
-          const trail = sched.isStopped ? 0.18 : 0.85;
+          puffOrigins[i * 3 + 2] = _stackWorld.z + Math.cos(i * 9.3 + elapsed) * 0.06;
+          const trail = isStoppedAny ? 0.18 : 0.85;
           puffDrifts[i * 2] = -_tan.x * trail + Math.sin(i * 3.1) * 0.22;
           puffDrifts[i * 2 + 1] = -_tan.z * trail + Math.cos(i * 4.7) * 0.22;
         }
         puffAges[i] = age;
 
         _puffOrigin.set(puffOrigins[i * 3], puffOrigins[i * 3 + 1], puffOrigins[i * 3 + 2]);
-        // Only display initialized puffs
         if (_puffOrigin.y <= 0.1) {
           puffPositions[i * 3] = _stackWorld.x;
           puffPositions[i * 3 + 1] = _stackWorld.y + age * 2.4;
           puffPositions[i * 3 + 2] = _stackWorld.z;
         } else {
-          const rise = sched.isStopped ? 3.2 : 2.5;
-          puffPositions[i * 3] = _puffOrigin.x + puffDrifts[i * 2] * age + Math.sin(elapsed * 2 + i) * 0.12 * age;
+          const rise = isStoppedAny ? 3.2 : 2.5;
+          puffPositions[i * 3] =
+            _puffOrigin.x + puffDrifts[i * 2] * age + Math.sin(elapsed * 2 + i) * 0.12 * age;
           puffPositions[i * 3 + 1] = _puffOrigin.y + age * rise;
-          puffPositions[i * 3 + 2] = _puffOrigin.z + puffDrifts[i * 2 + 1] * age + Math.cos(elapsed * 1.8 + i) * 0.12 * age;
+          puffPositions[i * 3 + 2] =
+            _puffOrigin.z + puffDrifts[i * 2 + 1] * age + Math.cos(elapsed * 1.8 + i) * 0.12 * age;
         }
       }
-      puffMat.size = sched.isStopped ? 0.82 : 0.68;
+      puffMat.size = isStoppedAny ? 0.84 : 0.68;
       puffAttr.needsUpdate = true;
     },
     dispose: () => {

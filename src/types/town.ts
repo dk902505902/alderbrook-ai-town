@@ -15,10 +15,22 @@ export type PlotId =
   | 'plot_s_east'
   | 'plot_forest_1'
   | 'plot_forest_2'
+  | 'plot_forest_3'
+  | 'plot_forest_4'
+  | 'plot_outer_nw'
+  | 'plot_outer_n'
   | 'plot_desert_1'
   | 'plot_desert_2'
+  | 'plot_desert_3'
+  | 'plot_desert_4'
+  | 'plot_outer_s'
+  | 'plot_outer_sw'
   | 'plot_cave_1'
-  | 'plot_cave_2';
+  | 'plot_cave_2'
+  | 'plot_cave_3'
+  | 'plot_cave_4'
+  | 'plot_outer_ne'
+  | 'plot_outer_w';
 
 export type CustomBuildingStyle =
   | 'lab'
@@ -411,9 +423,30 @@ export const CORE_PLOT_IDS: PlotId[] = [
 ];
 
 export const BIOME_PLOT_IDS: Record<BiomeId, PlotId[]> = {
-  forest: ['plot_forest_1', 'plot_forest_2'],
-  desert: ['plot_desert_1', 'plot_desert_2'],
-  cave: ['plot_cave_1', 'plot_cave_2'],
+  forest: [
+    'plot_forest_1',
+    'plot_forest_2',
+    'plot_forest_3',
+    'plot_forest_4',
+    'plot_outer_nw',
+    'plot_outer_n',
+  ],
+  desert: [
+    'plot_desert_1',
+    'plot_desert_2',
+    'plot_desert_3',
+    'plot_desert_4',
+    'plot_outer_s',
+    'plot_outer_sw',
+  ],
+  cave: [
+    'plot_cave_1',
+    'plot_cave_2',
+    'plot_cave_3',
+    'plot_cave_4',
+    'plot_outer_ne',
+    'plot_outer_w',
+  ],
 };
 
 export const ALL_PLOT_IDS: PlotId[] = [
@@ -454,8 +487,8 @@ export const BIOME_META: Record<BiomeId, BiomeMeta> = {
     center: { x: -28, z: -24 },
     color: '#16a34a',
     roadId: 'plaza_to_forest',
-    plots: ['plot_forest_1', 'plot_forest_2'],
-    summary: 'Deep pine timber groves, mossy boulders, and woodland outpost plots.',
+    plots: BIOME_PLOT_IDS.forest,
+    summary: 'Deep pine timber groves, mossy boulders, and 6 outer woodland & north-ring build plots.',
   },
   desert: {
     id: 'desert',
@@ -465,8 +498,8 @@ export const BIOME_META: Record<BiomeId, BiomeMeta> = {
     center: { x: 28, z: 24 },
     color: '#d97706',
     roadId: 'plaza_to_desert',
-    plots: ['plot_desert_1', 'plot_desert_2'],
-    summary: 'Sun-baked golden dunes, saguaro cacti, sandstone arches, and trade outposts.',
+    plots: BIOME_PLOT_IDS.desert,
+    summary: 'Sun-baked golden dunes, saguaro cacti, sandstone arches, and 6 southern frontier plots.',
   },
   cave: {
     id: 'cave',
@@ -476,8 +509,8 @@ export const BIOME_META: Record<BiomeId, BiomeMeta> = {
     center: { x: 28, z: -25 },
     color: '#06b6d4',
     roadId: 'plaza_to_cave',
-    plots: ['plot_cave_1', 'plot_cave_2'],
-    summary: 'Hollow see-inside mountain cavern rich with glowing cyan & amber crystals.',
+    plots: BIOME_PLOT_IDS.cave,
+    summary: 'Hollow see-inside mountain cavern with glowing crystals and 6 highland & outer plots.',
   },
 };
 
@@ -506,10 +539,22 @@ export const PLOT_META: Record<
   plot_s_east: { label: 'South-East Meadow', shortLabel: 'SEM', x: 5.2, z: 13.0 },
   plot_forest_1: { label: 'Pine Glade Clearing', shortLabel: 'F1', x: -24.8, z: -22.2, biome: 'forest' },
   plot_forest_2: { label: 'Deepwood Timber Yard', shortLabel: 'F2', x: -30.5, z: -17.0, biome: 'forest' },
+  plot_forest_3: { label: 'Deep Pine Overlook', shortLabel: 'F3', x: -36.2, z: -26.4, biome: 'forest' },
+  plot_forest_4: { label: 'North Timber Terrace', shortLabel: 'F4', x: -20.5, z: -34.2, biome: 'forest' },
+  plot_outer_nw: { label: 'Whispering Woods West', shortLabel: 'ONW', x: -35.4, z: -9.2, biome: 'forest' },
+  plot_outer_n: { label: 'Northern Meadow Ridge', shortLabel: 'ON', x: -9.5, z: -34.6, biome: 'forest' },
   plot_desert_1: { label: 'Sunstone Outpost', shortLabel: 'D1', x: 25.2, z: 22.4, biome: 'desert' },
   plot_desert_2: { label: 'Dune Caravan Pad', shortLabel: 'D2', x: 30.8, z: 16.8, biome: 'desert' },
+  plot_desert_3: { label: 'Suncrest Oasis Terrace', shortLabel: 'D3', x: 36.8, z: 25.8, biome: 'desert' },
+  plot_desert_4: { label: 'South Caravan Plateau', shortLabel: 'D4', x: 19.6, z: 34.2, biome: 'desert' },
+  plot_outer_s: { label: 'Southern Frontier Green', shortLabel: 'OS', x: -10.8, z: 34.0, biome: 'desert' },
+  plot_outer_sw: { label: 'Southwest Meadow Glade', shortLabel: 'OSW', x: -34.8, z: 21.8, biome: 'desert' },
   plot_cave_1: { label: 'Crystal Cavern Floor', shortLabel: 'C1', x: 27.6, z: -24.6, biome: 'cave' },
   plot_cave_2: { label: 'Mountain Ridge Outpost', shortLabel: 'C2', x: 21.8, z: -28.8, biome: 'cave' },
+  plot_cave_3: { label: 'High Crystal Terrace', shortLabel: 'C3', x: 36.5, z: -26.2, biome: 'cave' },
+  plot_cave_4: { label: 'Northeast Foothill Pad', shortLabel: 'C4', x: 11.8, z: -34.6, biome: 'cave' },
+  plot_outer_ne: { label: 'Eastern Frontier Vista', shortLabel: 'ONE', x: 37.4, z: -15.6, biome: 'cave' },
+  plot_outer_w: { label: 'West Frontier Commons', shortLabel: 'OW', x: -35.8, z: 6.8, biome: 'cave' },
 };
 
 export const STRUCTURE_META: Record<

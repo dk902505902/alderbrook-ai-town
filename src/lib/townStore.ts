@@ -148,7 +148,7 @@ function sanitizeRoads(val: unknown): string[] {
       }
     }
   }
-  return out.slice(0, 24);
+  return out.slice(0, 40);
 }
 
 function slugifyTownName(name: string): string {

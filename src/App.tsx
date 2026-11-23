@@ -464,6 +464,7 @@ export default function App() {
   const [topBarNewTownName, setTopBarNewTownName] = useState('');
 
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>('mayor_sterling');
+  const [povVillagerId, setPovVillagerId] = useState<AgentId | null>(null);
   const [selectedPlotId, setSelectedPlotId] = useState<PlotId | null>(null);
   const [followActive, setFollowActive] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(false);
@@ -558,6 +559,7 @@ export default function App() {
     setLogs(loaded.logs);
     setSelectedPlotId(null);
     setSelectedAgentId('mayor_sterling');
+    setPovVillagerId(null);
     setFollowActive(false);
     setFocusRequest({ type: 'reset', nonce: Date.now() });
   }, []);
@@ -1958,6 +1960,7 @@ export default function App() {
 
   const handleSelectSignalRelay = () => {
     setSelectedPlotId(null);
+    setPovVillagerId(null);
     setFollowActive(false);
     setMobileTab(null);
     setFocusRequest({ type: 'signal_relay', nonce: Date.now() });
@@ -2219,36 +2222,48 @@ export default function App() {
   const handleExpandBiome = useCallback(async (biome: BiomeId): Promise<MayorBuildResult> => {
     const snap = stateRef.current;
     const now = Date.now();
-    const meta = BIOME_META[biome];
-    setFocusRequest({ type: 'biome', id: biome, nonce: now });
+    let targetBiome: BiomeId = biome;
+    if (snap.unlockedBiomes.includes(targetBiome)) {
+      const nextLocked = ALL_BIOME_IDS.find((b) => !snap.unlockedBiomes.includes(b));
+      if (nextLocked) {
+        targetBiome = nextLocked;
+      }
+    }
 
-    if (snap.unlockedBiomes.includes(biome)) {
+    const meta = BIOME_META[targetBiome];
+    const plotCount = BIOME_PLOT_IDS[targetBiome].length;
+    setPovVillagerId(null);
+    setFocusRequest({ type: 'biome', id: targetBiome, nonce: now });
+
+    if (snap.unlockedBiomes.includes(targetBiome)) {
+      const totalPlots = getAvailablePlotIds(snap.unlockedBiomes).length;
       return {
         ok: true,
-        badge: `${meta.shortLabel} Already Open`,
-        detail: `${meta.label} is already unlocked with 2 build plots ready.`,
+        badge: `All ${totalPlots} Frontier Plots Open`,
+        detail: `${meta.label} and all 3 outer frontier biomes are unlocked (${totalPlots} total build plots across the expanded map).`,
       };
     }
 
-    const nextBiomes: BiomeId[] = [...snap.unlockedBiomes, biome];
-    const nextRoads = snap.roads.includes(`plaza_to_${biome}`)
+    const nextBiomes: BiomeId[] = [...snap.unlockedBiomes, targetBiome];
+    const nextRoads = snap.roads.includes(`plaza_to_${targetBiome}`)
       ? snap.roads
-      : [...snap.roads, `plaza_to_${biome}`];
+      : [...snap.roads, `plaza_to_${targetBiome}`].slice(0, 40);
+    const totalPlots = getAvailablePlotIds(nextBiomes).length;
 
     setUnlockedBiomes(nextBiomes);
     setRoads(nextRoads);
     soundscape.playBuildCompleteChime();
 
     const expandLog: TownLogItem = {
-      id: `biome-${biome}-${now}`,
+      id: `biome-${targetBiome}-${now}`,
       turnNumber: snap.turnCount,
       agentId: 'mayor_sterling',
       agentName: 'Mayor Sterling',
       rank: 1,
       location: 'town_hall',
       targetAgent: 'Architect Lyra',
-      thought: `Expanded ${snap.townName} frontier into ${meta.label} (+2 outer plots).`,
-      dialogue: `Frontier expanded! The ${meta.label} is now open with 2 new building plots and a starter cobblestone trail.`,
+      thought: `Expanded ${snap.townName} map borders into ${meta.label} (+${plotCount} outer plots; ${totalPlots} total).`,
+      dialogue: `Map borders pushed further! ${meta.label} is open with ${plotCount} new outer build plots, expanded camera range, and a cobblestone road.`,
       newTask: `Survey ${meta.label}`,
       timestampMs: now,
     };
@@ -2268,8 +2283,8 @@ export default function App() {
 
     return {
       ok: true,
-      badge: `Unlocked: ${meta.label}`,
-      detail: `${meta.label} is now open with 2 outer plots (${BIOME_PLOT_IDS[biome].join(', ')}).`,
+      badge: `Expanded: ${meta.label} (+${plotCount} plots)`,
+      detail: `${meta.label} unlocked with ${plotCount} outer build plots (${totalPlots} total plots) and widened map & camera bounds.`,
     };
   }, []);
 
@@ -2346,7 +2361,7 @@ export default function App() {
       };
     }
 
-    const nextRoads = [...snap.roads, roadId].slice(0, 24);
+    const nextRoads = [...snap.roads, roadId].slice(0, 40);
     setRoads(nextRoads);
     soundscape.playAgentChime(2);
 
@@ -2383,20 +2398,21 @@ export default function App() {
   const handleExtendRail = useCallback(async (): Promise<MayorBuildResult> => {
     const snap = stateRef.current;
     const now = Date.now();
+    setPovVillagerId(null);
     setFocusRequest({ type: 'rail_spur', nonce: now });
 
     if (snap.railSpurBuilt) {
       setTriggerTrainNonce(now);
       return {
         ok: true,
-        badge: 'Frontier Rail Spur Active',
-        detail: 'The East Frontier Rail Spur & Depot are already operational — summoning the steam express!',
+        badge: 'Outer Railway Loop Active',
+        detail: 'The connected Outer Railway Loop & Outer Frontier Station are open — routing the steam express along the full loop!',
       };
     }
 
     const nextRoads = snap.roads.includes('plaza_to_spur')
       ? snap.roads
-      : [...snap.roads, 'plaza_to_spur'].slice(0, 24);
+      : [...snap.roads, 'plaza_to_spur'].slice(0, 40);
 
     setRailSpurBuilt(true);
     setRoads(nextRoads);
@@ -2411,9 +2427,9 @@ export default function App() {
       rank: 2,
       location: 'plaza',
       targetAgent: 'Mayor Sterling',
-      thought: 'Extended East Frontier Railway Spur and built secondary wooden Depot platform.',
-      dialogue: 'All aboard! The East Frontier Railway Spur & Depot Stop are open for the steam express!',
-      newTask: 'Inspect Frontier Depot',
+      thought: 'Connected the East Outer Railway Loop with instanced sleepers, twin rails, and Outer Frontier Station.',
+      dialogue: 'All aboard! The connected Outer Railway Loop & Outer Frontier Station are open — our steam train now runs the extended circuit and stops 10s at both stations!',
+      newTask: 'Inspect Outer Frontier Station',
       timestampMs: now,
     };
     setLogs((prev) => [railLog, ...prev].slice(0, 50));
@@ -2432,8 +2448,8 @@ export default function App() {
 
     return {
       ok: true,
-      badge: 'Built: Frontier Rail Spur & Depot',
-      detail: 'Extended branch railway track and secondary Depot platform; express train dispatched!',
+      badge: 'Built: Outer Railway Loop & Station',
+      detail: 'Connected extended railway loop & Outer Frontier Station — the steam express now drives the new track and stops 10s at each station!',
     };
   }, []);
 
@@ -2497,12 +2513,23 @@ export default function App() {
     setSelectedAgentId(id);
     setSelectedPlotId(null);
     setTownHallPromptOpen(false);
+    setPovVillagerId(null);
     setFollowActive(false);
     setFocusRequest({ type: 'agent', id, nonce: Date.now() });
   };
 
+  const handleTogglePovAgent = useCallback((id: AgentId) => {
+    setSelectedAgentId(id);
+    setSelectedPlotId(null);
+    setTownHallPromptOpen(false);
+    setFollowActive(false);
+    setMobileTab(null);
+    setPovVillagerId((prev) => (prev === id ? null : id));
+  }, []);
+
   const handleFocusLocation = (id: LocationId) => {
     setSelectedPlotId(null);
+    setPovVillagerId(null);
     setTownHallPromptOpen(id === 'town_hall');
     setFollowActive(false);
     setFocusRequest({ type: 'location', id, nonce: Date.now() });
@@ -2853,6 +2880,7 @@ export default function App() {
 
   const handleSelectPlot = (plotId: PlotId) => {
     setSelectedPlotId(plotId);
+    setPovVillagerId(null);
     setFollowActive(false);
     setFocusRequest({ type: 'plot', id: plotId, nonce: Date.now() });
   };
@@ -2888,6 +2916,7 @@ export default function App() {
         railSpurBuilt={railSpurBuilt}
         activeAgentId={activeAgentId}
         selectedAgentId={selectedAgentId}
+        povVillagerId={povVillagerId}
         selectedPlotId={selectedPlotId}
         timeOfDay={timeOfDay}
         weather={weather}
@@ -2899,6 +2928,8 @@ export default function App() {
         signalRelayPulseNonce={signalRelayPulseNonce}
         triggerTrainNonce={triggerTrainNonce}
         onSelectAgent={handleSelectAgent}
+        onTogglePovAgent={handleTogglePovAgent}
+        onExitPov={() => setPovVillagerId(null)}
         onSelectLocation={(loc) => {
           handleFocusLocation(loc);
           setErrorBanner(null);
@@ -3223,8 +3254,15 @@ export default function App() {
             onSelectSignalRelay={handleSelectSignalRelay}
             onFocusBiome={(biome) => {
               setSelectedPlotId(null);
+              setPovVillagerId(null);
               setFollowActive(false);
               setFocusRequest({ type: 'biome', id: biome, nonce: Date.now() });
+            }}
+            onFocusRailSpur={() => {
+              setSelectedPlotId(null);
+              setPovVillagerId(null);
+              setFollowActive(false);
+              setFocusRequest({ type: 'rail_spur', nonce: Date.now() });
             }}
           />
         )}
@@ -3244,7 +3282,10 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setFollowActive((f) => !f)}
+            onClick={() => {
+              setPovVillagerId(null);
+              setFollowActive((f) => !f);
+            }}
             aria-label={followActive ? 'Disable follow cam' : 'Enable follow cam'}
             className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors md:hidden ${
               followActive
@@ -3279,6 +3320,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              setPovVillagerId(null);
               setFollowActive(false);
               setFocusRequest({ type: 'reset', nonce: Date.now() });
             }}
@@ -3322,14 +3364,17 @@ export default function App() {
                 providerConfig={providerConfig}
                 activeAgentId={activeAgentId}
                 selectedAgentId={selectedAgentId}
+                povVillagerId={povVillagerId}
                 isHiring={isHiring}
                 onSelectAgent={handleSelectAgent}
+                onTogglePovAgent={handleTogglePovAgent}
                 onSendAgentNote={handleSendAgentNote}
                 onHireWorker={handleHireWorker}
                 onFocusLocation={handleFocusLocation}
                 onSelectPlot={handleSelectPlot}
                 onSelectSignalRelay={handleSelectSignalRelay}
                 onResetCamera={() => {
+                  setPovVillagerId(null);
                   setFollowActive(false);
                   setSelectedPlotId(null);
                   setFocusRequest({ type: 'reset', nonce: Date.now() });
@@ -3455,8 +3500,10 @@ export default function App() {
                   providerConfig={providerConfig}
                   activeAgentId={activeAgentId}
                   selectedAgentId={selectedAgentId}
+                  povVillagerId={povVillagerId}
                   isHiring={isHiring}
                   onSelectAgent={handleSelectAgent}
+                  onTogglePovAgent={handleTogglePovAgent}
                   onSendAgentNote={handleSendAgentNote}
                   onHireWorker={handleHireWorker}
                   onFocusLocation={(loc) => {
@@ -3469,6 +3516,7 @@ export default function App() {
                   }}
                   onSelectSignalRelay={handleSelectSignalRelay}
                   onResetCamera={() => {
+                    setPovVillagerId(null);
                     setFollowActive(false);
                     setSelectedPlotId(null);
                     setFocusRequest({ type: 'reset', nonce: Date.now() });

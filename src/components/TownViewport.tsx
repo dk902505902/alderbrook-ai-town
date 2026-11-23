@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Hammer, X } from 'lucide-react';
+import { Eye, EyeOff, Hammer, X } from 'lucide-react';
 import {
   TownSceneController,
   type AgentWorldCoord,
@@ -32,6 +32,7 @@ interface TownViewportProps {
   railSpurBuilt: boolean;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
+  povVillagerId: AgentId | null;
   selectedPlotId: PlotId | null;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
@@ -56,6 +57,8 @@ interface TownViewportProps {
   signalRelayPulseNonce?: number;
   triggerTrainNonce?: number;
   onSelectAgent: (agentId: AgentId) => void;
+  onTogglePovAgent: (agentId: AgentId) => void;
+  onExitPov: () => void;
   onSelectLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
@@ -76,6 +79,7 @@ export function TownViewport({
   railSpurBuilt,
   activeAgentId,
   selectedAgentId,
+  povVillagerId,
   selectedPlotId,
   timeOfDay,
   weather,
@@ -87,6 +91,8 @@ export function TownViewport({
   signalRelayPulseNonce = 0,
   triggerTrainNonce = 0,
   onSelectAgent,
+  onTogglePovAgent,
+  onExitPov,
   onSelectLocation,
   onSelectPlot,
   onSelectSignalRelay,
@@ -133,6 +139,7 @@ export function TownViewport({
   };
   const callbacksRef = useRef({
     onSelectAgent,
+    onTogglePovAgent,
     onSelectLocation,
     onSelectPlot,
     onSelectSignalRelay,
@@ -141,6 +148,7 @@ export function TownViewport({
   });
   callbacksRef.current = {
     onSelectAgent,
+    onTogglePovAgent,
     onSelectLocation,
     onSelectPlot,
     onSelectSignalRelay,
@@ -156,6 +164,7 @@ export function TownViewport({
 
     const controller = new TownSceneController(container, agents, {
       onSelectAgent: (id) => callbacksRef.current.onSelectAgent(id),
+      onToggleAgentPov: (id) => callbacksRef.current.onTogglePovAgent(id),
       onSelectLocation: (id) => callbacksRef.current.onSelectLocation(id),
       onSelectPlot: (id) => callbacksRef.current.onSelectPlot(id),
       onSelectSignalRelay: () => callbacksRef.current.onSelectSignalRelay?.(),
@@ -266,6 +275,11 @@ export function TownViewport({
   }, [followActive]);
 
   useEffect(() => {
+    if (loadedTownKeyRef.current !== currentTownKey) return;
+    controllerRef.current?.setPovAgent(povVillagerId);
+  }, [povVillagerId, currentTownKey]);
+
+  useEffect(() => {
     if (!communicationEvent) return;
     controllerRef.current?.triggerCommunicationArc(
       communicationEvent.speakerId,
@@ -308,6 +322,7 @@ export function TownViewport({
   const selectedStructure = selectedPlotId
     ? structures.find((s) => s.plotId === selectedPlotId) || null
     : null;
+  const povAgent = povVillagerId ? agents.find((a) => a.id === povVillagerId) || null : null;
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-slate-900">
@@ -331,7 +346,8 @@ export function TownViewport({
               ref={(el) => {
                 labelRefs.current[agent.id] = el;
               }}
-              onClick={() => onSelectAgent(agent.id)}
+              onClick={() => onTogglePovAgent(agent.id)}
+              title={`Tap to view through ${agent.name}'s eyes (First-Person POV)`}
               style={{ opacity: 0 }}
               className="absolute top-0 left-0 flex flex-col items-center transition-opacity duration-150 focus:outline-none"
             >
@@ -360,6 +376,34 @@ export function TownViewport({
           );
         })}
       </div>
+
+      {/* Floating First-Person POV Indicator & 1-Tap Exit Button */}
+      {povAgent && (
+        <div className="fixed top-18 left-1/2 z-25 flex -translate-x-1/2 items-center gap-2.5 rounded-2xl border border-amber-400/50 bg-slate-950/95 px-3 py-2 shadow-2xl md:top-20">
+          <div className="flex items-center gap-2 text-xs">
+            <Eye className="h-4 w-4 shrink-0 text-amber-300" />
+            <div className="leading-tight">
+              <div className="flex items-center gap-1.5 font-display font-semibold text-white">
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: povAgent.accentColor }}
+                  aria-hidden="true"
+                />
+                <span>{povAgent.name}</span>
+              </div>
+              <div className="text-[11px] text-slate-400">First-Person POV · {povAgent.role}</div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onExitPov}
+            className="inline-flex min-h-[38px] shrink-0 items-center gap-1.5 rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400"
+          >
+            <EyeOff className="h-3.5 w-3.5" />
+            <span>Exit POV</span>
+          </button>
+        </div>
+      )}
 
       {/* Selected Building Plot Quick Inspector */}
       {selectedPlotId && (

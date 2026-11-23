@@ -147,10 +147,10 @@ interface BrowserSpeechRecognition {
 }
 
 const BASE_STARTER_CHIPS = [
-  'Build a Research Lab',
-  'Expand map to Cave',
-  'Build a road',
+  'Expand map further',
   'Extend train track',
+  'Build a Research Lab',
+  'Build a road',
   'Status report',
 ];
 
@@ -433,14 +433,14 @@ function parseLocalIntent(
     };
   }
 
-  // 3) Extend Train Track / Railway Spur
+  // 3) Extend Train Track / Connected Outer Railway Loop
   if (
-    /\b(train|rail|railway|track|tracks|spur|depot|express)\b/.test(lower) &&
-    /\b(extend|build|add|expand|lay|connect|spur|new stop|station)\b/.test(lower)
+    /\b(train|rail|railway|track|tracks|spur|depot|express|loop)\b/.test(lower) &&
+    /\b(extend|build|add|expand|lay|connect|spur|new stop|station|loop)\b/.test(lower)
   ) {
     return {
       reply:
-        'Right away! Our track crew is laying the East Frontier Railway Spur and building a secondary wooden Depot stop.',
+        'Right away! Our track crew is laying the connected East Outer Railway Loop and building the Outer Frontier Station — our steam train will drive right onto the new tracks!',
       action: { type: 'extend_rail' },
     };
   }
@@ -461,18 +461,23 @@ function parseLocalIntent(
     };
   }
 
-  // 5) Expand / Unlock Outer Biomes (Dense Forest, Desert Dunes, Crystal Mountain Cave)
+  // 5) Expand Map Further / Expand City / Unlock Outer Biomes (Dense Forest, Desert Dunes, Crystal Mountain Cave)
   if (
-    /\b(expand|unlock|open|explore|discover|reveal|add)\b/.test(lower) &&
-    /\b(map|biome|biomes|frontier|forest|woods|desert|dunes|cave|crystal|mountain|outer|territory)\b/.test(
+    /\b(expand|unlock|open|explore|discover|reveal|grow|enlarge|add)\b/.test(lower) &&
+    /\b(map|city|town|further|biome|biomes|frontier|forest|woods|desert|dunes|cave|crystal|mountain|outer|territory|district|plots)\b/.test(
       lower,
     )
   ) {
     const mentioned = detectMentionedBiome(text);
     const nextLocked = ALL_BIOME_IDS.find((b) => !unlockedBiomes.includes(b));
     const chosenBiome = mentioned ?? nextLocked ?? 'forest';
+    const remainingOpen = getAvailablePlotIds(
+      unlockedBiomes.includes(chosenBiome) ? unlockedBiomes : [...unlockedBiomes, chosenBiome],
+    ).length;
     return {
-      reply: `Surveyors dispatched! We are expanding the frontier into the ${BIOME_META[chosenBiome].label} and opening new outer building plots.`,
+      reply: nextLocked
+        ? `Surveyors dispatched! We are expanding our map further into the ${BIOME_META[chosenBiome].label}, pushing back the frontier bounds and opening ${BIOME_META[chosenBiome].plots.length} outer building plots (${remainingOpen} total plots across town).`
+        : `All 3 outer frontier biomes are already wide open with ${remainingOpen} buildable plots! Ask me to build in any outer district or turn Auto mode ON.`,
       action: { type: 'expand_biome', biome: chosenBiome },
     };
   }
