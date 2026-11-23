@@ -463,6 +463,7 @@ export interface AgentTurnResponse {
   build_order?: BuildOrderResult;
   visit_plot_id?: PlotId | null;
   hired_worker?: HiredWorkerSpec | null;
+  unhired_worker?: { agent_id: string; reason: string } | null;
 }
 
 export interface WeatherSeasonEffect {

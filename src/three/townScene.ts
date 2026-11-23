@@ -38,11 +38,14 @@ import {
 } from './townEnvironment.ts';
 import { buildTownLifeAndDecor, type TownLifeHandle } from './townLife.ts';
 import {
+  BATTLE_FOCUS_TARGET,
   buildTownRaidersSystem,
   RAIDER_CAMP_POS,
   type DefenseTowerAnchor,
+  type RaiderRadarSnapshot,
   type TownRaidersHandle,
 } from './townRaiders.ts';
+export type { RaiderRadarSnapshot } from './townRaiders.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import {
   buildCompletedStructureMesh,
@@ -83,6 +86,7 @@ export interface TownSceneCallbacks {
   onContextRestored?: () => void;
   onLabelUpdate?: (positions: Record<AgentId, ProjectedLabel>) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
+  onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
   onUserOrbitStart?: () => void;
   onRaiderImpact?: (x: number, z: number) => void;
   onDefenseHitCamp?: (damage: number) => void;
@@ -1719,6 +1723,8 @@ export class TownSceneController {
   private activeAgentId: AgentId | null = null;
   private followActive = false;
   private cameraTargetGoal: THREE.Vector3 | null = null;
+  private cameraPosGoal: THREE.Vector3 | null = null;
+  private lastEmittedRaiderActive = false;
 
   // Unified Camera Modes (Orbit, Villager POV, Train Cab/Passenger POV, Free-Roam Walk, Scenic Tour)
   private cameraMode: CameraMode = 'orbit';
@@ -1849,6 +1855,7 @@ export class TownSceneController {
     };
     this.controls.addEventListener('start', () => {
       this.cameraTargetGoal = null;
+      this.cameraPosGoal = null;
       this.povReturnActive = false;
       if (this.followActive) {
         this.followActive = false;
@@ -2519,6 +2526,7 @@ export class TownSceneController {
     this.freeRoamJoyZ = 0;
     this.freeRoamKeys.clear();
     this.freeRoamDragActive = false;
+    this.cameraPosGoal = null;
 
     if (mode === 'villager_pov') {
       const targetRig = resolvedAgentId ? this.rigs.get(resolvedAgentId) : null;
@@ -3247,6 +3255,7 @@ export class TownSceneController {
   public focusLocation(locationId: LocationId): void {
     const cfg = LANDMARKS[locationId];
     if (cfg) {
+      this.cameraPosGoal = null;
       this.cameraTargetGoal = cfg.lookTarget.clone();
       this.focusedCutawayId =
         locationId === 'town_hall' || locationId === 'workshop'
@@ -3258,6 +3267,7 @@ export class TownSceneController {
   public focusPlot(plotId: PlotId): void {
     const meta = PLOT_META[plotId];
     if (meta) {
+      this.cameraPosGoal = null;
       this.cameraTargetGoal = new THREE.Vector3(meta.x, 1.1, meta.z);
       this.focusedCutawayId = `plot:${plotId}`;
     }
@@ -3265,26 +3275,38 @@ export class TownSceneController {
 
   public focusSignalRelay(): void {
     this.followActive = false;
+    this.cameraPosGoal = null;
     this.focusedCutawayId = 'landmark:signal_relay';
     this.cameraTargetGoal = SIGNAL_RELAY_POS.clone().setY(1.4);
   }
 
   public focusRaiderCamp(): void {
+    if (this.cameraMode !== 'orbit') {
+      this.setCameraMode('orbit');
+    }
+    this.povReturnActive = false;
     this.followActive = false;
     this.focusedCutawayId = null;
-    this.cameraTargetGoal = RAIDER_CAMP_POS.clone().setY(1.2);
+    // Frame both the Raider Siege Camp + forward cannons/barricades + marching squad AND the SW town defense line
+    this.cameraTargetGoal = BATTLE_FOCUS_TARGET.clone();
+    const isNarrowPortrait = this.camera.aspect < 0.85;
+    this.cameraPosGoal = isNarrowPortrait
+      ? new THREE.Vector3(-2.8, 15.2, 26.8)
+      : new THREE.Vector3(-4.2, 11.8, 22.6);
   }
 
   public focusBiome(biomeId: BiomeId): void {
     const meta = BIOME_META[biomeId];
     if (!meta) return;
     this.followActive = false;
+    this.cameraPosGoal = null;
     this.focusedCutawayId = biomeId === 'cave' ? 'biome:cave' : null;
     this.cameraTargetGoal = new THREE.Vector3(meta.center.x, 1.4, meta.center.z);
   }
 
   public focusRailSpur(): void {
     this.followActive = false;
+    this.cameraPosGoal = null;
     this.focusedCutawayId = null;
     if (this.railwayHandle) {
       this.cameraTargetGoal = this.railwayHandle.frontierDepotFocusTarget.clone();
@@ -3301,6 +3323,7 @@ export class TownSceneController {
 
   public resetCamera(): void {
     this.focusedCutawayId = null;
+    this.cameraPosGoal = null;
     this.cameraTargetGoal = new THREE.Vector3(0, 0.8, 0);
   }
 
@@ -3722,8 +3745,16 @@ export class TownSceneController {
           this.controls.target.x = THREE.MathUtils.damp(this.controls.target.x, this.cameraTargetGoal.x, 6, delta);
           this.controls.target.y = THREE.MathUtils.damp(this.controls.target.y, this.cameraTargetGoal.y, 6, delta);
           this.controls.target.z = THREE.MathUtils.damp(this.controls.target.z, this.cameraTargetGoal.z, 6, delta);
-          if (this.controls.target.distanceTo(this.cameraTargetGoal) < 0.04) {
+          if (this.controls.target.distanceTo(this.cameraTargetGoal) < 0.05) {
             this.cameraTargetGoal = null;
+          }
+        }
+        if (this.cameraPosGoal) {
+          this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, this.cameraPosGoal.x, 5.2, delta);
+          this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, this.cameraPosGoal.y, 5.2, delta);
+          this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, this.cameraPosGoal.z, 5.2, delta);
+          if (this.camera.position.distanceTo(this.cameraPosGoal) < 0.12) {
+            this.cameraPosGoal = null;
           }
         }
 
@@ -4075,6 +4106,20 @@ export class TownSceneController {
       if (elapsed - this.lastMinimapEmit > 0.12) {
         this.lastMinimapEmit = elapsed;
         this.callbacks.onMinimapUpdate?.(worldCoords);
+        if (this.raidState.active && this.raiderHandle) {
+          const snap = this.raiderHandle.getRadarSnapshot();
+          this.lastEmittedRaiderActive = true;
+          this.callbacks.onRaiderRadarUpdate?.({
+            campX: snap.campX,
+            campZ: snap.campZ,
+            siegeBuiltCount: snap.siegeBuiltCount,
+            activeCannons: snap.activeCannons,
+            squad: snap.squad.map((d) => ({ x: d.x, z: d.z, isCaptain: d.isCaptain })),
+          });
+        } else if (this.lastEmittedRaiderActive) {
+          this.lastEmittedRaiderActive = false;
+          this.callbacks.onRaiderRadarUpdate?.(null);
+        }
       }
 
       if (this.lifeHandle) {
@@ -4118,11 +4163,15 @@ export class TownSceneController {
           delta,
           elapsed,
           active: this.raidState.active,
+          waveNumber: this.raidState.waveNumber,
           tactic: this.raidState.tactic,
           campHpRatio: this.raidState.campHp / Math.max(1, this.raidState.campMaxHp),
           villagerCoords: this.raiderVillagerCoords,
           defenseTowers: this.defenseTowers,
           vanceDefending,
+          vancePos: vanceRig
+            ? { x: vanceRig.root.position.x, z: vanceRig.root.position.z }
+            : null,
           onRaiderImpact: (x, z) => this.callbacks.onRaiderImpact?.(x, z),
           onDefenseHitCamp: (dmg) => this.callbacks.onDefenseHitCamp?.(dmg),
         });

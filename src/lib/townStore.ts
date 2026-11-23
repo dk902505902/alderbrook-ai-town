@@ -1228,6 +1228,37 @@ export async function persistHiredWorkers(
   }
 }
 
+export async function persistUnhiredWorker(
+  uid: string,
+  agentId: string,
+  logEntry: TownLogItem | null,
+  townId: string = uid,
+): Promise<void> {
+  if (!townId || townId.startsWith('local_') || !agentId || CORE_AGENT_SET.has(agentId)) return;
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'towns', townId, 'agents', agentId));
+  if (logEntry) {
+    batch.set(doc(db, 'towns', townId, 'logs', logEntry.id), {
+      ownerId: uid,
+      turnNumber: logEntry.turnNumber,
+      agentId: clampStr(logEntry.agentId, 40),
+      agentName: clampStr(logEntry.agentName, 60),
+      rank: logEntry.rank,
+      location: logEntry.location,
+      targetAgent: clampStr(logEntry.targetAgent, 60),
+      thought: clampStr(logEntry.thought, 500),
+      dialogue: clampStr(logEntry.dialogue, 300),
+      newTask: clampStr(logEntry.newTask, 240),
+      createdAt: serverTimestamp(),
+    });
+  }
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `towns/${townId}/agents/${agentId}`);
+  }
+}
+
 export async function persistGodDecree(
   uid: string,
   decreeText: string,

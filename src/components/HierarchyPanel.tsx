@@ -18,12 +18,14 @@ import {
   Snowflake,
   Sun,
   Trees,
+  UserMinus,
   UserPlus,
   Wheat,
 } from 'lucide-react';
 import { formatCompactModelName, resolveInferenceConfig } from '../lib/aiRouting.ts';
 import { getAgentTopBonds } from '../lib/townSystems.ts';
 import {
+  CORE_AGENT_IDS,
   getStructureDisplayLabel,
   getWeatherSeasonEffect,
   LOCATION_LABELS,
@@ -65,6 +67,7 @@ interface HierarchyPanelProps {
   onChatVillager?: (agentId: AgentId) => void;
   onSendAgentNote: (agentId: AgentId, note: string) => void;
   onHireWorker: (prompt: string) => void;
+  onUnhireWorker?: (agentId: AgentId) => void;
   onFocusLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
@@ -111,6 +114,7 @@ export function HierarchyPanel({
   onChatVillager,
   onSendAgentNote,
   onHireWorker,
+  onUnhireWorker,
   onFocusLocation,
   onSelectPlot,
   onSelectSignalRelay,
@@ -119,6 +123,8 @@ export function HierarchyPanel({
 }: HierarchyPanelProps) {
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const [hirePrompt, setHirePrompt] = useState('');
+  const [confirmUnhireId, setConfirmUnhireId] = useState<AgentId | null>(null);
+  const coreAgentSet = new Set<string>(CORE_AGENT_IDS);
 
   const metricRows = [
     { label: 'Prosperity', value: metrics.prosperity, barClass: 'bg-amber-400' },
@@ -548,6 +554,43 @@ export function HierarchyPanel({
                       </button>
                     )}
                   </div>
+
+                  {/* Mayor Dismissal / Unhire Control (Hired Specialists Only — Core Council Protected) */}
+                  {onUnhireWorker && !coreAgentSet.has(agent.id) && (
+                    <div className="mt-2 flex items-center gap-1.5">
+                      {confirmUnhireId === agent.id ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmUnhireId(null);
+                              onUnhireWorker(agent.id);
+                            }}
+                            className="inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-rose-400/60 bg-rose-600 px-2.5 text-xs font-semibold text-white hover:bg-rose-500"
+                          >
+                            <UserMinus className="h-3.5 w-3.5" />
+                            <span>Confirm Unhire {shortName}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmUnhireId(null)}
+                            className="inline-flex min-h-[34px] items-center justify-center rounded-lg border border-white/15 bg-slate-900 px-2.5 text-xs font-medium text-slate-300 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmUnhireId(agent.id)}
+                          className="inline-flex min-h-[34px] w-full items-center justify-center gap-1.5 rounded-lg border border-rose-400/30 bg-rose-500/10 px-2.5 text-xs font-medium text-rose-200 transition-colors hover:bg-rose-500/20"
+                        >
+                          <UserMinus className="h-3.5 w-3.5" />
+                          <span>Unhire Specialist</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {/* Direct Agent Whisper Form */}
                   <form

@@ -76,6 +76,7 @@ import {
   persistEnvironmentSettings,
   persistGodDecree,
   persistHiredWorkers,
+  persistUnhiredWorker,
   persistRemoteStructureAction,
   persistStructureDelete,
   persistStructureRename,
@@ -110,7 +111,7 @@ import {
   saveWebSearchConfig,
   type WebSearchConfig,
 } from './lib/webSearch.ts';
-import type { AgentWorldCoord } from './three/townScene.ts';
+import type { AgentWorldCoord, RaiderRadarSnapshot } from './three/townScene.ts';
 import {
   ALL_BIOME_IDS,
   ALL_PLOT_IDS,
@@ -118,6 +119,7 @@ import {
   ALL_TOWN_THEMES,
   BIOME_META,
   BIOME_PLOT_IDS,
+  CORE_AGENT_IDS,
   createDefaultEnemyRaidState,
   createHiredAgentRecord,
   DEFAULT_PROVIDER_CONFIG,
@@ -554,6 +556,7 @@ export default function App() {
   const [minimapCoords, setMinimapCoords] = useState<Partial<Record<AgentId, AgentWorldCoord>>>({});
   const minimapCoordsRef = useRef<Partial<Record<AgentId, AgentWorldCoord>>>({});
   minimapCoordsRef.current = minimapCoords;
+  const [raiderRadar, setRaiderRadar] = useState<RaiderRadarSnapshot | null>(null);
   const lastRaiderInjuryMsRef = useRef<number>(0);
   const lastDefenseAutoOrderMsRef = useRef<number>(0);
   const [communicationEvent, setCommunicationEvent] = useState<{
@@ -1250,11 +1253,50 @@ export default function App() {
         playBuildFanfare = true;
       }
 
+      // Autonomous Mayor Sterling unhiring when trimming upkeep or reorganizing staff
+      const coreCouncilSet = new Set<string>(CORE_AGENT_IDS);
+      let unhiredPayload: { worker: AgentRecord; log: TownLogItem } | null = null;
+      if (
+        result.unhired_worker &&
+        currentAgent.id === 'mayor_sterling' &&
+        !coreCouncilSet.has(result.unhired_worker.agent_id)
+      ) {
+        const dismissed = snap.agents.find(
+          (a) => a.id === result.unhired_worker?.agent_id && !coreCouncilSet.has(a.id),
+        );
+        if (dismissed) {
+          const dismissReason =
+            result.unhired_worker.reason.trim() ||
+            'Reallocating municipal staff and budget.';
+          const dismissLog: TownLogItem = {
+            id: `unhire-${nextTurnNumber}-${now + 3}`,
+            turnNumber: nextTurnNumber,
+            agentId: 'mayor_sterling',
+            agentName: 'Mayor Sterling',
+            rank: 1,
+            location: updatedAgent.location,
+            targetAgent: dismissed.name,
+            thought: `Dismissed ${dismissed.name} (${dismissed.role}): ${dismissReason}`,
+            dialogue: `With gratitude for your service to ${snap.townName}, ${dismissed.name}, I am releasing you from your ${dismissed.role} post — ${dismissReason}`,
+            newTask: `Reorganized town staff after dismissing ${dismissed.name}`,
+            timestampMs: now + 3,
+            modelUsed: actualModelUsed,
+            providerUsed: resolvedInference.providerId,
+            providerLabel: resolvedInference.providerLabel,
+            keySlot: actualKeySlot,
+          };
+          unhiredPayload = { worker: dismissed, log: dismissLog };
+        }
+      }
+
       const nextAgentsList = [
-        ...snap.agents.map((a) => (a.id === updatedAgent.id ? updatedAgent : a)),
+        ...snap.agents
+          .filter((a) => !unhiredPayload || a.id !== unhiredPayload.worker.id)
+          .map((a) => (a.id === updatedAgent.id ? updatedAgent : a)),
         ...(hiredPayload ? hiredPayload.workers : []),
       ].slice(0, MAX_TOWN_AGENTS);
-      const nextAgentIndex = (snap.activeAgentIndex + 1) % nextAgentsList.length;
+      const nextAgentIndex =
+        (snap.activeAgentIndex + 1) % Math.max(1, nextAgentsList.length);
 
       // Update Town Treasury & 4-Resource Supply Chain from live economy
       const nextWeatherForEcon = weatherShift ? weatherShift.weather : snap.weather;
@@ -1329,6 +1371,7 @@ export default function App() {
       }
       setLogs((prev) => {
         const additions = [
+          ...(unhiredPayload ? [unhiredPayload.log] : []),
           ...(hiredPayload ? hiredPayload.logs : []),
           ...(weatherShift ? [weatherShift.logEntry] : []),
           logEntry,
@@ -1343,6 +1386,17 @@ export default function App() {
       }
       if (weatherShift) {
         setWeather(weatherShift.weather);
+      }
+      if (unhiredPayload) {
+        const dismissedId = unhiredPayload.worker.id;
+        setPovVillagerId((curr) => {
+          if (curr === dismissedId) {
+            setCameraMode('orbit');
+            return null;
+          }
+          return curr;
+        });
+        setChatVillagerId((curr) => (curr === dismissedId ? null : curr));
       }
       setSelectedAgentId(hiredPayload ? hiredPayload.workers[0].id : updatedAgent.id);
       setRecentSpeakerId(updatedAgent.id);
@@ -1415,6 +1469,14 @@ export default function App() {
           hiredPayload,
           snap.activeTownId,
         );
+        if (unhiredPayload) {
+          await persistUnhiredWorker(
+            snap.user.uid,
+            unhiredPayload.worker.id,
+            unhiredPayload.log,
+            snap.activeTownId,
+          );
+        }
       }
     } catch (error) {
       setErrorBanner(
@@ -1746,6 +1808,133 @@ export default function App() {
       setIsHiring(false);
     }
   }, []);
+
+  const handleUnhireWorker = useCallback(
+    async (targetHintOrId: string, reason?: string): Promise<MayorBuildResult> => {
+      const snap = stateRef.current;
+      const coreSet = new Set<string>(CORE_AGENT_IDS);
+      const hiredPool = snap.agents.filter((a) => !coreSet.has(a.id));
+      const rawHint = targetHintOrId.trim();
+      const hint = rawHint.toLowerCase();
+
+      if (hiredPool.length === 0) {
+        return {
+          ok: false,
+          badge: 'No Hired Staff to Unhire',
+          detail:
+            'Only the 5 founding council officers are on duty right now — core council members cannot be unhired.',
+        };
+      }
+
+      const isGeneric =
+        !hint ||
+        /^(someone|anyone|somebody|anybody|a worker|worker|villager|specialist|staff|one|random|redundant)$/.test(
+          hint,
+        );
+
+      let target: AgentRecord | undefined;
+      if (!isGeneric) {
+        target =
+          hiredPool.find((a) => a.id.toLowerCase() === hint) ??
+          hiredPool.find((a) => a.name.toLowerCase() === hint) ??
+          hiredPool.find(
+            (a) =>
+              a.name.toLowerCase().includes(hint) ||
+              hint.includes(a.name.toLowerCase()) ||
+              a.role.toLowerCase().includes(hint) ||
+              hint.includes(a.role.toLowerCase()),
+          );
+
+        if (!target) {
+          const coreMatch = snap.agents.find(
+            (a) =>
+              coreSet.has(a.id) &&
+              (a.id.toLowerCase() === hint ||
+                a.name.toLowerCase().includes(hint) ||
+                hint.includes(a.name.toLowerCase()) ||
+                a.role.toLowerCase().includes(hint)),
+          );
+          if (coreMatch) {
+            return {
+              ok: false,
+              badge: 'Core Council Protected',
+              detail: `${coreMatch.name} (${coreMatch.role}) is a founding council officer and cannot be unhired.`,
+            };
+          }
+          const availableNames = hiredPool
+            .map((a) => `${a.name} (${a.role})`)
+            .join(', ');
+          return {
+            ok: false,
+            badge: 'Worker Not Found',
+            detail: `No hired specialist matched "${rawHint}". Currently hired: ${availableNames}.`,
+          };
+        }
+      } else {
+        // Auto-select best candidate: prefer unassigned specialist, else most recently hired
+        target =
+          hiredPool.find((a) => !a.assignedPlotId) ??
+          hiredPool[hiredPool.length - 1];
+      }
+
+      const now = Date.now();
+      const dismissReason =
+        reason?.trim() || 'Mayor Sterling adjusted the municipal roster.';
+      const nextAgentsList = snap.agents.filter((a) => a.id !== target.id);
+      const nextActiveIdx = snap.activeAgentIndex % Math.max(1, nextAgentsList.length);
+
+      const dismissLog: TownLogItem = {
+        id: `unhire-${snap.turnCount}-${now}`,
+        turnNumber: snap.turnCount,
+        agentId: 'mayor_sterling',
+        agentName: 'Mayor Sterling',
+        rank: 1,
+        location: 'town_hall',
+        targetAgent: target.name,
+        thought: `Dismissed ${target.name} (${target.role}): ${dismissReason}`,
+        dialogue: `Thank you for your contributions to ${snap.townName}, ${target.name}. Your ${target.role} post has been respectfully concluded.`,
+        newTask: `Updated town roster (${nextAgentsList.length}/${MAX_TOWN_AGENTS})`,
+        timestampMs: now,
+        modelUsed: 'mayor-roster',
+        providerUsed: 'local',
+        providerLabel: 'Mayor Roster',
+      };
+
+      setAgents(nextAgentsList);
+      setActiveAgentIndex(nextActiveIdx);
+      setLogs((prev) => [dismissLog, ...prev].slice(0, 50));
+      setSelectedAgentId((curr) => (curr === target.id ? 'mayor_sterling' : curr));
+      setPovVillagerId((curr) => {
+        if (curr === target.id) {
+          setCameraMode('orbit');
+          return null;
+        }
+        return curr;
+      });
+      setChatVillagerId((curr) => (curr === target.id ? null : curr));
+      soundscape.playAgentChime(1);
+
+      if (snap.user) {
+        try {
+          await persistUnhiredWorker(
+            snap.user.uid,
+            target.id,
+            dismissLog,
+            snap.activeTownId,
+          );
+        } catch (err) {
+          setAsyncError(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+
+      return {
+        ok: true,
+        badge: `Unhired: ${target.name} (${target.role})`,
+        detail: `Mayor Sterling dismissed ${target.name} (${target.role}) with thanks. Town roster is now ${nextAgentsList.length}/${MAX_TOWN_AGENTS}.`,
+      };
+    },
+    [],
+  );
 
   const handleChangeTimeOfDay = async (tod: TimeOfDay) => {
     setTimeOfDay(tod);
@@ -4490,6 +4679,14 @@ export default function App() {
     setMobileTab((prev) => (prev === tab ? null : tab));
   };
 
+  const handleFocusBattle = useCallback(() => {
+    setSelectedPlotId(null);
+    setCameraMode('orbit');
+    setPovVillagerId(null);
+    setFollowActive(false);
+    setFocusRequest({ type: 'raider_camp', nonce: Date.now() });
+  }, []);
+
   const activeSpeaker = agents.find((a) => a.id === activeAgentId);
   const isMainTown = user ? activeTownId === user.uid : activeTownId === LOCAL_MAIN_TOWN_ID;
 
@@ -4523,9 +4720,10 @@ export default function App() {
         decorPacks={decorPacks}
         triggerCelebrationNonce={triggerCelebrationNonce}
         raidState={raidState}
+        raiderRadar={raidState.active ? raiderRadar : null}
         onRaiderImpact={handleRaiderImpact}
         onDefenseHitCamp={handleDefenseHitCamp}
-        onFocusRaiderCamp={() => setFocusRequest({ type: 'raider_camp', nonce: Date.now() })}
+        onFocusRaiderCamp={handleFocusBattle}
         onToggleRaids={handleToggleEnemyRaids}
         onSelectAgent={handleSelectAgent}
         onTogglePovAgent={handleTogglePovAgent}
@@ -4550,6 +4748,7 @@ export default function App() {
           snapshotFnRef.current = fn;
         }}
         onMinimapUpdate={setMinimapCoords}
+        onRaiderRadarUpdate={setRaiderRadar}
         onUserOrbitStart={() => setFollowActive(false)}
       />
 
@@ -4685,12 +4884,12 @@ export default function App() {
                 type="button"
                 onClick={() =>
                   raidState.active
-                    ? setFocusRequest({ type: 'raider_camp', nonce: Date.now() })
+                    ? handleFocusBattle()
                     : handleToggleEnemyRaids(false)
                 }
                 title={
                   raidState.active
-                    ? 'Active Raider Wave — click to view Raider Camp'
+                    ? 'Active Raider Wave — click to view Battle'
                     : 'Enemy Raids are ON — click to switch to Peaceful Mode'
                 }
                 className="hidden min-h-[30px] shrink-0 items-center gap-1 rounded-lg border border-rose-400/55 bg-rose-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-rose-100 hover:bg-rose-500/30 lg:inline-flex"
@@ -4875,6 +5074,7 @@ export default function App() {
             unlockedBiomes={unlockedBiomes}
             railSpurBuilt={railSpurBuilt}
             coords={minimapCoords}
+            raiderRadar={raidState.active ? raiderRadar : null}
             activeAgentId={activeAgentId}
             selectedAgentId={selectedAgentId}
             selectedPlotId={selectedPlotId}
@@ -4882,6 +5082,7 @@ export default function App() {
             onFocusLocation={handleFocusLocation}
             onSelectPlot={handleSelectPlot}
             onSelectSignalRelay={handleSelectSignalRelay}
+            onFocusBattle={handleFocusBattle}
             onFocusBiome={(biome) => {
               setSelectedPlotId(null);
               setCameraMode('orbit');
@@ -4904,13 +5105,15 @@ export default function App() {
             onClick={() => setShowMinimap((m) => !m)}
             aria-label={showMinimap ? 'Hide town radar' : 'Show town radar'}
             className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
-              showMinimap
-                ? 'bg-amber-500/20 text-amber-200'
-                : 'text-slate-300 hover:bg-white/5 hover:text-white'
+              raidState.active
+                ? 'bg-rose-500/25 text-rose-200 ring-1 ring-rose-400/50'
+                : showMinimap
+                  ? 'bg-amber-500/20 text-amber-200'
+                  : 'text-slate-300 hover:bg-white/5 hover:text-white'
             }`}
           >
             <MapIcon className="h-4 w-4" />
-            <span className="hidden sm:inline">Radar</span>
+            <span className="hidden sm:inline">{raidState.active ? 'Radar !' : 'Radar'}</span>
           </button>
           <button
             type="button"
@@ -5061,6 +5264,9 @@ export default function App() {
                 onChatVillager={(id) => setChatVillagerId(id)}
                 onSendAgentNote={handleSendAgentNote}
                 onHireWorker={handleHireWorker}
+                onUnhireWorker={(agentId) => {
+                  void handleUnhireWorker(agentId);
+                }}
                 onFocusLocation={handleFocusLocation}
                 onSelectPlot={handleSelectPlot}
                 onSelectSignalRelay={handleSelectSignalRelay}
@@ -5219,6 +5425,9 @@ export default function App() {
                   }}
                   onSendAgentNote={handleSendAgentNote}
                   onHireWorker={handleHireWorker}
+                  onUnhireWorker={(agentId) => {
+                    void handleUnhireWorker(agentId);
+                  }}
                   onFocusLocation={(loc) => {
                     handleFocusLocation(loc);
                     setMobileTab(null);
@@ -5436,6 +5645,7 @@ export default function App() {
         onExtendRail={handleExtendRail}
         onBuildStructure={handleMayorBuildStructure}
         onHireWorker={handleHireWorker}
+        onUnhireWorker={handleUnhireWorker}
         onIssueDecree={handleIssueDecree}
         onDispatchResearcher={handleDispatchResearcher}
         onMayorSpeak={handleMayorSpeak}

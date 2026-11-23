@@ -16,6 +16,7 @@ import {
   Pencil,
   Shield,
   Swords,
+  Target,
   TrainFront,
   Trash2,
   UserCheck,
@@ -31,6 +32,7 @@ import {
   TownSceneController,
   type AgentWorldCoord,
   type ProjectedLabel,
+  type RaiderRadarSnapshot,
 } from '../three/townScene.ts';
 import {
   getStructureDisplayLabel,
@@ -92,6 +94,7 @@ interface TownViewportProps {
   decorPacks?: DecorPackId[];
   triggerCelebrationNonce?: number;
   raidState: EnemyRaidState;
+  raiderRadar?: RaiderRadarSnapshot | null;
   onRaiderImpact?: (x: number, z: number) => void;
   onDefenseHitCamp?: (damage: number) => void;
   onFocusRaiderCamp?: () => void;
@@ -113,6 +116,7 @@ interface TownViewportProps {
     fn: ((townName: string, subtitle?: string) => string | null) | null,
   ) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
+  onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
   onUserOrbitStart?: () => void;
 }
 
@@ -169,6 +173,7 @@ export function TownViewport({
   decorPacks = [],
   triggerCelebrationNonce = 0,
   raidState,
+  raiderRadar = null,
   onRaiderImpact,
   onDefenseHitCamp,
   onFocusRaiderCamp,
@@ -188,6 +193,7 @@ export function TownViewport({
   onDemolishStructure,
   onRegisterSnapshotFn,
   onMinimapUpdate,
+  onRaiderRadarUpdate,
   onUserOrbitStart,
 }: TownViewportProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -243,6 +249,7 @@ export function TownViewport({
     onSelectPlot,
     onSelectSignalRelay,
     onMinimapUpdate,
+    onRaiderRadarUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
     onRaiderImpact,
@@ -256,6 +263,7 @@ export function TownViewport({
     onSelectPlot,
     onSelectSignalRelay,
     onMinimapUpdate,
+    onRaiderRadarUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
     onRaiderImpact,
@@ -284,6 +292,7 @@ export function TownViewport({
         onContextLost: () => setContextLost(true),
         onContextRestored: () => setContextLost(false),
         onMinimapUpdate: (coords) => callbacksRef.current.onMinimapUpdate?.(coords),
+        onRaiderRadarUpdate: (snap) => callbacksRef.current.onRaiderRadarUpdate?.(snap),
         onUserOrbitStart: () => callbacksRef.current.onUserOrbitStart?.(),
         onRaiderImpact: (x, z) => callbacksRef.current.onRaiderImpact?.(x, z),
         onDefenseHitCamp: (dmg) => callbacksRef.current.onDefenseHitCamp?.(dmg),
@@ -571,16 +580,16 @@ export function TownViewport({
 
       {/* Active Raider Alert & Defense Bar (Compact, non-obtrusive, no backdrop-blur) */}
       {raidState.active && cameraMode === 'orbit' && !selectedPlotId && (
-        <div className="fixed top-18 left-1/2 z-20 flex w-[calc(100%-1.5rem)] max-w-md -translate-x-1/2 flex-col gap-1.5 rounded-2xl border border-rose-500/50 bg-slate-950/95 px-3 py-2 shadow-2xl md:top-20">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
+        <div className="fixed top-18 left-1/2 z-20 flex w-[calc(100%-1rem)] max-w-md -translate-x-1/2 flex-col gap-1.5 rounded-2xl border border-rose-500/55 bg-slate-950/95 px-2.5 py-2 shadow-2xl sm:px-3 md:top-20">
+          <div className="flex items-center justify-between gap-1.5 sm:gap-2">
+            <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
               <Swords className="h-4 w-4 shrink-0 text-rose-400" />
               <div className="min-w-0 leading-tight">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
                   <span className="truncate">
                     Wave {raidState.waveNumber} · {raidState.commanderName}
                   </span>
-                  <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+                  <span className="hidden shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 sm:inline">
                     {raidState.modelUsed}
                   </span>
                 </div>
@@ -594,9 +603,11 @@ export function TownViewport({
                 <button
                   type="button"
                   onClick={onFocusRaiderCamp}
-                  className="inline-flex min-h-[32px] items-center rounded-lg border border-rose-400/40 bg-rose-500/15 px-2 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/25"
+                  title="Swing camera to frame the Raider squad, siege cannons, and defense line"
+                  className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-amber-400/60 bg-rose-600 px-2 text-[11px] font-semibold whitespace-nowrap text-white shadow hover:bg-rose-500 sm:px-2.5"
                 >
-                  Camp
+                  <Target className="h-3.5 w-3.5 shrink-0" />
+                  <span>View Battle</span>
                 </button>
               )}
               {onToggleRaids && (
@@ -620,11 +631,16 @@ export function TownViewport({
                 }}
               />
             </div>
-            <span className="font-mono-tabular text-[10px] font-semibold text-slate-300">
+            <span className="font-mono-tabular text-[10px] font-semibold whitespace-nowrap text-slate-300">
               Camp {Math.max(0, Math.round(raidState.campHp))}/{raidState.campMaxHp} HP
             </span>
+            {raiderRadar && (
+              <span className="hidden rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap text-rose-200 sm:inline">
+                {raiderRadar.squad.length} Raiders · {raiderRadar.activeCannons} Cannons
+              </span>
+            )}
             {agents.some((a) => a.healthStatus === 'injured') && (
-              <span className="inline-flex items-center gap-1 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-rose-200">
+              <span className="inline-flex items-center gap-1 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap text-rose-200">
                 <HeartPulse className="h-3 w-3" />
                 {agents.filter((a) => a.healthStatus === 'injured').length} Injured
               </span>

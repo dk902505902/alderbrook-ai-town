@@ -103,6 +103,7 @@ interface MayorChatModalProps {
     preferredBiome?: BiomeId,
   ) => Promise<MayorBuildResult>;
   onHireWorker: (prompt: string) => Promise<string | null>;
+  onUnhireWorker: (targetHint: string, reason?: string) => Promise<MayorBuildResult>;
   onIssueDecree: (decree: string) => Promise<void>;
   onDispatchResearcher: (topic: string) => Promise<ResearchDispatchResult>;
   onMayorSpeak: (dialogue: string) => void;
@@ -125,6 +126,7 @@ interface MayorActionPlan {
     | 'none'
     | 'build'
     | 'hire'
+    | 'unhire'
     | 'decree'
     | 'create_town'
     | 'expand_biome'
@@ -547,7 +549,33 @@ function parseLocalIntent(
     };
   }
 
-  // 7) Hire / Recruit worker
+  // 7) Unhire / Dismiss / Fire worker (must check BEFORE generic hire regex)
+  if (
+    /\b(unhire|un-hire|fire|dismiss|let go|lay off|layoff|release|discharge)\b/.test(lower) ||
+    (/\b(remove|kick)\b/.test(lower) &&
+      /\b(worker|villager|staff|specialist|medic|baker|farmer|guard|researcher|barista|smith|miner|scout|someone|him|her)\b/.test(
+        lower,
+      ))
+  ) {
+    const cleanedTarget = text
+      .replace(/^(mayor\s*,?\s*)/i, '')
+      .replace(
+        /^.*?\b(?:unhire|un-hire|fire|dismiss|let go of|let go|lay off|release|discharge|remove|kick)\b\s*/i,
+        '',
+      )
+      .replace(/^(?:the|a|an|our|my)\s+/i, '')
+      .replace(/[.!?]+$/g, '')
+      .trim()
+      .slice(0, 80);
+    return {
+      reply: cleanedTarget
+        ? `Understood — I'm reviewing the town payroll to dismiss ${cleanedTarget} with severance and thanks.`
+        : `Understood — I'll review our hired specialists and dismiss one to rebalance the town roster.`,
+      action: { type: 'unhire', target: cleanedTarget || 'someone' },
+    };
+  }
+
+  // 8) Hire / Recruit worker
   if (/\b(hire|recruit|employ|bring in|add a worker|need a|get a)\b/.test(lower)) {
     const cleanedPrompt = text
       .replace(/^(mayor\s*,?\s*)/i, '')
@@ -613,6 +641,7 @@ export function MayorChatModal({
   onExtendRail,
   onBuildStructure,
   onHireWorker,
+  onUnhireWorker,
   onIssueDecree,
   onDispatchResearcher,
   onMayorSpeak,
@@ -813,6 +842,15 @@ export function MayorChatModal({
         badge: '⚠️ Hiring needs an AI key in Settings',
         extraNote:
           'Open AI Providers settings to configure a key if you want custom AI-generated workers.',
+      };
+    }
+
+    if (action.type === 'unhire') {
+      const targetHint = (action.target || fallbackText).trim();
+      const res = await onUnhireWorker(targetHint);
+      return {
+        badge: res.ok ? `👋 ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.detail,
       };
     }
 
@@ -1033,10 +1071,12 @@ export function MayorChatModal({
               autoMode,
               metrics,
               agents: agents.map((a) => ({
+                id: a.id,
                 name: a.name,
                 role: a.role,
                 currentTask: a.currentTask,
                 location: a.location,
+                isHired: Boolean(a.isHired),
               })),
               structures: structures.map((s) => ({
                 plotId: s.plotId,

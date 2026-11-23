@@ -145,7 +145,16 @@ interface TurnAIResult {
   build_order: BuildOrderResult;
   visit_plot_id: PlotId | null;
   hired_worker: HiredWorkerSpec | null;
+  unhired_worker: { agent_id: string; reason: string } | null;
 }
+
+const CORE_COUNCIL_IDS = new Set([
+  'mayor_sterling',
+  'commander_vance',
+  'architect_lyra',
+  'worker_kai',
+  'worker_pip',
+]);
 
 const VALID_LOCATIONS = new Set<LocationId>(['town_hall', 'workshop', 'market', 'park']);
 const VALID_HAT_STYLES = new Set<HatStyle>(['straw', 'cap', 'helmet', 'hood', 'beret']);
@@ -639,6 +648,37 @@ function sanitizeTurnResult(
     );
   }
 
+  let unhired_worker: { agent_id: string; reason: string } | null = null;
+  if (activeAgent.id === 'mayor_sterling' && parsed.unhire_worker) {
+    const hiredPool = allAgents.filter((a) => !CORE_COUNCIL_IDS.has(a.id));
+    if (hiredPool.length > 0) {
+      let queryId = '';
+      let reason = 'Dismissed by Mayor Sterling to rebalance town staffing.';
+      if (typeof parsed.unhire_worker === 'string') {
+        queryId = parsed.unhire_worker.trim();
+      } else if (typeof parsed.unhire_worker === 'object') {
+        const uw = parsed.unhire_worker as Record<string, unknown>;
+        queryId = String(uw.agent_id ?? uw.id ?? uw.name ?? '').trim();
+        if (typeof uw.reason === 'string' && uw.reason.trim()) {
+          reason = uw.reason.trim().slice(0, 140);
+        }
+      }
+      if (queryId) {
+        const low = queryId.toLowerCase();
+        const match =
+          hiredPool.find((a) => a.id.toLowerCase() === low) ||
+          hiredPool.find((a) => a.name.toLowerCase() === low) ||
+          hiredPool.find(
+            (a) =>
+              a.name.toLowerCase().includes(low) || a.role.toLowerCase().includes(low),
+          );
+        if (match) {
+          unhired_worker = { agent_id: match.id, reason };
+        }
+      }
+    }
+  }
+
   return {
     thought,
     target_location,
@@ -649,6 +689,7 @@ function sanitizeTurnResult(
     build_order,
     visit_plot_id,
     hired_worker,
+    unhired_worker,
   };
 }
 
@@ -1203,7 +1244,14 @@ async function createServer() {
       railSpurBuilt?: unknown;
       autoMode?: unknown;
       metrics?: { prosperity?: number; orderLevel?: number; morale?: number };
-      agents?: Array<{ name?: string; role?: string; currentTask?: string; location?: string }>;
+      agents?: Array<{
+        id?: string;
+        name?: string;
+        role?: string;
+        currentTask?: string;
+        location?: string;
+        isHired?: boolean;
+      }>;
       structures?: Array<{
         plotId?: string;
         structureType?: string;
@@ -1248,9 +1296,10 @@ async function createServer() {
         : [
             `You are Mayor Sterling, the warm, decisive Rank 1 leader of ${townName} AI Town.`,
             'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-            'Valid action.type values: "none", "build", "hire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "toggle_auto", "trigger_raid", "toggle_raids".',
+            'Valid action.type values: "none", "build", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "toggle_auto", "trigger_raid", "toggle_raids".',
             '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Town Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave") if a biome was specified.',
             '- Use "hire" to recruit workers (e.g. medic, researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
+            '- Use "unhire" when asked to unhire, fire, dismiss, let go, or lay off a hired specialist—OR if you decide on your own to dismiss a redundant hired worker to trim upkeep or free a slot. Set action.target to the hired worker\'s name, id, or role. Core council members (Mayor Sterling, Commander Vance, Architect Lyra, Worker Kai, Worker Pip) cannot be unhired.',
             '- Use "decree" for town-wide announcements, festivals, or civic orders. Set action.decree.',
             '- Use "create_town" when the player asks to create/start a NEW saved town or city (never overwrites existing towns). Set action.townName to the new town name.',
             '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest" for Dense Forest, "desert" for Desert Dunes, "cave" for Crystal Mountain Cave). Set action.biome.',
@@ -1260,7 +1309,7 @@ async function createServer() {
             '- Use "trigger_raid" when asked to trigger/start an enemy raider attack wave.',
             '- Use "toggle_raids" when asked to turn Enemy Raids ON or OFF / switch to peaceful mode. Set action.raidsEnabled (boolean).',
             '- Otherwise set action.type to "none".',
-            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree|create_town|expand_biome|build_road|extend_rail|toggle_auto|trigger_raid|toggle_raids","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|unhire|decree|create_town|expand_biome|build_road|extend_rail|toggle_auto|trigger_raid|toggle_raids","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
           ].join('\n');
 
     const webResultsBlock =
@@ -1274,6 +1323,7 @@ async function createServer() {
           ].join('\n')
         : '';
 
+    const hiredRosterList = agentsList.filter((a) => a.isHired || (a.id && !CORE_COUNCIL_IDS.has(a.id)));
     const contextSummary = [
       `Town: ${townName} | Auto Mode: ${autoMode ? 'ON' : 'OFF'} | Weather: ${weather}, Time: ${String(body.timeOfDay ?? 'day')}, Villagers: ${agentsList.length}/${MAX_TOWN_AGENTS}`,
       `Pulse: Prosperity ${body.metrics?.prosperity ?? 68}, Order ${body.metrics?.orderLevel ?? 74}, Morale ${body.metrics?.morale ?? 72}`,
@@ -1288,6 +1338,11 @@ async function createServer() {
               )
               .join(', ')
           : 'None yet'
+      }`,
+      `Hired Specialists (${hiredRosterList.length} eligible to unhire if needed): ${
+        hiredRosterList.length > 0
+          ? hiredRosterList.map((a) => `${a.name} (${a.role})`).join(', ')
+          : 'None yet (only 5 core council members)'
       }`,
       `Active Tasks: ${agentsList
         .slice(0, 6)
@@ -1351,6 +1406,7 @@ async function createServer() {
       const allowedTypes = new Set([
         'build',
         'hire',
+        'unhire',
         'decree',
         'create_town',
         'expand_biome',
@@ -1850,6 +1906,22 @@ async function createServer() {
         ].join('\n')
       : '';
 
+    const hiredSpecialistsForMayor =
+      activeAgent.id === 'mayor_sterling'
+        ? body.agents.filter((a) => !CORE_COUNCIL_IDS.has(a.id))
+        : [];
+    const allowAutonomousUnhire = hiredSpecialistsForMayor.length > 0;
+    const unhireSchemaHint = allowAutonomousUnhire
+      ? [
+          `Autonomous Mayor Staffing Authority (${hiredSpecialistsForMayor.length} hired specialists):`,
+          `- Hired specialists you MAY dismiss/unhire if you choose: ${hiredSpecialistsForMayor
+            .map((a) => `"${a.id}" (${a.name}, ${a.role})`)
+            .join(', ')}.`,
+          '- You MAY optionally set "unhire_worker": { "agent_id": "hire_...", "reason": "short reason" } if you want to unhire someone (for example to trim upkeep, free a slot for a higher-priority specialist, honor a player whisper/decree, or dismiss a redundant role). Leave "unhire_worker": null on normal turns when everyone is needed.',
+          '- Core council members (Mayor Sterling, Commander Vance, Architect Lyra, Worker Kai, Worker Pip) can NEVER be unhired.',
+        ].join('\n')
+      : '';
+
     const systemPrompt = [
       `You control ${activeAgent.name} (${activeAgent.role}) in Alderbrook, a self-building 3D AI town simulation.`,
       getHierarchyRules(activeAgent),
@@ -1864,6 +1936,7 @@ async function createServer() {
       '- Use build_order.action = "none" if simply coordinating, patrolling, tending your workplace, or conversing.',
       '- Optional "visit_plot_id": Set to your assigned plot or a completed shelter plot (pavilion, bakery, library) when tending or taking brief shelter (only when build_order.action is "none"), otherwise null.',
       hireSchemaHint,
+      unhireSchemaHint,
       'Return ONLY a raw JSON object with this exact schema:',
       '{',
       '  "thought": "Internal reasoning based on rank, weather/season, recent messages, and building plots",',
@@ -1873,7 +1946,9 @@ async function createServer() {
       '  "new_task": "Current action status",',
       '  "metrics_delta": { "prosperity": -2..3, "order": -2..3, "morale": -2..3 },',
       '  "build_order": { "action": "none | propose | construct | upgrade", "plot_id": "plot_nw | ... | null", "structure_type": "bakery | watchtower | greenhouse | windmill | library | granary | pavilion | clock_tower | null" },',
-      '  "visit_plot_id": "plot_nw | ... | null"' + (allowAutonomousHire ? ',\n  "hire_worker": null' : ''),
+      '  "visit_plot_id": "plot_nw | ... | null"' +
+        (allowAutonomousHire ? ',\n  "hire_worker": null' : '') +
+        (allowAutonomousUnhire ? ',\n  "unhire_worker": null' : ''),
       '}',
     ]
       .filter(Boolean)
