@@ -1,8 +1,15 @@
 export type LocationId = 'town_hall' | 'workshop' | 'market' | 'park';
 
-export type BiomeId = 'forest' | 'desert' | 'cave';
+export type BiomeId = 'forest' | 'desert' | 'cave' | 'alpine' | 'river' | 'canyon';
 
-export const ALL_BIOME_IDS: BiomeId[] = ['forest', 'desert', 'cave'];
+export const ALL_BIOME_IDS: BiomeId[] = [
+  'forest',
+  'desert',
+  'cave',
+  'alpine',
+  'river',
+  'canyon',
+];
 
 export type PlotId =
   | 'plot_nw'
@@ -30,7 +37,16 @@ export type PlotId =
   | 'plot_cave_3'
   | 'plot_cave_4'
   | 'plot_outer_ne'
-  | 'plot_outer_w';
+  | 'plot_outer_w'
+  | 'plot_alpine_1'
+  | 'plot_alpine_2'
+  | 'plot_alpine_3'
+  | 'plot_river_1'
+  | 'plot_river_2'
+  | 'plot_river_3'
+  | 'plot_canyon_1'
+  | 'plot_canyon_2'
+  | 'plot_canyon_3';
 
 export type CustomBuildingStyle =
   | 'lab'
@@ -53,6 +69,7 @@ export type StructureType =
   | 'clock_tower'
   | 'hospital'
   | 'defense_wall'
+  | 'triple_gun_tower'
   | 'custom';
 
 export type StructureStatus = 'building' | 'complete';
@@ -193,6 +210,8 @@ export type CameraMode =
   | 'villager_pov'
   | 'train_cab'
   | 'train_passenger'
+  | 'bus_window'
+  | 'bus_driver'
   | 'free_roam'
   | 'tour';
 
@@ -358,6 +377,8 @@ export interface TownExpansionState {
   unlockedBiomes: BiomeId[];
   roads: string[];
   railSpurBuilt: boolean;
+  interTownRailBuilt?: boolean;
+  interTownRailTarget?: string;
   autoMode: boolean;
 }
 
@@ -464,6 +485,7 @@ export interface AgentTurnResponse {
   visit_plot_id?: PlotId | null;
   hired_worker?: HiredWorkerSpec | null;
   unhired_worker?: { agent_id: string; reason: string } | null;
+  build_inter_town_rail?: { target_town: string; reason?: string } | null;
 }
 
 export interface WeatherSeasonEffect {
@@ -647,6 +669,9 @@ export const BIOME_PLOT_IDS: Record<BiomeId, PlotId[]> = {
     'plot_outer_ne',
     'plot_outer_w',
   ],
+  alpine: ['plot_alpine_1', 'plot_alpine_2', 'plot_alpine_3'],
+  river: ['plot_river_1', 'plot_river_2', 'plot_river_3'],
+  canyon: ['plot_canyon_1', 'plot_canyon_2', 'plot_canyon_3'],
 };
 
 export const ALL_PLOT_IDS: PlotId[] = [
@@ -654,6 +679,9 @@ export const ALL_PLOT_IDS: PlotId[] = [
   ...BIOME_PLOT_IDS.forest,
   ...BIOME_PLOT_IDS.desert,
   ...BIOME_PLOT_IDS.cave,
+  ...BIOME_PLOT_IDS.alpine,
+  ...BIOME_PLOT_IDS.river,
+  ...BIOME_PLOT_IDS.canyon,
 ];
 
 export function getAvailablePlotIds(unlockedBiomes: BiomeId[]): PlotId[] {
@@ -712,6 +740,39 @@ export const BIOME_META: Record<BiomeId, BiomeMeta> = {
     plots: BIOME_PLOT_IDS.cave,
     summary: 'Hollow see-inside mountain cavern with glowing crystals and 6 highland & outer plots.',
   },
+  alpine: {
+    id: 'alpine',
+    label: 'Alpine Snow Peaks',
+    shortLabel: 'Alpine',
+    direction: 'Far North',
+    center: { x: 2, z: -50 },
+    color: '#cbd5e1',
+    roadId: 'plaza_to_alpine',
+    plots: BIOME_PLOT_IDS.alpine,
+    summary: 'Snow-capped northern alpine ridge, frost-dusted pines, glacial stones, and 3 summit plots.',
+  },
+  river: {
+    id: 'river',
+    label: 'Turquoise River Crossing',
+    shortLabel: 'River',
+    direction: 'Far West',
+    center: { x: -50, z: 2 },
+    color: '#0ea5e9',
+    roadId: 'plaza_to_river',
+    plots: BIOME_PLOT_IDS.river,
+    summary: 'Winding turquoise riverbanks, arched wooden bridge, reed meadows, and 3 riverside plots.',
+  },
+  canyon: {
+    id: 'canyon',
+    label: 'Red-Rock Canyon',
+    shortLabel: 'Canyon',
+    direction: 'Far South',
+    center: { x: 2, z: 50 },
+    color: '#ea580c',
+    roadId: 'plaza_to_canyon',
+    plots: BIOME_PLOT_IDS.canyon,
+    summary: 'Stepped terracotta mesas, sunlit canyon arches, red spires, and 3 canyon floor plots.',
+  },
 };
 
 export const ALL_STRUCTURE_TYPES: StructureType[] = [
@@ -725,6 +786,7 @@ export const ALL_STRUCTURE_TYPES: StructureType[] = [
   'clock_tower',
   'hospital',
   'defense_wall',
+  'triple_gun_tower',
 ];
 
 export const PLOT_META: Record<
@@ -757,6 +819,15 @@ export const PLOT_META: Record<
   plot_cave_4: { label: 'Northeast Foothill Pad', shortLabel: 'C4', x: 11.8, z: -34.6, biome: 'cave' },
   plot_outer_ne: { label: 'Eastern Frontier Vista', shortLabel: 'ONE', x: 37.4, z: -15.6, biome: 'cave' },
   plot_outer_w: { label: 'West Frontier Commons', shortLabel: 'OW', x: -35.8, z: 6.8, biome: 'cave' },
+  plot_alpine_1: { label: 'Alpine Summit Lodge Pad', shortLabel: 'A1', x: -11.5, z: -48.0, biome: 'alpine' },
+  plot_alpine_2: { label: 'Glacier Pass Outpost', shortLabel: 'A2', x: 3.5, z: -51.5, biome: 'alpine' },
+  plot_alpine_3: { label: 'Snowpine Ridge Terrace', shortLabel: 'A3', x: 15.5, z: -47.5, biome: 'alpine' },
+  plot_river_1: { label: 'Riverbend Wharf Pad', shortLabel: 'R1', x: -47.5, z: -12.5, biome: 'river' },
+  plot_river_2: { label: 'Turquoise Bridge Crossing', shortLabel: 'R2', x: -49.0, z: 2.5, biome: 'river' },
+  plot_river_3: { label: 'Westbank Mill Terrace', shortLabel: 'R3', x: -46.5, z: 16.5, biome: 'river' },
+  plot_canyon_1: { label: 'Red-Rock Mesa Pad', shortLabel: 'CY1', x: -13.5, z: 48.5, biome: 'canyon' },
+  plot_canyon_2: { label: 'Canyon Spire Overlook', shortLabel: 'CY2', x: 2.5, z: 51.0, biome: 'canyon' },
+  plot_canyon_3: { label: 'Sunbaked Gorge Outpost', shortLabel: 'CY3', x: 16.5, z: 47.5, biome: 'canyon' },
 };
 
 export const STRUCTURE_META: Record<
@@ -828,6 +899,12 @@ export const STRUCTURE_META: Record<
     color: '#475569',
     bonus: { prosperity: 0, order: 6, morale: 2 },
   },
+  triple_gun_tower: {
+    label: 'Triple-Gun Defense Tower',
+    category: 'Heavy Defense',
+    color: '#dc2626',
+    bonus: { prosperity: 0, order: 8, morale: 2 },
+  },
   custom: {
     label: 'Custom Civic Hall',
     category: 'Custom Project',
@@ -846,10 +923,16 @@ export function isHospitalStructure(
 export function isDefenseStructure(
   structure: Pick<TownStructure, 'structureType' | 'customLabel'>,
 ): boolean {
-  if (structure.structureType === 'defense_wall' || structure.structureType === 'watchtower') {
+  if (
+    structure.structureType === 'defense_wall' ||
+    structure.structureType === 'triple_gun_tower' ||
+    structure.structureType === 'watchtower'
+  ) {
     return true;
   }
-  return /\b(defense|palisade|turret|fort|bastion|cannon|wall)\b/i.test(structure.customLabel || '');
+  return /\b(defense|palisade|turret|fort|bastion|cannon|wall|triple[- ]?gun|3[- ]?gun|three[- ]?gun)\b/i.test(
+    structure.customLabel || '',
+  );
 }
 
 export const CUSTOM_STYLE_COLORS: Record<CustomBuildingStyle, string> = {

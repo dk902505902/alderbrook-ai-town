@@ -17,6 +17,8 @@ interface TownMinimapProps {
   structures: TownStructure[];
   unlockedBiomes?: BiomeId[];
   railSpurBuilt?: boolean;
+  interTownRailBuilt?: boolean;
+  busPos?: { x: number; z: number; atStop: boolean } | null;
   coords: Partial<Record<AgentId, AgentWorldCoord>>;
   raiderRadar?: RaiderRadarSnapshot | null;
   activeAgentId: AgentId | null;
@@ -27,6 +29,8 @@ interface TownMinimapProps {
   onSelectPlot: (plotId: PlotId) => void;
   onFocusBiome?: (biome: BiomeId) => void;
   onFocusRailSpur?: () => void;
+  onFocusInterTownRail?: () => void;
+  onFocusBus?: () => void;
   onSelectSignalRelay?: () => void;
   onFocusBattle?: () => void;
 }
@@ -43,6 +47,8 @@ export function TownMinimap({
   structures,
   unlockedBiomes = [],
   railSpurBuilt = false,
+  interTownRailBuilt = false,
+  busPos = null,
   coords,
   raiderRadar = null,
   activeAgentId,
@@ -53,6 +59,8 @@ export function TownMinimap({
   onSelectPlot,
   onFocusBiome,
   onFocusRailSpur,
+  onFocusInterTownRail,
+  onFocusBus,
   onSelectSignalRelay,
   onFocusBattle,
 }: TownMinimapProps) {
@@ -61,9 +69,12 @@ export function TownMinimap({
     structureByPlot.set(s.plotId, s);
   }
 
-  const expandedView = unlockedBiomes.length > 0 || railSpurBuilt;
+  const hasFarTerrain =
+    unlockedBiomes.some((b) => b === 'alpine' || b === 'river' || b === 'canyon') ||
+    interTownRailBuilt;
+  const expandedView = unlockedBiomes.length > 0 || railSpurBuilt || interTownRailBuilt;
   const raidActive = Boolean(raiderRadar);
-  const worldSpan = expandedView ? 46 : raidActive ? 27 : 15;
+  const worldSpan = hasFarTerrain ? 66 : expandedView ? 46 : raidActive ? 27 : 15;
   const compactMarkers = expandedView || raidActive;
   const toMapCoord = (val: number) => 70 + (val / worldSpan) * 58;
   const visiblePlots = getAvailablePlotIds(unlockedBiomes);
@@ -146,6 +157,43 @@ export function TownMinimap({
               fill="#083344"
               stroke="#22d3ee"
               strokeWidth="1.2"
+            />
+          </g>
+        )}
+        {/* Inter-Town Express Railway Track & Portal Arch */}
+        {interTownRailBuilt && (
+          <g onClick={() => onFocusInterTownRail?.()} className="cursor-pointer">
+            <line
+              x1={toMapCoord(33.2)}
+              y1={toMapCoord(2.2)}
+              x2={Math.min(130, toMapCoord(57.5))}
+              y2={toMapCoord(2.2)}
+              stroke="#fbbf24"
+              strokeWidth="2"
+              strokeDasharray="3 1.5"
+              strokeLinecap="round"
+            />
+            <polygon
+              points={`${Math.min(130, toMapCoord(57.5))},${toMapCoord(2.2) - 4} ${Math.min(130, toMapCoord(57.5)) + 4},${toMapCoord(2.2)} ${Math.min(130, toMapCoord(57.5))},${toMapCoord(2.2) + 4} ${Math.min(130, toMapCoord(57.5)) - 4},${toMapCoord(2.2)}`}
+              fill="#f59e0b"
+              stroke="#fffbeb"
+              strokeWidth="1"
+            />
+          </g>
+        )}
+
+        {/* Inter-Town Shuttle Bus Live Dot */}
+        {busPos && (
+          <g onClick={() => onFocusBus?.()} className="cursor-pointer">
+            <rect
+              x={Math.max(8, Math.min(126, toMapCoord(busPos.x))) - 3.2}
+              y={Math.max(8, Math.min(128, toMapCoord(busPos.z))) - 2.2}
+              width="6.4"
+              height="4.4"
+              rx="1.2"
+              fill="#f59e0b"
+              stroke="#fef3c7"
+              strokeWidth="0.9"
             />
           </g>
         )}

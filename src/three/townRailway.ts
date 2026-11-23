@@ -9,6 +9,7 @@ export interface TownRailwayHandle {
   trainGroup: THREE.Group;
   stationFocusTarget: THREE.Vector3;
   frontierDepotFocusTarget: THREE.Vector3;
+  interTownPortalFocusTarget: THREE.Vector3;
   isNearTrackOrStation: (x: number, z: number, pad?: number) => boolean;
   getTrainCameraPose: (
     seat: 'cab' | 'passenger',
@@ -18,6 +19,7 @@ export interface TownRailwayHandle {
   getTrainStatus: () => { stoppedAt: 'alderbrook' | 'frontier' | null; isExtended: boolean };
   triggerTrainNow: () => void;
   setRailSpurBuilt: (enabled: boolean) => void;
+  setInterTownRailBuilt: (enabled: boolean, targetTownName?: string) => void;
   update: (delta: number, elapsed: number) => void;
   applyTheme: (theme: TownTheme) => void;
   setGraphicsQuality: (quality: GraphicsQuality) => void;
@@ -892,6 +894,146 @@ export function buildTownRailway(
   root.add(spurGroup);
   const frontierDepotFocusTarget = new THREE.Vector3(depotCenter.x, 1.2, depotCenter.z);
 
+  // 5c. Inter-Town Express Railway Branch (East from Outer Frontier Station -> Inter-Town Portal Arch)
+  // Built autonomously or on command by Mayor Sterling to link this town to another saved town!
+  const interTownCurve = new THREE.CatmullRomCurve3(
+    [
+      new THREE.Vector3(33.2, 0, 2.2),
+      new THREE.Vector3(40.5, 0, 2.2),
+      new THREE.Vector3(48.5, 0, 2.2),
+      new THREE.Vector3(57.5, 0, 2.2),
+    ],
+    false,
+    'catmullrom',
+    0.5,
+  );
+  const interTownGroup = new THREE.Group();
+  interTownGroup.name = 'railway:inter_town_express';
+  interTownGroup.visible = false;
+
+  const itBallastGeo = buildBallastRibbon(interTownCurve, 36, 0.86);
+  const itBallast = new THREE.Mesh(itBallastGeo, spurBallastMat);
+  itBallast.receiveShadow = true;
+  interTownGroup.add(itBallast);
+  disposables.push(itBallastGeo);
+
+  const IT_TIES = 36;
+  const itTieMesh = new THREE.InstancedMesh(spurTieGeo, spurTieMat, IT_TIES);
+  itTieMesh.receiveShadow = true;
+  for (let i = 0; i < IT_TIES; i++) {
+    const u = i / (IT_TIES - 1);
+    interTownCurve.getPointAt(u, _pos);
+    interTownCurve.getTangentAt(u, _tan).normalize();
+    tieDummy.position.set(_pos.x, 0.068, _pos.z);
+    tieDummy.rotation.set(0, Math.atan2(_tan.x, _tan.z), 0);
+    tieDummy.scale.set(1, 1, 1);
+    tieDummy.updateMatrix();
+    itTieMesh.setMatrixAt(i, tieDummy.matrix);
+  }
+  itTieMesh.instanceMatrix.needsUpdate = true;
+  itTieMesh.computeBoundingSphere();
+  interTownGroup.add(itTieMesh);
+
+  for (const offset of [-0.42, 0.42]) {
+    const rPts: THREE.Vector3[] = [];
+    for (let i = 0; i <= 24; i++) {
+      const u = i / 24;
+      interTownCurve.getPointAt(u, _pos);
+      interTownCurve.getTangentAt(u, _tan).normalize();
+      _side.crossVectors(_up, _tan).normalize();
+      rPts.push(new THREE.Vector3(_pos.x + _side.x * offset, 0.135, _pos.z + _side.z * offset));
+    }
+    const rc = new THREE.CatmullRomCurve3(rPts, false, 'catmullrom', 0.5);
+    const rg = new THREE.TubeGeometry(rc, 32, 0.036, 5, false);
+    interTownGroup.add(new THREE.Mesh(rg, spurRailMat));
+    disposables.push(rg);
+  }
+
+  // Masonry Inter-Town Railway Portal Arch at x = 57.5, z = 2.2
+  const itPortalGroup = new THREE.Group();
+  itPortalGroup.position.set(57.5, 0, 2.2);
+  itPortalGroup.rotation.y = Math.PI / 2;
+  const itPillarGeo = new THREE.BoxGeometry(0.85, 4.4, 0.85);
+  const itPillarL = new THREE.Mesh(itPillarGeo, depotStoneMat);
+  itPillarL.position.set(-1.9, 2.2, 0);
+  const itPillarR = new THREE.Mesh(itPillarGeo, depotStoneMat);
+  itPillarR.position.set(1.9, 2.2, 0);
+  const itCrossBeam = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.6, 0.92), depotDarkWoodMat);
+  itCrossBeam.position.set(0, 4.45, 0);
+
+  const itSignCanvas = document.createElement('canvas');
+  itSignCanvas.width = 384;
+  itSignCanvas.height = 96;
+  const drawInterTownSign = (targetName: string) => {
+    const ctx = itSignCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, 384, 96);
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(4, 4, 376, 88);
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('INTER-TOWN EXPRESS RAIL', 192, 28);
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 28px system-ui, -apple-system, sans-serif';
+    const label = targetName.trim()
+      ? `TO ${targetName.trim().toUpperCase().slice(0, 14)} →`
+      : 'TO NEIGHBOR TOWN →';
+    ctx.fillText(label, 192, 66, 356);
+  };
+  drawInterTownSign('Neighbor Town');
+  const itSignTex = new THREE.CanvasTexture(itSignCanvas);
+  itSignTex.colorSpace = THREE.SRGBColorSpace;
+  const itSignMat = new THREE.MeshStandardMaterial({
+    map: itSignTex,
+    roughness: 0.3,
+    emissive: 0xd97706,
+    emissiveIntensity: 0.28,
+  });
+  const itSignBoard = new THREE.Mesh(new THREE.BoxGeometry(4.1, 1.05, 0.16), itSignMat);
+  itSignBoard.position.set(0, 5.15, 0);
+  const itBeaconL = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 0), frontierSignalMat);
+  itBeaconL.position.set(-1.9, 4.78, 0);
+  const itBeaconR = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 0), frontierSignalMat);
+  itBeaconR.position.set(1.9, 4.78, 0);
+  itPortalGroup.add(itPillarL, itPillarR, itCrossBeam, itSignBoard, itBeaconL, itBeaconR);
+  interTownGroup.add(itPortalGroup);
+
+  // Sleek Inter-Town Express Shuttle Railcar gliding between Outer Frontier Station & the Portal
+  const expressCar = new THREE.Group();
+  expressCar.name = 'railway:inter_town_express_car';
+  const expBodyMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.38, metalness: 0.28 });
+  const expStripeMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.32, metalness: 0.55 });
+  const expWinMat = new THREE.MeshStandardMaterial({
+    color: 0xe0f2fe,
+    emissive: 0x38bdf8,
+    emissiveIntensity: 0.65,
+    roughness: 0.18,
+  });
+  const expHull = new THREE.Mesh(new THREE.BoxGeometry(1.16, 1.05, 2.75), expBodyMat);
+  expHull.position.set(0, 0.85, 0);
+  const expRoof = new THREE.Mesh(new THREE.BoxGeometry(1.22, 0.18, 2.86), depotTrimMat);
+  expRoof.position.set(0, 1.44, 0);
+  const expStripe = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.14, 2.8), expStripeMat);
+  expStripe.position.set(0, 0.62, 0);
+  const expWin = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.38, 2.15), expWinMat);
+  expWin.position.set(0, 1.05, 0);
+  const expNoseF = new THREE.Mesh(new THREE.BoxGeometry(1.06, 0.72, 0.42), expStripeMat);
+  expNoseF.position.set(0, 0.66, 1.48);
+  const expNoseB = new THREE.Mesh(new THREE.BoxGeometry(1.06, 0.72, 0.42), expStripeMat);
+  expNoseB.position.set(0, 0.66, -1.48);
+  expressCar.add(expHull, expRoof, expStripe, expWin, expNoseF, expNoseB);
+  expressCar.position.set(36.0, 0.14, 2.2);
+  expressCar.rotation.y = Math.PI / 2;
+  interTownGroup.add(expressCar);
+
+  disposables.push(itPillarGeo, itSignTex, itSignMat, expBodyMat, expStripeMat, expWinMat);
+  root.add(interTownGroup);
+  const interTownPortalFocusTarget = new THREE.Vector3(46.5, 1.8, 2.2);
+
   // 6. Steam Locomotive + 2 Passenger Carriages
   const consist = buildLocomotiveAndCarriages(lanternMaterials);
   const trainGroup = new THREE.Group();
@@ -949,6 +1091,8 @@ export function buildTownRailway(
   let activeQuality: GraphicsQuality = 'medium';
   let activeTheme: TownTheme = initialTheme;
   let railSpurEnabled = false;
+  let interTownRailEnabled = false;
+  let interTownCycle = 0;
   let triggerToggle = false;
   let lastStoppedAt: 'alderbrook' | 'frontier' | null = null;
 
@@ -1010,6 +1154,7 @@ export function buildTownRailway(
     trainGroup,
     stationFocusTarget,
     frontierDepotFocusTarget,
+    interTownPortalFocusTarget,
     getTrainCameraPose: (
       seat: 'cab' | 'passenger',
       outEye: THREE.Vector3,
@@ -1071,6 +1216,14 @@ export function buildTownRailway(
         // Seamlessly route the existing train onto the newly connected outer loop approaching Outer Frontier Station!
         extCycleTime = Math.max(STOP_DURATION + 1, EXT_FRONTIER_STOP_START - 5.5);
         triggerToggle = false;
+      }
+    },
+    setInterTownRailBuilt: (enabled: boolean, targetTownName?: string) => {
+      interTownRailEnabled = enabled;
+      interTownGroup.visible = enabled;
+      if (targetTownName !== undefined) {
+        drawInterTownSign(targetTownName);
+        itSignTex.needsUpdate = true;
       }
     },
     setGraphicsQuality: (quality: GraphicsQuality) => {
@@ -1225,6 +1378,26 @@ export function buildTownRailway(
             );
           }
         }
+      }
+
+      // 3c. Inter-Town Express Railcar gliding smoothly out to the neighbor town portal & back
+      if (interTownRailEnabled) {
+        interTownCycle = (interTownCycle + delta) % 24.0;
+        let uExp = 0.08;
+        if (interTownCycle < 4.0) {
+          uExp = 0.08;
+        } else if (interTownCycle < 12.0) {
+          const leg = evaluateSmoothLeg(interTownCycle - 4.0, 8.0, 2.0, 2.0);
+          uExp = 0.08 + leg.s * 0.84;
+        } else if (interTownCycle < 16.0) {
+          uExp = 0.92;
+        } else {
+          const leg = evaluateSmoothLeg(interTownCycle - 16.0, 8.0, 2.0, 2.0);
+          uExp = 0.92 - leg.s * 0.84;
+        }
+        interTownCurve.getPointAt(uExp, _pos);
+        expressCar.position.set(_pos.x, 0.14, _pos.z);
+        expressCar.rotation.y = interTownCycle < 12.0 ? Math.PI / 2 : -Math.PI / 2;
       }
 
       // 4. Rising Steam Puffs from Locomotive Smokestack (THREE.Points)

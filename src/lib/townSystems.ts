@@ -138,6 +138,7 @@ const BASE_GOLD_PER_TURN: Record<StructureType, number> = {
   clock_tower: 16,
   hospital: 15,
   defense_wall: 12,
+  triple_gun_tower: 16,
   custom: 22,
 };
 
@@ -237,10 +238,21 @@ export function computeResourceRates(
   unlockedBiomes: BiomeId[],
   activePolicies: PolicyId[],
 ): TownResourceRates {
-  let timber = 3 + (unlockedBiomes.includes('forest') ? 6 : 0);
-  let stone = 3 + (unlockedBiomes.includes('desert') ? 4 : 0) + (unlockedBiomes.includes('cave') ? 3 : 0);
-  let harvest = 3;
-  let crystal = unlockedBiomes.includes('cave') ? 4 : 0;
+  let timber =
+    3 +
+    (unlockedBiomes.includes('forest') ? 6 : 0) +
+    (unlockedBiomes.includes('river') ? 4 : 0);
+  let stone =
+    3 +
+    (unlockedBiomes.includes('desert') ? 4 : 0) +
+    (unlockedBiomes.includes('cave') ? 3 : 0) +
+    (unlockedBiomes.includes('alpine') ? 5 : 0) +
+    (unlockedBiomes.includes('canyon') ? 5 : 0);
+  let harvest = 3 + (unlockedBiomes.includes('river') ? 5 : 0);
+  let crystal =
+    (unlockedBiomes.includes('cave') ? 4 : 0) +
+    (unlockedBiomes.includes('alpine') ? 3 : 0) +
+    (unlockedBiomes.includes('canyon') ? 2 : 0);
 
   for (const s of structures) {
     if (s.status !== 'complete') continue;
@@ -252,7 +264,8 @@ export function computeResourceRates(
       s.structureType === 'watchtower' ||
       s.structureType === 'clock_tower' ||
       s.structureType === 'library' ||
-      s.structureType === 'defense_wall'
+      s.structureType === 'defense_wall' ||
+      s.structureType === 'triple_gun_tower'
     ) {
       stone += 2 * t;
     }
@@ -555,19 +568,22 @@ export function generateCouncilProposals(params: {
       supporters: [vance.name, 'Worker Kai'],
     });
   } else if (nextLockedBiome) {
-    const bLabel =
-      nextLockedBiome === 'forest'
-        ? 'Dense Forest'
-        : nextLockedBiome === 'desert'
-          ? 'Desert Dunes'
-          : 'Crystal Mountain Cave';
+    const biomeLabelMap: Record<BiomeId, string> = {
+      forest: 'Dense Forest',
+      desert: 'Desert Dunes',
+      cave: 'Crystal Mountain Cave',
+      alpine: 'Alpine Snow Peaks',
+      river: 'Turquoise River Crossing',
+      canyon: 'Red-Rock Canyon',
+    };
+    const bLabel = biomeLabelMap[nextLockedBiome] ?? 'Frontier District';
     proposals.push({
       id: `prop_biome_${nextLockedBiome}_${params.turnCount}`,
       proposerId: vance.id,
       proposerName: vance.name,
       proposerRole: vance.role,
       title: `Expedition to ${bLabel}`,
-      summary: `Opens 6 new frontier build plots, widens map bounds, and adds biome resource streams.`,
+      summary: `Opens new frontier build plots, widens map bounds, and adds biome resource streams.`,
       actionType: 'expand_biome',
       biome: nextLockedBiome,
       costGold: 70,

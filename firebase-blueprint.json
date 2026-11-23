@@ -63,12 +63,12 @@
         },
         "unlockedBiomes": {
           "type": "array",
-          "description": "List of unlocked outer biome sectors (forest, desert, cave).",
+          "description": "List of unlocked outer biome sectors (forest, desert, cave, alpine, river, canyon).",
           "items": {
             "type": "string",
-            "enum": ["forest", "desert", "cave"]
+            "enum": ["forest", "desert", "cave", "alpine", "river", "canyon"]
           },
-          "maxItems": 3
+          "maxItems": 6
         },
         "roads": {
           "type": "array",
@@ -77,11 +77,20 @@
             "type": "string",
             "maxLength": 48
           },
-          "maxItems": 24
+          "maxItems": 40
         },
         "railSpurBuilt": {
           "type": "boolean",
           "description": "Whether the outer railway spur and frontier depot stop have been built."
+        },
+        "interTownRailBuilt": {
+          "type": "boolean",
+          "description": "Whether the inter-town railway express line to another saved town has been built."
+        },
+        "interTownRailTarget": {
+          "type": "string",
+          "description": "Display name of the linked destination town on the inter-town railway.",
+          "maxLength": 60
         },
         "autoMode": {
           "type": "boolean",
@@ -282,13 +291,13 @@
         "plotId": {
           "type": "string",
           "description": "Buildable plot identifier.",
-          "enum": ["plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east", "plot_forest_1", "plot_forest_2", "plot_desert_1", "plot_desert_2", "plot_cave_1", "plot_cave_2"],
+          "enum": ["plot_nw", "plot_ne", "plot_sw", "plot_se", "plot_n_west", "plot_n_east", "plot_s_west", "plot_s_east", "plot_forest_1", "plot_forest_2", "plot_forest_3", "plot_forest_4", "plot_outer_nw", "plot_outer_n", "plot_desert_1", "plot_desert_2", "plot_desert_3", "plot_desert_4", "plot_outer_s", "plot_outer_sw", "plot_cave_1", "plot_cave_2", "plot_cave_3", "plot_cave_4", "plot_outer_ne", "plot_outer_w", "plot_alpine_1", "plot_alpine_2", "plot_alpine_3", "plot_river_1", "plot_river_2", "plot_river_3", "plot_canyon_1", "plot_canyon_2", "plot_canyon_3"],
           "maxLength": 20
         },
         "structureType": {
           "type": "string",
           "description": "Procedural building prefab type.",
-          "enum": ["bakery", "watchtower", "greenhouse", "windmill", "library", "granary", "pavilion", "clock_tower", "custom"],
+          "enum": ["bakery", "watchtower", "greenhouse", "windmill", "library", "granary", "pavilion", "clock_tower", "hospital", "defense_wall", "triple_gun_tower", "custom"],
           "maxLength": 24
         },
         "customLabel": {

@@ -60,7 +60,10 @@ service cloud.firestore {
         'plot_n_west', 'plot_n_east', 'plot_s_west', 'plot_s_east',
         'plot_forest_1', 'plot_forest_2', 'plot_forest_3', 'plot_forest_4', 'plot_outer_nw', 'plot_outer_n',
         'plot_desert_1', 'plot_desert_2', 'plot_desert_3', 'plot_desert_4', 'plot_outer_s', 'plot_outer_sw',
-        'plot_cave_1', 'plot_cave_2', 'plot_cave_3', 'plot_cave_4', 'plot_outer_ne', 'plot_outer_w'
+        'plot_cave_1', 'plot_cave_2', 'plot_cave_3', 'plot_cave_4', 'plot_outer_ne', 'plot_outer_w',
+        'plot_alpine_1', 'plot_alpine_2', 'plot_alpine_3',
+        'plot_river_1', 'plot_river_2', 'plot_river_3',
+        'plot_canyon_1', 'plot_canyon_2', 'plot_canyon_3'
       ];
     }
 
@@ -69,7 +72,7 @@ service cloud.firestore {
     }
 
     function isValidStructureType(st) {
-      return st in ['bakery', 'watchtower', 'greenhouse', 'windmill', 'library', 'granary', 'pavilion', 'clock_tower', 'custom'];
+      return st in ['bakery', 'watchtower', 'greenhouse', 'windmill', 'library', 'granary', 'pavilion', 'clock_tower', 'hospital', 'defense_wall', 'triple_gun_tower', 'custom'];
     }
 
     function isValidCustomStyle(cs) {
@@ -102,7 +105,7 @@ service cloud.firestore {
 
     function isValidTownState(data) {
       return data.keys().hasAll(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'interTownRailBuilt', 'interTownRailTarget', 'autoMode', 'createdAt', 'updatedAt'])
         && data.ownerId is string && data.ownerId == request.auth.uid && isValidId(data.ownerId)
         && data.turnCount is int && data.turnCount >= 0 && data.turnCount <= 1000000
         && data.activeAgentIndex is int && data.activeAgentIndex >= 0 && data.activeAgentIndex <= 14
@@ -114,9 +117,11 @@ service cloud.firestore {
         && data.weather is string && data.weather.size() <= 16 && isValidWeather(data.weather)
         && (!('theme' in data) || (data.theme is string && data.theme.size() <= 24 && isValidTownTheme(data.theme)))
         && (!('townName' in data) || (data.townName is string && data.townName.size() >= 1 && data.townName.size() <= 60))
-        && (!('unlockedBiomes' in data) || (data.unlockedBiomes is list && data.unlockedBiomes.size() <= 3 && data.unlockedBiomes.hasOnly(['forest', 'desert', 'cave'])))
+        && (!('unlockedBiomes' in data) || (data.unlockedBiomes is list && data.unlockedBiomes.size() <= 6 && data.unlockedBiomes.hasOnly(['forest', 'desert', 'cave', 'alpine', 'river', 'canyon'])))
         && (!('roads' in data) || (data.roads is list && data.roads.size() <= 40))
         && (!('railSpurBuilt' in data) || data.railSpurBuilt is bool)
+        && (!('interTownRailBuilt' in data) || data.interTownRailBuilt is bool)
+        && (!('interTownRailTarget' in data) || (data.interTownRailTarget is string && data.interTownRailTarget.size() <= 60))
         && (!('autoMode' in data) || data.autoMode is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -226,12 +231,18 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['unlockedBiomes', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['roads', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['railSpurBuilt', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['railSpurBuilt', 'roads', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['interTownRailBuilt', 'interTownRailTarget', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['railSpurBuilt', 'interTownRailBuilt', 'interTownRailTarget', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['railSpurBuilt', 'interTownRailBuilt', 'interTownRailTarget', 'roads', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['autoMode', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'interTownRailBuilt', 'interTownRailTarget', 'autoMode', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['unlockedBiomes', 'roads', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'interTownRailBuilt', 'interTownRailTarget', 'autoMode', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['turnCount', 'activeAgentIndex', 'activeDecree', 'prosperity', 'orderLevel', 'morale', 'timeOfDay', 'weather', 'theme', 'townName', 'unlockedBiomes', 'roads', 'railSpurBuilt', 'autoMode', 'updatedAt'])
         );
       allow delete: if isValidId(townId) && isSignedIn() && existing().ownerId == request.auth.uid;

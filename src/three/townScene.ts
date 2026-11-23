@@ -46,6 +46,7 @@ import {
   type TownRaidersHandle,
 } from './townRaiders.ts';
 export type { RaiderRadarSnapshot } from './townRaiders.ts';
+import { buildTownShuttleBus, type TownBusHandle } from './townBus.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import {
   buildCompletedStructureMesh,
@@ -79,6 +80,7 @@ export interface TownSceneCallbacks {
   onSelectAgent: (agentId: AgentId) => void;
   onToggleAgentPov?: (agentId: AgentId) => void;
   onToggleTrainPov?: (seat: 'cab' | 'passenger') => void;
+  onToggleBusPov?: (seat: 'window' | 'driver') => void;
   onSelectLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
@@ -87,6 +89,7 @@ export interface TownSceneCallbacks {
   onLabelUpdate?: (positions: Record<AgentId, ProjectedLabel>) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
   onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
+  onBusRadarUpdate?: (pos: { x: number; z: number; atStop: boolean } | null) => void;
   onUserOrbitStart?: () => void;
   onRaiderImpact?: (x: number, z: number) => void;
   onDefenseHitCamp?: (damage: number) => void;
@@ -1649,6 +1652,7 @@ export class TownSceneController {
   private detailsHandle!: TownDetailsHandle;
   private expansionHandle!: TownExpansionHandle;
   private railwayHandle!: TownRailwayHandle;
+  private busHandle!: TownBusHandle;
   private lifeHandle: TownLifeHandle | null = null;
   private dogVillagerCoords: Array<{ x: number; z: number }> = [];
   private raiderHandle: TownRaidersHandle | null = null;
@@ -1750,6 +1754,7 @@ export class TownSceneController {
   private groundMesh!: THREE.Mesh;
   private perimeterHills: Array<{ mesh: THREE.Mesh; angle: number }> = [];
   private railSpurBuilt = false;
+  private interTownRailBuilt = false;
   private maxPanRadius = 34;
   private expandedFogFactor = 1.0;
 
@@ -1963,6 +1968,11 @@ export class TownSceneController {
       this.railwayHandle.trainGroup,
     );
     this.disposables.push(this.railwayHandle);
+
+    // Build Inter-Town Shuttle Bus, Bus Stop & Frontier Highway Loop (tap Bus to ride in 2 POV modes)
+    this.busHandle = buildTownShuttleBus(this.scene, this.lanternMaterials, this.townTheme);
+    this.clickableObjects.push(this.busHandle.busGroup, this.busHandle.busStopGroup);
+    this.disposables.push(this.busHandle);
 
     const treePositions: Array<[number, number]> = [];
     for (let i = 0; i < 34; i++) {
@@ -2391,6 +2401,7 @@ export class TownSceneController {
     this.detailsHandle?.setLanternShadows(enableShadows);
     this.expansionHandle?.setGraphicsQuality(quality);
     this.railwayHandle?.setGraphicsQuality(quality);
+    this.busHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.raiderHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
@@ -2412,6 +2423,7 @@ export class TownSceneController {
     this.detailsHandle?.applyTheme(theme);
     this.expansionHandle?.applyTheme(theme);
     this.railwayHandle?.applyTheme(theme);
+    this.busHandle?.applyTheme(theme);
     this.signalRelayHandle?.applyTheme(theme);
 
     if (this.treeFoliageMesh) {
@@ -2574,6 +2586,28 @@ export class TownSceneController {
       return;
     }
 
+    if (mode === 'bus_window' || mode === 'bus_driver') {
+      this.cameraMode = mode;
+      this.povAgentId = null;
+      this.povReturnActive = false;
+      this.followActive = false;
+      this.cameraTargetGoal = null;
+      this.controls.enabled = false;
+      if (this.camera.near !== 0.12) {
+        this.camera.near = 0.12;
+        this.camera.updateProjectionMatrix();
+      }
+      this.busHandle?.getBusCameraPose(
+        mode === 'bus_driver' ? 'driver' : 'window',
+        _povEye,
+        _povLookTarget,
+      );
+      this.camera.position.copy(_povEye);
+      this.povCurrentLook.copy(_povLookTarget);
+      this.camera.lookAt(this.povCurrentLook);
+      return;
+    }
+
     if (mode === 'free_roam') {
       this.cameraMode = 'free_roam';
       this.povAgentId = null;
@@ -2709,14 +2743,23 @@ export class TownSceneController {
 
   private applyMapExpansionBounds(): void {
     const biomeCount = this.unlockedBiomes.length;
-    const expanded = biomeCount > 0 || this.railSpurBuilt;
-    const tier = Math.min(3, biomeCount + (this.railSpurBuilt ? 1 : 0));
+    const hasFarTerrain =
+      this.unlockedBiomes.includes('alpine') ||
+      this.unlockedBiomes.includes('river') ||
+      this.unlockedBiomes.includes('canyon') ||
+      this.interTownRailBuilt;
+    const expanded = biomeCount > 0 || this.railSpurBuilt || this.interTownRailBuilt;
+    const tier = Math.min(6, biomeCount + (this.railSpurBuilt ? 1 : 0) + (this.interTownRailBuilt ? 1 : 0));
 
     // Scale ground disk, push perimeter hills outward, expand orbit pan/zoom bounds & camera far plane
-    const groundScale = expanded ? 1.25 + tier * 0.12 : 1.0;
-    const hillRadius = expanded ? 72 + tier * 7.5 : 58;
-    const maxDist = expanded ? 96 + tier * 11 : 74;
-    const camFar = expanded ? 280 + tier * 30 : 220;
+    const groundScale = hasFarTerrain
+      ? 1.92 + Math.min(3, tier) * 0.06
+      : expanded
+        ? 1.32 + Math.min(3, tier) * 0.12
+        : 1.08;
+    const hillRadius = hasFarTerrain ? 112 + Math.min(3, tier) * 4.0 : expanded ? 76 + Math.min(3, tier) * 7.5 : 64;
+    const maxDist = hasFarTerrain ? 142 + Math.min(3, tier) * 6 : expanded ? 102 + Math.min(3, tier) * 10 : 82;
+    const camFar = hasFarTerrain ? 430 : expanded ? 320 : 250;
 
     if (this.groundMesh) {
       this.groundMesh.scale.setScalar(groundScale);
@@ -2728,8 +2771,12 @@ export class TownSceneController {
     }
 
     this.controls.maxDistance = maxDist;
-    this.maxPanRadius = expanded ? 48 + tier * 5 : 34;
-    this.expandedFogFactor = expanded ? Math.max(0.68, 0.9 - tier * 0.06) : 1.0;
+    this.maxPanRadius = hasFarTerrain ? 78 : expanded ? 54 + Math.min(3, tier) * 4 : 42;
+    this.expandedFogFactor = hasFarTerrain
+      ? 0.48
+      : expanded
+        ? Math.max(0.64, 0.88 - Math.min(3, tier) * 0.06)
+        : 0.94;
 
     if (this.camera.far !== camFar) {
       this.camera.far = camFar;
@@ -2852,6 +2899,9 @@ export class TownSceneController {
     unlockedBiomes: BiomeId[];
     roads: string[];
     railSpurBuilt: boolean;
+    interTownRailBuilt?: boolean;
+    interTownRailTarget?: string;
+    nextTownName?: string;
     activeAgentId: AgentId | null;
     selectedAgentId: AgentId | null;
     selectedPlotId: PlotId | null;
@@ -2874,7 +2924,8 @@ export class TownSceneController {
       this.starterResourcesGroup.visible = this.isCleanFrontier;
     }
     if (this.railwayHandle) {
-      this.railwayHandle.group.visible = params.isMainTown || params.railSpurBuilt;
+      this.railwayHandle.group.visible =
+        params.isMainTown || params.railSpurBuilt || Boolean(params.interTownRailBuilt);
     }
 
     // 3. Clear transient visual effects, camera mode & cached cutaway/plot state
@@ -2923,10 +2974,16 @@ export class TownSceneController {
     // 5. Apply outer biomes, instanced cobblestone roads, railway spur & active town's structures
     this.unlockedBiomes = [...params.unlockedBiomes];
     this.railSpurBuilt = params.railSpurBuilt;
+    this.interTownRailBuilt = Boolean(params.interTownRailBuilt);
     this.applyMapExpansionBounds();
     this.expansionHandle?.setUnlockedBiomes(params.unlockedBiomes);
     this.expansionHandle?.setRoads(params.roads);
-    this.railwayHandle?.setRailSpurBuilt(params.railSpurBuilt);
+    this.railwayHandle?.setRailSpurBuilt(params.railSpurBuilt || this.interTownRailBuilt);
+    this.railwayHandle?.setInterTownRailBuilt(
+      this.interTownRailBuilt,
+      params.interTownRailTarget || params.nextTownName || 'Neighbor Town',
+    );
+    this.busHandle?.setDestinationName(params.nextTownName || params.interTownRailTarget || '');
     this.syncStructures(params.structures, params.selectedPlotId);
 
     // 6. Force-rebuild all villager rigs cleanly at their exact active town positions
@@ -2980,21 +3037,29 @@ export class TownSceneController {
     unlockedBiomes: BiomeId[],
     roads: string[],
     railSpurBuilt: boolean,
+    interTownRailBuilt = false,
+    interTownRailTarget = '',
   ): void {
     const prevKey = this.unlockedBiomes.join(',');
     const nextKey = unlockedBiomes.join(',');
     this.unlockedBiomes = [...unlockedBiomes];
     this.railSpurBuilt = railSpurBuilt;
+    this.interTownRailBuilt = interTownRailBuilt;
     this.applyMapExpansionBounds();
     this.expansionHandle?.setUnlockedBiomes(unlockedBiomes);
     this.expansionHandle?.setRoads(roads);
-    this.railwayHandle?.setRailSpurBuilt(railSpurBuilt);
+    this.railwayHandle?.setRailSpurBuilt(railSpurBuilt || interTownRailBuilt);
+    this.railwayHandle?.setInterTownRailBuilt(interTownRailBuilt, interTownRailTarget || undefined);
     if (this.railwayHandle) {
-      this.railwayHandle.group.visible = !this.isCleanFrontier || railSpurBuilt;
+      this.railwayHandle.group.visible = !this.isCleanFrontier || railSpurBuilt || interTownRailBuilt;
     }
     if (prevKey !== nextKey) {
       this.syncStructures(this.lastStructures, this.lastSelectedPlotId);
     }
+  }
+
+  public setBusDestination(townName: string): void {
+    this.busHandle?.setDestinationName(townName);
   }
 
   public syncStructures(
@@ -3129,11 +3194,17 @@ export class TownSceneController {
           foundHospital = s.plotId;
         }
         if (isDefenseStructure(s)) {
+          const isTriple = s.structureType === 'triple_gun_tower';
           towers.push({
             x: meta.x,
-            y: s.structureType === 'watchtower' ? 3.5 : 2.9,
+            y: isTriple ? 3.85 : s.structureType === 'watchtower' ? 3.5 : 2.9,
             z: meta.z,
-            power: s.structureType === 'defense_wall' ? 15 + s.tier * 4 : 10 + s.tier * 3,
+            power: isTriple
+              ? 22 + s.tier * 5
+              : s.structureType === 'defense_wall'
+                ? 15 + s.tier * 4
+                : 10 + s.tier * 3,
+            barrels: isTriple ? 3 : 1,
           });
         }
       }
@@ -3313,6 +3384,30 @@ export class TownSceneController {
     }
   }
 
+  public focusInterTownRail(): void {
+    if (this.cameraMode !== 'orbit') {
+      this.setCameraMode('orbit');
+    }
+    this.followActive = false;
+    this.cameraPosGoal = null;
+    this.focusedCutawayId = null;
+    if (this.railwayHandle) {
+      this.cameraTargetGoal = this.railwayHandle.interTownPortalFocusTarget.clone();
+    }
+  }
+
+  public focusBusStop(): void {
+    if (this.cameraMode !== 'orbit') {
+      this.setCameraMode('orbit');
+    }
+    this.followActive = false;
+    this.cameraPosGoal = null;
+    this.focusedCutawayId = null;
+    if (this.busHandle) {
+      this.cameraTargetGoal = this.busHandle.busStopFocusTarget.clone();
+    }
+  }
+
   public pulseSignalRelay(durationSec = 8): void {
     this.signalRelayHandle?.pulse(durationSec);
   }
@@ -3395,6 +3490,14 @@ export class TownSceneController {
         if (obj.userData?.trainCar) {
           const seat = obj.userData.trainCar === 'passenger' ? 'passenger' : 'cab';
           this.callbacks.onToggleTrainPov?.(seat);
+          return;
+        }
+        if (obj.userData?.shuttleBus) {
+          this.callbacks.onToggleBusPov?.('window');
+          return;
+        }
+        if (obj.userData?.busStop) {
+          this.focusBusStop();
           return;
         }
         if (obj.userData?.plotId) {
@@ -3658,6 +3761,19 @@ export class TownSceneController {
         this.povCurrentLook.y = THREE.MathUtils.damp(this.povCurrentLook.y, _povLookTarget.y, 10, delta);
         this.povCurrentLook.z = THREE.MathUtils.damp(this.povCurrentLook.z, _povLookTarget.z, 10, delta);
         this.camera.lookAt(this.povCurrentLook);
+      } else if (
+        (this.cameraMode === 'bus_window' || this.cameraMode === 'bus_driver') &&
+        this.busHandle
+      ) {
+        const seat = this.cameraMode === 'bus_driver' ? 'driver' : 'window';
+        this.busHandle.getBusCameraPose(seat, _povEye, _povLookTarget);
+        this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, _povEye.x, 16, delta);
+        this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, _povEye.y, 16, delta);
+        this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, _povEye.z, 16, delta);
+        this.povCurrentLook.x = THREE.MathUtils.damp(this.povCurrentLook.x, _povLookTarget.x, 14, delta);
+        this.povCurrentLook.y = THREE.MathUtils.damp(this.povCurrentLook.y, _povLookTarget.y, 14, delta);
+        this.povCurrentLook.z = THREE.MathUtils.damp(this.povCurrentLook.z, _povLookTarget.z, 14, delta);
+        this.camera.lookAt(this.povCurrentLook);
       } else if (this.cameraMode === 'free_roam') {
         const keyFwd =
           (this.freeRoamKeys.has('w') || this.freeRoamKeys.has('arrowup') ? 1 : 0) -
@@ -3803,6 +3919,7 @@ export class TownSceneController {
       if (this.railwayHandle?.group.visible) {
         this.railwayHandle.update(delta, elapsed);
       }
+      this.busHandle?.update(delta, elapsed);
       if (this.signalRelayHandle?.group.visible) {
         this.signalRelayHandle.update(delta, elapsed);
       }
@@ -3813,6 +3930,8 @@ export class TownSceneController {
         this.cameraMode === 'villager_pov' ||
         this.cameraMode === 'train_cab' ||
         this.cameraMode === 'train_passenger' ||
+        this.cameraMode === 'bus_window' ||
+        this.cameraMode === 'bus_driver' ||
         this.cameraMode === 'free_roam';
       const updateCutaway = (entry: CutawayEntry, idx: number) => {
         const isFocused = this.focusedCutawayId === entry.id;
@@ -4106,6 +4225,9 @@ export class TownSceneController {
       if (elapsed - this.lastMinimapEmit > 0.12) {
         this.lastMinimapEmit = elapsed;
         this.callbacks.onMinimapUpdate?.(worldCoords);
+        if (this.busHandle) {
+          this.callbacks.onBusRadarUpdate?.(this.busHandle.getBusRadarPos());
+        }
         if (this.raidState.active && this.raiderHandle) {
           const snap = this.raiderHandle.getRadarSnapshot();
           this.lastEmittedRaiderActive = true;

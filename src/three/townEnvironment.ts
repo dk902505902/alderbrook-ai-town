@@ -711,7 +711,7 @@ export function buildExpandableBiomesAndRoads(
   // -------------------------------------------------------------------------
   // 1. AI-Built Instanced Cobblestone Roads (Single InstancedMesh, 680 cap)
   // -------------------------------------------------------------------------
-  const MAX_ROAD_TILES = 680;
+  const MAX_ROAD_TILES = 960;
   const roadTileGeo = new THREE.BoxGeometry(1.05, 0.045, 0.74);
   const roadTileMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -769,6 +769,24 @@ export function buildExpandableBiomesAndRoads(
       [17.5, 0.5],
       [24.5, 1.5],
       [30.6, 2.2],
+    ],
+    plaza_to_alpine: [
+      [0.0, -13.5],
+      [0.8, -24.5],
+      [1.8, -36.5],
+      [2.5, -47.0],
+    ],
+    plaza_to_river: [
+      [-13.5, -0.5],
+      [-24.5, 0.4],
+      [-36.5, 1.4],
+      [-46.5, 2.2],
+    ],
+    plaza_to_canyon: [
+      [0.0, 13.5],
+      [0.8, 24.5],
+      [1.8, 36.5],
+      [2.2, 47.0],
     ],
   };
 
@@ -1168,6 +1186,403 @@ export function buildExpandableBiomesAndRoads(
   caveGroup.add(caveLight);
 
   root.add(caveGroup);
+
+  // -------------------------------------------------------------------------
+  // 5. Alpine Snow Peaks Biome (Far North, centered around 2, -50)
+  // -------------------------------------------------------------------------
+  const alpineGroup = new THREE.Group();
+  alpineGroup.name = 'biome:alpine';
+  alpineGroup.visible = false;
+
+  const alpineGroundGeo = new THREE.CircleGeometry(22.5, 28);
+  const alpineGroundMat = new THREE.MeshStandardMaterial({
+    color: 0xe2eef8,
+    roughness: 0.88,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  const alpineGround = new THREE.Mesh(alpineGroundGeo, alpineGroundMat);
+  alpineGround.rotation.x = -Math.PI / 2;
+  alpineGround.position.set(2.0, 0.017, -50.0);
+  alpineGround.receiveShadow = true;
+  alpineGroup.add(alpineGround);
+  disposables.push(alpineGroundGeo, alpineGroundMat);
+
+  // Instanced Snow-Capped Alpine Peaks (stone base + snow cap, 2 draw calls)
+  const peakBaseGeo = new THREE.ConeGeometry(4.2, 8.6, 6);
+  peakBaseGeo.translate(0, 4.3, 0);
+  const peakBaseMat = new THREE.MeshStandardMaterial({
+    color: 0x64748b,
+    roughness: 0.9,
+    flatShading: true,
+  });
+  const peakSnowGeo = new THREE.ConeGeometry(2.15, 4.2, 6);
+  peakSnowGeo.translate(0, 6.65, 0);
+  const peakSnowMat = new THREE.MeshStandardMaterial({
+    color: 0xf8fafc,
+    roughness: 0.72,
+    flatShading: true,
+  });
+  disposables.push(peakBaseGeo, peakBaseMat, peakSnowGeo, peakSnowMat);
+
+  const alpinePeakCoords: Array<[number, number, number, number]> = [
+    [-19.5, -59.0, 1.35, 1.45],
+    [-9.0, -64.5, 1.55, 1.75],
+    [3.5, -66.0, 1.65, 1.9],
+    [15.0, -63.5, 1.45, 1.6],
+    [23.5, -56.5, 1.25, 1.35],
+    [-21.0, -45.5, 1.05, 1.15],
+    [22.5, -43.0, 1.0, 1.1],
+    [-2.5, -59.5, 1.15, 1.25],
+    [10.5, -58.5, 1.1, 1.2],
+  ];
+  const alpinePeakBaseMesh = new THREE.InstancedMesh(peakBaseGeo, peakBaseMat, alpinePeakCoords.length);
+  const alpinePeakSnowMesh = new THREE.InstancedMesh(peakSnowGeo, peakSnowMat, alpinePeakCoords.length);
+  alpinePeakCoords.forEach(([px, pz, sx, sy], i) => {
+    dummy.position.set(px, -0.2, pz);
+    dummy.rotation.set(0, i * 0.85, 0);
+    dummy.scale.set(sx, sy, sx);
+    dummy.updateMatrix();
+    alpinePeakBaseMesh.setMatrixAt(i, dummy.matrix);
+    alpinePeakSnowMesh.setMatrixAt(i, dummy.matrix);
+  });
+  alpinePeakBaseMesh.instanceMatrix.needsUpdate = true;
+  alpinePeakSnowMesh.instanceMatrix.needsUpdate = true;
+  alpinePeakBaseMesh.computeBoundingSphere();
+  alpinePeakSnowMesh.computeBoundingSphere();
+  alpineGroup.add(alpinePeakBaseMesh, alpinePeakSnowMesh);
+
+  // Frost-Dusted Alpine Evergreens (reusing pineTrunkGeo + pineCanopyGeo!)
+  const frostCanopyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.84 });
+  disposables.push(frostCanopyMat);
+  const alpinePineCoords: Array<[number, number, number]> = [];
+  for (let i = 0; i < 40; i++) {
+    const a = (i * 2.39996) % (Math.PI * 2);
+    const rad = 4.2 + ((i * 3.7) % 16.5);
+    const tx = 2.0 + Math.cos(a) * rad;
+    const tz = -50.0 + Math.sin(a) * rad;
+    if (tz < -57.5) continue;
+    if (Math.abs(tx - 2.0) < 2.8 && tz > -48.0) continue; // Keep north road clear
+    if (isNearAnyPlot(tx, tz, 4.3)) continue;
+    alpinePineCoords.push([tx, tz, 0.78 + (i % 5) * 0.13]);
+  }
+  const alpineTrunkMesh = new THREE.InstancedMesh(
+    pineTrunkGeo,
+    pineTrunkMat,
+    Math.max(1, alpinePineCoords.length),
+  );
+  const alpineCanopyMesh = new THREE.InstancedMesh(
+    pineCanopyGeo,
+    frostCanopyMat,
+    Math.max(1, alpinePineCoords.length),
+  );
+  const frostPalette = [0x94c5b8, 0x6ba69d, 0xb8dce0, 0x4d8b7d];
+  alpinePineCoords.forEach(([tx, tz, s], i) => {
+    dummy.position.set(tx, 0, tz);
+    dummy.rotation.set(0, i * 1.05, 0);
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    alpineTrunkMesh.setMatrixAt(i, dummy.matrix);
+    alpineCanopyMesh.setMatrixAt(i, dummy.matrix);
+    color.setHex(frostPalette[i % frostPalette.length]);
+    alpineCanopyMesh.setColorAt(i, color);
+  });
+  alpineTrunkMesh.count = alpinePineCoords.length;
+  alpineCanopyMesh.count = alpinePineCoords.length;
+  alpineTrunkMesh.instanceMatrix.needsUpdate = true;
+  alpineCanopyMesh.instanceMatrix.needsUpdate = true;
+  if (alpineCanopyMesh.instanceColor) alpineCanopyMesh.instanceColor.needsUpdate = true;
+  alpineGroup.add(alpineTrunkMesh, alpineCanopyMesh);
+
+  // Glacial Ice Boulders
+  const glacialRockMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.78 });
+  disposables.push(glacialRockMat);
+  const glacialRockCount = 14;
+  const glacialRockMesh = new THREE.InstancedMesh(mossRockGeo, glacialRockMat, glacialRockCount);
+  for (let i = 0; i < glacialRockCount; i++) {
+    const a = (i / glacialRockCount) * Math.PI * 2 + 0.4;
+    const rad = 6.5 + (i % 4) * 3.1;
+    const rx = 2.0 + Math.cos(a) * rad;
+    const rz = -50.0 + Math.sin(a) * rad;
+    dummy.position.set(rx, 0.25, rz);
+    dummy.rotation.set(i * 0.4, i * 0.9, 0.1);
+    dummy.scale.set(1.25 + (i % 3) * 0.35, 0.7, 1.05);
+    dummy.updateMatrix();
+    glacialRockMesh.setMatrixAt(i, dummy.matrix);
+  }
+  glacialRockMesh.instanceMatrix.needsUpdate = true;
+  alpineGroup.add(glacialRockMesh);
+  root.add(alpineGroup);
+
+  // -------------------------------------------------------------------------
+  // 6. Turquoise River Crossing Biome (Far West, centered around -50, 2)
+  // -------------------------------------------------------------------------
+  const riverGroup = new THREE.Group();
+  riverGroup.name = 'biome:river';
+  riverGroup.visible = false;
+
+  const riverMeadowGeo = new THREE.CircleGeometry(22.5, 28);
+  const riverMeadowMat = new THREE.MeshStandardMaterial({
+    color: 0x5c9b64,
+    roughness: 0.92,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  const riverMeadow = new THREE.Mesh(riverMeadowGeo, riverMeadowMat);
+  riverMeadow.rotation.x = -Math.PI / 2;
+  riverMeadow.position.set(-50.0, 0.016, 2.0);
+  riverMeadow.receiveShadow = true;
+  riverGroup.add(riverMeadow);
+  disposables.push(riverMeadowGeo, riverMeadowMat);
+
+  // Winding Shimmering Turquoise River Channel (1 curved ribbon mesh!)
+  const riverCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-42.5, 0.055, -24.5),
+    new THREE.Vector3(-39.5, 0.055, -10.5),
+    new THREE.Vector3(-41.2, 0.055, 2.2),
+    new THREE.Vector3(-38.8, 0.055, 14.5),
+    new THREE.Vector3(-43.5, 0.055, 26.5),
+  ]);
+  const rSegs = 40;
+  const rHalfW = 3.15;
+  const rPos = new Float32Array((rSegs + 1) * 2 * 3);
+  const rNorm = new Float32Array((rSegs + 1) * 2 * 3);
+  const rIdx: number[] = [];
+  const rPt = new THREE.Vector3();
+  const rTan = new THREE.Vector3();
+  const rSide = new THREE.Vector3();
+  const rUp = new THREE.Vector3(0, 1, 0);
+  for (let i = 0; i <= rSegs; i++) {
+    const u = i / rSegs;
+    riverCurve.getPointAt(u, rPt);
+    riverCurve.getTangentAt(u, rTan).normalize();
+    rSide.crossVectors(rUp, rTan).normalize();
+    const v0 = i * 2;
+    const v1 = v0 + 1;
+    rPos[v0 * 3] = rPt.x - rSide.x * rHalfW;
+    rPos[v0 * 3 + 1] = 0.06;
+    rPos[v0 * 3 + 2] = rPt.z - rSide.z * rHalfW;
+    rPos[v1 * 3] = rPt.x + rSide.x * rHalfW;
+    rPos[v1 * 3 + 1] = 0.06;
+    rPos[v1 * 3 + 2] = rPt.z + rSide.z * rHalfW;
+    rNorm[v0 * 3 + 1] = 1;
+    rNorm[v1 * 3 + 1] = 1;
+    if (i < rSegs) {
+      const n0 = (i + 1) * 2;
+      const n1 = n0 + 1;
+      rIdx.push(v0, n0, v1, v1, n0, n1);
+    }
+  }
+  const riverWaterGeo = new THREE.BufferGeometry();
+  riverWaterGeo.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+  riverWaterGeo.setAttribute('normal', new THREE.BufferAttribute(rNorm, 3));
+  riverWaterGeo.setIndex(rIdx);
+  riverWaterGeo.computeBoundingSphere();
+
+  const riverWaterMat = new THREE.MeshStandardMaterial({
+    color: 0x06b6d4,
+    emissive: 0x0891b2,
+    emissiveIntensity: 0.34,
+    roughness: 0.16,
+    metalness: 0.25,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+  });
+  const riverWaterMesh = new THREE.Mesh(riverWaterGeo, riverWaterMat);
+  riverGroup.add(riverWaterMesh);
+  disposables.push(riverWaterGeo, riverWaterMat);
+
+  // Wooden Arched Crossing Bridge spanning the Turquoise River at (-41.0, 2.0)
+  const bridgeGroup = new THREE.Group();
+  bridgeGroup.position.set(-41.0, 0, 2.0);
+  const bridgeWoodMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.84 });
+  const bridgeRailMat = new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.86 });
+  const bridgeDeckGeo = new THREE.BoxGeometry(7.8, 0.22, 2.45);
+  const bridgeDeck = new THREE.Mesh(bridgeDeckGeo, bridgeWoodMat);
+  bridgeDeck.position.set(0, 0.42, 0);
+  const bridgeRampLGeo = new THREE.BoxGeometry(1.75, 0.18, 2.4);
+  const bridgeRampL = new THREE.Mesh(bridgeRampLGeo, bridgeWoodMat);
+  bridgeRampL.position.set(-4.5, 0.22, 0);
+  bridgeRampL.rotation.z = 0.22;
+  const bridgeRampR = new THREE.Mesh(bridgeRampLGeo, bridgeWoodMat);
+  bridgeRampR.position.set(4.5, 0.22, 0);
+  bridgeRampR.rotation.z = -0.22;
+  const bridgeRailGeo = new THREE.BoxGeometry(7.9, 0.12, 0.12);
+  const bridgeRailN = new THREE.Mesh(bridgeRailGeo, bridgeRailMat);
+  bridgeRailN.position.set(0, 1.05, -1.12);
+  const bridgeRailS = new THREE.Mesh(bridgeRailGeo, bridgeRailMat);
+  bridgeRailS.position.set(0, 1.05, 1.12);
+  const bridgePostGeo = new THREE.BoxGeometry(0.16, 0.82, 0.16);
+  for (const bx of [-3.6, -1.2, 1.2, 3.6]) {
+    for (const bz of [-1.12, 1.12]) {
+      const post = new THREE.Mesh(bridgePostGeo, bridgeRailMat);
+      post.position.set(bx, 0.72, bz);
+      bridgeGroup.add(post);
+    }
+  }
+  bridgeGroup.add(bridgeDeck, bridgeRampL, bridgeRampR, bridgeRailN, bridgeRailS);
+  riverGroup.add(bridgeGroup);
+  disposables.push(bridgeWoodMat, bridgeRailMat, bridgeDeckGeo, bridgeRampLGeo, bridgeRailGeo, bridgePostGeo);
+
+  // Riverbank Reeds & Smooth River Stones (InstancedMesh)
+  const reedGeo = new THREE.CylinderGeometry(0.04, 0.06, 1.05, 5);
+  reedGeo.translate(0, 0.52, 0);
+  const reedMat = new THREE.MeshStandardMaterial({ color: 0x3f8f4e, roughness: 0.84 });
+  const riverStoneMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.86 });
+  disposables.push(reedGeo, reedMat, riverStoneMat);
+
+  const reedCoords: Array<[number, number, number]> = [];
+  const riverStoneCoords: Array<[number, number, number]> = [];
+  for (let i = 0; i < 36; i++) {
+    const u = (i + 0.5) / 36;
+    riverCurve.getPointAt(u, rPt);
+    riverCurve.getTangentAt(u, rTan).normalize();
+    rSide.crossVectors(rUp, rTan).normalize();
+    const bank = i % 2 === 0 ? 1 : -1;
+    const off = rHalfW + 0.45 + (i % 3) * 0.42;
+    const rx = rPt.x + rSide.x * bank * off;
+    const rz = rPt.z + rSide.z * bank * off;
+    if (Math.abs(rz - 2.0) < 2.2) continue; // Keep bridge approaches open
+    reedCoords.push([rx, rz, 0.75 + (i % 4) * 0.18]);
+    if (i % 2 === 0) {
+      riverStoneCoords.push([
+        rx + rSide.x * bank * 0.65,
+        rz + rSide.z * bank * 0.65,
+        0.75 + (i % 3) * 0.3,
+      ]);
+    }
+  }
+  const reedMesh = new THREE.InstancedMesh(reedGeo, reedMat, Math.max(1, reedCoords.length));
+  reedCoords.forEach(([rx, rz, s], i) => {
+    dummy.position.set(rx, 0, rz);
+    dummy.rotation.set((i % 3 - 1) * 0.1, i * 0.7, ((i + 1) % 3 - 1) * 0.1);
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    reedMesh.setMatrixAt(i, dummy.matrix);
+  });
+  reedMesh.count = reedCoords.length;
+  reedMesh.instanceMatrix.needsUpdate = true;
+
+  const riverStoneMesh = new THREE.InstancedMesh(
+    mossRockGeo,
+    riverStoneMat,
+    Math.max(1, riverStoneCoords.length),
+  );
+  riverStoneCoords.forEach(([sx, sz, s], i) => {
+    dummy.position.set(sx, 0.22, sz);
+    dummy.rotation.set(0.2, i * 1.2, 0);
+    dummy.scale.set(s, 0.52, s * 0.85);
+    dummy.updateMatrix();
+    riverStoneMesh.setMatrixAt(i, dummy.matrix);
+  });
+  riverStoneMesh.count = riverStoneCoords.length;
+  riverStoneMesh.instanceMatrix.needsUpdate = true;
+  riverGroup.add(reedMesh, riverStoneMesh);
+  root.add(riverGroup);
+
+  // -------------------------------------------------------------------------
+  // 7. Red-Rock Canyon Biome (Far South, centered around 2, 50)
+  // -------------------------------------------------------------------------
+  const canyonGroup = new THREE.Group();
+  canyonGroup.name = 'biome:canyon';
+  canyonGroup.visible = false;
+
+  const canyonGroundGeo = new THREE.CircleGeometry(22.5, 28);
+  const canyonGroundMat = new THREE.MeshStandardMaterial({
+    color: 0xc96a3b,
+    roughness: 0.94,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  const canyonGround = new THREE.Mesh(canyonGroundGeo, canyonGroundMat);
+  canyonGround.rotation.x = -Math.PI / 2;
+  canyonGround.position.set(2.0, 0.017, 50.0);
+  canyonGround.receiveShadow = true;
+  canyonGroup.add(canyonGround);
+  disposables.push(canyonGroundGeo, canyonGroundMat);
+
+  // Stepped Red-Rock Mesas (InstancedMesh with per-instance terracotta color variation)
+  const mesaLow = new THREE.CylinderGeometry(3.2, 4.1, 2.8, 7);
+  mesaLow.translate(0, 1.4, 0);
+  const mesaTop = new THREE.CylinderGeometry(2.15, 2.85, 2.1, 7);
+  mesaTop.translate(0, 3.85, 0);
+  const mesaGeo = mergeSimpleGeometries([mesaLow, mesaTop]);
+  mesaLow.dispose();
+  mesaTop.dispose();
+  const mesaMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.9,
+    flatShading: true,
+  });
+  disposables.push(mesaGeo, mesaMat);
+
+  const mesaCoords: Array<[number, number, number, number]> = [
+    [-19.5, 58.5, 1.35, 1.4],
+    [-8.5, 63.5, 1.5, 1.65],
+    [4.5, 64.5, 1.55, 1.75],
+    [16.5, 61.5, 1.3, 1.45],
+    [23.0, 52.0, 1.15, 1.25],
+    [-21.0, 44.0, 1.05, 1.15],
+    [21.5, 41.0, 1.0, 1.05],
+    [-1.5, 58.5, 1.05, 1.2],
+  ];
+  const mesaPalette = [0xb4532a, 0xc2410c, 0x9a3412, 0xd97746];
+  const mesaMesh = new THREE.InstancedMesh(mesaGeo, mesaMat, mesaCoords.length);
+  mesaCoords.forEach(([mx, mz, sx, sy], i) => {
+    dummy.position.set(mx, 0, mz);
+    dummy.rotation.set(0, i * 0.78, 0);
+    dummy.scale.set(sx, sy, sx * 0.9);
+    dummy.updateMatrix();
+    mesaMesh.setMatrixAt(i, dummy.matrix);
+    color.setHex(mesaPalette[i % mesaPalette.length]);
+    mesaMesh.setColorAt(i, color);
+  });
+  mesaMesh.instanceMatrix.needsUpdate = true;
+  if (mesaMesh.instanceColor) mesaMesh.instanceColor.needsUpdate = true;
+  mesaMesh.computeBoundingSphere();
+  canyonGroup.add(mesaMesh);
+
+  // Red-Rock Natural Canyon Arch Landmark at (11.5, 55.5)
+  const canyonArchMat = new THREE.MeshStandardMaterial({ color: 0xb4532a, roughness: 0.9 });
+  const cArchColGeo = new THREE.BoxGeometry(1.3, 4.0, 1.45);
+  const cArchSpanGeo = new THREE.BoxGeometry(5.2, 1.15, 1.55);
+  const cArchL = new THREE.Mesh(cArchColGeo, canyonArchMat);
+  cArchL.position.set(9.2, 2.0, 56.2);
+  const cArchR = new THREE.Mesh(cArchColGeo, canyonArchMat);
+  cArchR.position.set(13.4, 2.0, 54.6);
+  const cArchSpan = new THREE.Mesh(cArchSpanGeo, canyonArchMat);
+  cArchSpan.position.set(11.3, 4.25, 55.4);
+  cArchSpan.rotation.y = Math.atan2(1.6, 4.2);
+  canyonGroup.add(cArchL, cArchR, cArchSpan);
+  disposables.push(canyonArchMat, cArchColGeo, cArchSpanGeo);
+
+  // Canyon Scrub & Hoodoo Spires (InstancedMesh)
+  const scrubGeo = new THREE.DodecahedronGeometry(0.45, 0);
+  const scrubMat = new THREE.MeshStandardMaterial({ color: 0x6b7c3f, roughness: 0.92 });
+  disposables.push(scrubGeo, scrubMat);
+  const scrubCoords: Array<[number, number, number]> = [];
+  for (let i = 0; i < 24; i++) {
+    const a = (i * 2.39996) % (Math.PI * 2);
+    const rad = 4.5 + ((i * 2.9) % 14.5);
+    const sx = 2.0 + Math.cos(a) * rad;
+    const sz = 50.0 + Math.sin(a) * rad;
+    if (isNearAnyPlot(sx, sz, 4.1)) continue;
+    if (Math.abs(sx - 2.0) < 2.6 && sz < 48.0) continue;
+    scrubCoords.push([sx, sz, 0.75 + (i % 3) * 0.25]);
+  }
+  const scrubMesh = new THREE.InstancedMesh(scrubGeo, scrubMat, Math.max(1, scrubCoords.length));
+  scrubCoords.forEach(([sx, sz, s], i) => {
+    dummy.position.set(sx, 0.22, sz);
+    dummy.rotation.set(0, i * 1.1, 0);
+    dummy.scale.set(s * 1.15, s * 0.72, s);
+    dummy.updateMatrix();
+    scrubMesh.setMatrixAt(i, dummy.matrix);
+  });
+  scrubMesh.count = scrubCoords.length;
+  scrubMesh.instanceMatrix.needsUpdate = true;
+  canyonGroup.add(scrubMesh);
+  root.add(canyonGroup);
+
   scene.add(root);
 
   let activeQuality: GraphicsQuality = 'medium';
@@ -1182,6 +1597,9 @@ export function buildExpandableBiomesAndRoads(
       forestGroup.visible = set.has('forest');
       desertGroup.visible = set.has('desert');
       caveGroup.visible = set.has('cave');
+      alpineGroup.visible = set.has('alpine');
+      riverGroup.visible = set.has('river');
+      canyonGroup.visible = set.has('canyon');
       caveLight.visible = set.has('cave') && activeQuality !== 'low';
     },
     setRoads: (roads: string[]) => {
@@ -1196,6 +1614,12 @@ export function buildExpandableBiomesAndRoads(
       forestRockMesh.count = Math.max(5, Math.round(rockCount * factor));
       cactusMesh.count = Math.max(8, Math.round(cactusCoords.length * factor));
       crystalMesh.count = Math.max(10, Math.round(crystalCount * factor));
+      alpineTrunkMesh.count = Math.max(8, Math.round(alpinePineCoords.length * factor));
+      alpineCanopyMesh.count = alpineTrunkMesh.count;
+      glacialRockMesh.count = Math.max(5, Math.round(glacialRockCount * factor));
+      reedMesh.count = Math.max(10, Math.round(reedCoords.length * factor));
+      riverStoneMesh.count = Math.max(5, Math.round(riverStoneCoords.length * factor));
+      scrubMesh.count = Math.max(8, Math.round(scrubCoords.length * factor));
       caveLight.visible = caveGroup.visible && quality !== 'low';
     },
     applyTheme: (theme: TownTheme) => {
@@ -1204,16 +1628,31 @@ export function buildExpandableBiomesAndRoads(
       if (theme === 'fantasy_night') {
         forestGroundMat.color.setHex(0x1f3a3d);
         desertGroundMat.color.setHex(0x8c6d46);
+        alpineGroundMat.color.setHex(0x94a3b8);
+        riverMeadowMat.color.setHex(0x274c43);
+        riverWaterMat.color.setHex(0x0284c7);
+        riverWaterMat.emissive.setHex(0x38bdf8);
+        canyonGroundMat.color.setHex(0x7c3a25);
         crystalMat.emissive.setHex(0xa855f7);
         caveLight.color.setHex(0xc084fc);
       } else if (theme === 'solarpunk_oasis') {
         forestGroundMat.color.setHex(0x2f7d57);
         desertGroundMat.color.setHex(0xf0c987);
+        alpineGroundMat.color.setHex(0xdbeafe);
+        riverMeadowMat.color.setHex(0x3ea86b);
+        riverWaterMat.color.setHex(0x14b8a6);
+        riverWaterMat.emissive.setHex(0x2dd4bf);
+        canyonGroundMat.color.setHex(0xd97746);
         crystalMat.emissive.setHex(0x14b8a6);
         caveLight.color.setHex(0x2dd4bf);
       } else {
         forestGroundMat.color.setHex(0x3f6234);
         desertGroundMat.color.setHex(0xe6be7a);
+        alpineGroundMat.color.setHex(0xe2eef8);
+        riverMeadowMat.color.setHex(0x5c9b64);
+        riverWaterMat.color.setHex(0x06b6d4);
+        riverWaterMat.emissive.setHex(0x0891b2);
+        canyonGroundMat.color.setHex(0xc96a3b);
         crystalMat.emissive.setHex(0x06b6d4);
         caveLight.color.setHex(0x22d3ee);
       }
@@ -1225,6 +1664,9 @@ export function buildExpandableBiomesAndRoads(
         if (activeQuality !== 'low') {
           caveLight.intensity = 1.15 + Math.sin(elapsed * 2.2) * 0.3;
         }
+      }
+      if (riverGroup.visible) {
+        riverWaterMat.emissiveIntensity = 0.28 + Math.sin(elapsed * 2.1) * 0.1;
       }
     },
     dispose: () => {

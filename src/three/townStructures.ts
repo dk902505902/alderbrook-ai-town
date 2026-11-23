@@ -674,6 +674,105 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.BoxGeometry(0.68, 1.02, 0.12), woodMat, 0, 0.89, 1.04);
     addPart(group, new THREE.BoxGeometry(0.42, 0.52, 0.08), bannerMat, -0.82, 1.25, 1.04);
     addPart(group, new THREE.BoxGeometry(0.42, 0.52, 0.08), bannerMat, 0.82, 1.25, 1.04);
+  } else if (type === 'triple_gun_tower') {
+    const towerStoneMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.84 }),
+      'stone',
+    );
+    const darkStoneMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.88 }),
+      'stone',
+    );
+    const timberMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.8 }),
+      'darkWood',
+    );
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.34,
+      metalness: 0.78,
+    });
+    const brassMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.25, metalness: 0.86 }),
+      'gold',
+    );
+    const sightCrystalMat = new THREE.MeshStandardMaterial({
+      color: 0x67e8f9,
+      emissive: 0x06b6d4,
+      emissiveIntensity: 1.25,
+      roughness: 0.2,
+    });
+    const bannerMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.58 }),
+      'banner',
+    );
+    cutawayRoofMaterials.push(darkStoneMat);
+
+    // Fortified Stone-and-Timber Watchtower Base with hollow cutaway lower guardroom
+    addPart(group, new THREE.BoxGeometry(2.95, 0.42, 2.95), darkStoneMat, 0, 0.21, 0);
+    addHollowBoxWalls(group, 2.38, 2.28, 2.38, 0.42, 0.18, towerStoneMat, interiorFloorMat);
+
+    // Corner Timber Framing Columns
+    const colGeo = new THREE.BoxGeometry(0.24, 2.42, 0.24);
+    for (const [cx, cz] of [
+      [-1.16, -1.16],
+      [1.16, -1.16],
+      [-1.16, 1.16],
+      [1.16, 1.16],
+    ] as Array<[number, number]>) {
+      addPart(group, colGeo, timberMat, cx, 1.62, cz);
+    }
+
+    // Interior: Tactical range-table, brass ammo rack & warm guard brazier
+    addWoodenTable(group, -0.32, 0.44, 0.1, 0.72, 0.48, interiorWoodMat);
+    addWallShelf(group, 0.84, 0.44, -0.1, -Math.PI / 2, interiorWoodMat, brassMat);
+    addPart(group, new THREE.CylinderGeometry(0.16, 0.11, 0.32, 6), hearthStoneMat, -0.56, 0.6, -0.56);
+    addPart(group, new THREE.OctahedronGeometry(0.13, 0), createFireGlowMat(), -0.56, 0.86, -0.56);
+
+    // Elevated Timber-and-Stone Battlement Deck (y = 2.82) with 4 corner merlons
+    addPart(group, new THREE.BoxGeometry(2.74, 0.24, 2.74), timberMat, 0, 2.82, 0);
+    for (const [mx, mz] of [
+      [-1.14, -1.14],
+      [1.14, -1.14],
+      [-1.14, 1.14],
+      [1.14, 1.14],
+    ] as Array<[number, number]>) {
+      addPart(group, new THREE.BoxGeometry(0.46, 0.54, 0.46), darkStoneMat, mx, 3.2, mz);
+    }
+
+    // Rotating 3-Barrel Brass & Iron Defense Turret mounted on top of the watchtower!
+    const turret = new THREE.Group();
+    turret.position.set(0, 2.98, 0);
+
+    // Armored turret ring & housing
+    addPart(turret, new THREE.CylinderGeometry(0.76, 0.86, 0.28, 12), darkStoneMat, 0, 0.14, 0);
+    addPart(turret, new THREE.CylinderGeometry(0.68, 0.74, 0.12, 12), brassMat, 0, 0.32, 0);
+    addPart(turret, new THREE.BoxGeometry(1.06, 0.52, 0.96), ironMat, 0, 0.62, -0.05);
+    addPart(turret, new THREE.BoxGeometry(1.12, 0.12, 1.02), brassMat, 0, 0.88, -0.05);
+
+    // 3 Parallel Brass-Ringed Cannon Barrels pointing +Z (left, center-extended, right)
+    const barrelGeo = new THREE.CylinderGeometry(0.1, 0.14, 1.48, 8);
+    const muzzleRingGeo = new THREE.TorusGeometry(0.115, 0.032, 6, 10);
+    for (const [bx, by, bz] of [
+      [-0.3, 0.64, 0.58],
+      [0.0, 0.72, 0.72],
+      [0.3, 0.64, 0.58],
+    ] as Array<[number, number, number]>) {
+      addPart(turret, barrelGeo, ironMat, bx, by, bz, Math.PI / 2 - 0.1);
+      addPart(turret, muzzleRingGeo, brassMat, bx, by + 0.07, bz + 0.68);
+    }
+
+    // Rear brass ammo drum + glowing rangefinder sight crystal on top
+    addPart(turret, new THREE.CylinderGeometry(0.24, 0.24, 0.62, 10), brassMat, 0, 0.62, -0.62, 0, 0, Math.PI / 2);
+    addPart(turret, new THREE.OctahedronGeometry(0.18, 0), sightCrystalMat, 0, 1.12, 0.08);
+
+    group.add(turret);
+    group.userData.defenseTurret = turret;
+
+    // Reinforced wooden tower door & twin azure defense banners
+    addPart(group, new THREE.BoxGeometry(0.66, 1.06, 0.12), timberMat, 0, 0.95, 1.2);
+    addPart(group, new THREE.BoxGeometry(0.38, 0.64, 0.08), bannerMat, -0.78, 1.85, 1.22);
+    addPart(group, new THREE.BoxGeometry(0.38, 0.64, 0.08), bannerMat, 0.78, 1.85, 1.22);
   } else if (type === 'custom') {
     const style: CustomBuildingStyle = structure.customStyle || 'lab';
     const labelText = (structure.customLabel || 'Research Lab').trim().slice(0, 24);

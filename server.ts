@@ -24,7 +24,22 @@ type PlotId =
   | 'plot_n_west'
   | 'plot_n_east'
   | 'plot_s_west'
-  | 'plot_s_east';
+  | 'plot_s_east'
+  | 'plot_forest_1'
+  | 'plot_forest_2'
+  | 'plot_desert_1'
+  | 'plot_desert_2'
+  | 'plot_cave_1'
+  | 'plot_cave_2'
+  | 'plot_alpine_1'
+  | 'plot_alpine_2'
+  | 'plot_alpine_3'
+  | 'plot_river_1'
+  | 'plot_river_2'
+  | 'plot_river_3'
+  | 'plot_canyon_1'
+  | 'plot_canyon_2'
+  | 'plot_canyon_3';
 
 type StructureType =
   | 'bakery'
@@ -34,7 +49,10 @@ type StructureType =
   | 'library'
   | 'granary'
   | 'pavilion'
-  | 'clock_tower';
+  | 'clock_tower'
+  | 'hospital'
+  | 'defense_wall'
+  | 'triple_gun_tower';
 
 type BuildAction = 'none' | 'propose' | 'construct' | 'upgrade';
 type WeatherMode = 'summer' | 'rain' | 'winter';
@@ -94,6 +112,8 @@ interface TurnRequestBody {
     morale?: number;
   };
   socialBonds?: string;
+  interTownRailBuilt?: boolean;
+  otherTownNames?: string[];
 }
 
 interface HireRequestBody {
@@ -146,6 +166,7 @@ interface TurnAIResult {
   visit_plot_id: PlotId | null;
   hired_worker: HiredWorkerSpec | null;
   unhired_worker: { agent_id: string; reason: string } | null;
+  build_inter_town_rail: { target_town: string; reason: string } | null;
 }
 
 const CORE_COUNCIL_IDS = new Set([
@@ -184,6 +205,21 @@ const ALL_PLOTS: PlotId[] = [
   'plot_n_east',
   'plot_s_west',
   'plot_s_east',
+  'plot_forest_1',
+  'plot_forest_2',
+  'plot_desert_1',
+  'plot_desert_2',
+  'plot_cave_1',
+  'plot_cave_2',
+  'plot_alpine_1',
+  'plot_alpine_2',
+  'plot_alpine_3',
+  'plot_river_1',
+  'plot_river_2',
+  'plot_river_3',
+  'plot_canyon_1',
+  'plot_canyon_2',
+  'plot_canyon_3',
 ];
 const VALID_PLOTS = new Set<PlotId>(ALL_PLOTS);
 
@@ -196,6 +232,9 @@ const ALL_STRUCTURES: StructureType[] = [
   'granary',
   'pavilion',
   'clock_tower',
+  'hospital',
+  'defense_wall',
+  'triple_gun_tower',
 ];
 const VALID_STRUCTURES = new Set<StructureType>(ALL_STRUCTURES);
 
@@ -589,6 +628,8 @@ function sanitizeTurnResult(
   structures: StructureSnapshot[],
   weather: WeatherMode,
   allowAutonomousHire: boolean,
+  otherTownNames: string[] = [],
+  interTownRailBuilt = false,
 ): TurnAIResult {
   const rawLoc = String(parsed.target_location ?? activeAgent.location).trim().toLowerCase() as LocationId;
   const target_location: LocationId = VALID_LOCATIONS.has(rawLoc) ? rawLoc : activeAgent.location;
@@ -679,6 +720,38 @@ function sanitizeTurnResult(
     }
   }
 
+  let build_inter_town_rail: { target_town: string; reason: string } | null = null;
+  if (
+    activeAgent.id === 'mayor_sterling' &&
+    !interTownRailBuilt &&
+    otherTownNames.length > 0 &&
+    parsed.build_inter_town_rail
+  ) {
+    let targetCandidate = '';
+    let railReason = 'Connected inter-town express railway for regional trade.';
+    if (typeof parsed.build_inter_town_rail === 'string') {
+      targetCandidate = parsed.build_inter_town_rail.trim();
+    } else if (typeof parsed.build_inter_town_rail === 'object') {
+      const rr = parsed.build_inter_town_rail as Record<string, unknown>;
+      targetCandidate = String(rr.target_town ?? rr.town ?? rr.target ?? '').trim();
+      if (typeof rr.reason === 'string' && rr.reason.trim()) {
+        railReason = rr.reason.trim().slice(0, 140);
+      }
+    }
+    if (targetCandidate) {
+      const low = targetCandidate.toLowerCase();
+      const matched =
+        otherTownNames.find((n) => n.toLowerCase() === low) ||
+        otherTownNames.find(
+          (n) => n.toLowerCase().includes(low) || low.includes(n.toLowerCase()),
+        ) ||
+        otherTownNames[0];
+      if (matched) {
+        build_inter_town_rail = { target_town: matched.slice(0, 48), reason: railReason };
+      }
+    }
+  }
+
   return {
     thought,
     target_location,
@@ -690,6 +763,7 @@ function sanitizeTurnResult(
     visit_plot_id,
     hired_worker,
     unhired_worker,
+    build_inter_town_rail,
   };
 }
 
@@ -1242,6 +1316,9 @@ async function createServer() {
       unlockedBiomes?: unknown;
       roads?: unknown;
       railSpurBuilt?: unknown;
+      interTownRailBuilt?: unknown;
+      interTownRailTarget?: unknown;
+      otherTownNames?: unknown;
       autoMode?: unknown;
       metrics?: { prosperity?: number; orderLevel?: number; morale?: number };
       agents?: Array<{
@@ -1272,17 +1349,26 @@ async function createServer() {
     const townName = String(body.townName ?? 'Alderbrook').trim().slice(0, 60) || 'Alderbrook';
     const weather = normalizeWeatherMode(body.weather);
     const agentsList = Array.isArray(body.agents) ? body.agents.slice(0, MAX_TOWN_AGENTS) : [];
-    const structsList = Array.isArray(body.structures) ? body.structures.slice(0, 14) : [];
+    const structsList = Array.isArray(body.structures) ? body.structures.slice(0, 23) : [];
     const logsList = Array.isArray(body.recentLogs) ? body.recentLogs.slice(0, 4) : [];
     const historyList = Array.isArray(body.history) ? body.history.slice(-4) : [];
     const webResultsList = Array.isArray(body.webResults) ? body.webResults.slice(0, 5) : [];
+    const validBiomeSet = new Set(['forest', 'desert', 'cave', 'alpine', 'river', 'canyon']);
     const unlockedBiomes = Array.isArray(body.unlockedBiomes)
       ? body.unlockedBiomes
           .map((b) => String(b).toLowerCase())
-          .filter((b) => b === 'forest' || b === 'desert' || b === 'cave')
+          .filter((b) => validBiomeSet.has(b))
       : [];
     const roadsCount = Array.isArray(body.roads) ? body.roads.length : 0;
     const railSpurBuilt = Boolean(body.railSpurBuilt);
+    const interTownRailBuilt = Boolean(body.interTownRailBuilt);
+    const interTownRailTarget = String(body.interTownRailTarget ?? '').trim().slice(0, 48);
+    const otherTownNames = Array.isArray(body.otherTownNames)
+      ? body.otherTownNames
+          .map((t) => String(t).trim().slice(0, 48))
+          .filter(Boolean)
+          .slice(0, 8)
+      : [];
     const autoMode = Boolean(body.autoMode);
 
     const systemPrompt =
@@ -1296,20 +1382,21 @@ async function createServer() {
         : [
             `You are Mayor Sterling, the warm, decisive Rank 1 leader of ${townName} AI Town.`,
             'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-            'Valid action.type values: "none", "build", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "toggle_auto", "trigger_raid", "toggle_raids".',
-            '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Town Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave") if a biome was specified.',
+            'Valid action.type values: "none", "build", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "build_inter_town_rail", "toggle_auto", "trigger_raid", "toggle_raids".',
+            '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Triple-Gun Defense Tower, Town Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave"|"alpine"|"river"|"canyon") if a biome was specified.',
             '- Use "hire" to recruit workers (e.g. medic, researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
             '- Use "unhire" when asked to unhire, fire, dismiss, let go, or lay off a hired specialist—OR if you decide on your own to dismiss a redundant hired worker to trim upkeep or free a slot. Set action.target to the hired worker\'s name, id, or role. Core council members (Mayor Sterling, Commander Vance, Architect Lyra, Worker Kai, Worker Pip) cannot be unhired.',
             '- Use "decree" for town-wide announcements, festivals, or civic orders. Set action.decree.',
             '- Use "create_town" when the player asks to create/start a NEW saved town or city (never overwrites existing towns). Set action.townName to the new town name.',
-            '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest" for Dense Forest, "desert" for Desert Dunes, "cave" for Crystal Mountain Cave). Set action.biome.',
+            '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest" Dense Forest, "desert" Desert Dunes, "cave" Crystal Cave, "alpine" Alpine Snow Peaks, "river" Turquoise River Crossing, "canyon" Red-Rock Canyon). Set action.biome.',
             '- Use "build_road" when asked to build/lay cobblestone roads to a building, plot, or outer biome. Set action.roadTarget.',
-            '- Use "extend_rail" when asked to extend the train track, railway spur, or outer Frontier Depot stop.',
+            '- Use "extend_rail" when asked to extend the local outer railway loop / Frontier Depot stop.',
+            '- Use "build_inter_town_rail" when asked to build a train track / express railway connecting to ANOTHER saved town (e.g. Moon or another town in the Town Switcher), OR if you decide to connect one. Set action.townName to the destination town name.',
             '- Use "toggle_auto" when asked to turn Automatic City-Builder mode ON or OFF (e.g., "Mayor go automatic", "Stop automatic"). Set action.autoEnabled (boolean).',
             '- Use "trigger_raid" when asked to trigger/start an enemy raider attack wave.',
             '- Use "toggle_raids" when asked to turn Enemy Raids ON or OFF / switch to peaceful mode. Set action.raidsEnabled (boolean).',
             '- Otherwise set action.type to "none".',
-            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|unhire|decree|create_town|expand_biome|build_road|extend_rail|toggle_auto|trigger_raid|toggle_raids","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|unhire|decree|create_town|expand_biome|build_road|extend_rail|build_inter_town_rail|toggle_auto|trigger_raid|toggle_raids","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
           ].join('\n');
 
     const webResultsBlock =
@@ -1327,9 +1414,10 @@ async function createServer() {
     const contextSummary = [
       `Town: ${townName} | Auto Mode: ${autoMode ? 'ON' : 'OFF'} | Weather: ${weather}, Time: ${String(body.timeOfDay ?? 'day')}, Villagers: ${agentsList.length}/${MAX_TOWN_AGENTS}`,
       `Pulse: Prosperity ${body.metrics?.prosperity ?? 68}, Order ${body.metrics?.orderLevel ?? 74}, Morale ${body.metrics?.morale ?? 72}`,
-      `Outer Biomes Unlocked: ${unlockedBiomes.length > 0 ? unlockedBiomes.join(', ') : 'None yet (available: forest, desert, cave)'} | Cobblestone Roads: ${roadsCount} | Rail Spur: ${railSpurBuilt ? 'Built' : 'Not built'}`,
+      `Outer Biomes Unlocked: ${unlockedBiomes.length > 0 ? unlockedBiomes.join(', ') : 'None yet (available: forest, desert, cave, alpine, river, canyon)'} | Cobblestone Roads: ${roadsCount} | Rail Spur: ${railSpurBuilt ? 'Built' : 'Not built'} | Inter-Town Rail: ${interTownRailBuilt ? `Connected to ${interTownRailTarget || 'neighboring town'}` : 'Not built'}`,
+      otherTownNames.length > 0 ? `Other Saved Towns Reachable by Rail/Bus: ${otherTownNames.join(', ')}` : '',
       body.activeDecree ? `Active Decree: ${String(body.activeDecree).slice(0, 140)}` : 'Active Decree: None',
-      `Buildings (${structsList.length}/${8 + unlockedBiomes.length * 2}): ${
+      `Buildings (${structsList.length}): ${
         structsList.length > 0
           ? structsList
               .map(
@@ -1412,16 +1500,14 @@ async function createServer() {
         'expand_biome',
         'build_road',
         'extend_rail',
+        'build_inter_town_rail',
         'toggle_auto',
         'trigger_raid',
         'toggle_raids',
       ]);
       const actionType = allowedTypes.has(rawType) ? rawType : 'none';
       const rawBiome = typeof rawAction.biome === 'string' ? rawAction.biome.trim().toLowerCase() : '';
-      const validBiome =
-        rawBiome === 'forest' || rawBiome === 'desert' || rawBiome === 'cave'
-          ? rawBiome
-          : undefined;
+      const validBiome = validBiomeSet.has(rawBiome) ? rawBiome : undefined;
 
       res.json({
         reply: reply || `Consider it done — ${townName} is already moving on your word.`,
@@ -1922,6 +2008,19 @@ async function createServer() {
         ].join('\n')
       : '';
 
+    const otherTownNames = Array.isArray(body.otherTownNames)
+      ? body.otherTownNames.map((t) => String(t).trim().slice(0, 48)).filter(Boolean).slice(0, 8)
+      : [];
+    const interTownRailBuilt = Boolean(body.interTownRailBuilt);
+    const allowAutonomousInterTownRail =
+      activeAgent.id === 'mayor_sterling' && !interTownRailBuilt && otherTownNames.length > 0;
+    const interTownRailSchemaHint = allowAutonomousInterTownRail
+      ? [
+          `Autonomous Inter-Town Railway Authority (Neighboring saved towns: ${otherTownNames.join(', ')}):`,
+          `- You MAY optionally set "build_inter_town_rail": { "target_town": "${otherTownNames[0]}", "reason": "short reason" } if you want to construct an Inter-Town Express Railway Track linking directly to another saved town for trade & travel. Leave "build_inter_town_rail": null on turns when local priorities come first.`,
+        ].join('\n')
+      : '';
+
     const systemPrompt = [
       `You control ${activeAgent.name} (${activeAgent.role}) in Alderbrook, a self-building 3D AI town simulation.`,
       getHierarchyRules(activeAgent),
@@ -1930,13 +2029,14 @@ async function createServer() {
       `Valid plot_id values: ${ALL_PLOTS.map((p) => `"${p}"`).join(', ')}, or null.`,
       `Valid structure_type values: ${ALL_STRUCTURES.map((s) => `"${s}"`).join(', ')}, or null.`,
       'Self-building & Weather-Smart rules:',
-      '- Use build_order.action = "propose" (Rank 1 or Rank 2 only) to stake a weather-smart structure_type on an EMPTY plot_id.',
+      '- Use build_order.action = "propose" (Rank 1 or Rank 2 only) to stake a weather-smart structure_type on an EMPTY plot_id (including hospital, defense_wall, or triple_gun_tower when fortifying).',
       '- Use build_order.action = "construct" (especially Rank 3 Workers or helping Managers) when any plot is UNDER CONSTRUCTION.',
       '- Use build_order.action = "upgrade" (Rank 1 or Rank 2) on a COMPLETE plot with Tier < 3.',
       '- Use build_order.action = "none" if simply coordinating, patrolling, tending your workplace, or conversing.',
       '- Optional "visit_plot_id": Set to your assigned plot or a completed shelter plot (pavilion, bakery, library) when tending or taking brief shelter (only when build_order.action is "none"), otherwise null.',
       hireSchemaHint,
       unhireSchemaHint,
+      interTownRailSchemaHint,
       'Return ONLY a raw JSON object with this exact schema:',
       '{',
       '  "thought": "Internal reasoning based on rank, weather/season, recent messages, and building plots",',
@@ -1945,10 +2045,11 @@ async function createServer() {
       '  "dialogue": "Short spoken message (max 15 words)",',
       '  "new_task": "Current action status",',
       '  "metrics_delta": { "prosperity": -2..3, "order": -2..3, "morale": -2..3 },',
-      '  "build_order": { "action": "none | propose | construct | upgrade", "plot_id": "plot_nw | ... | null", "structure_type": "bakery | watchtower | greenhouse | windmill | library | granary | pavilion | clock_tower | null" },',
+      '  "build_order": { "action": "none | propose | construct | upgrade", "plot_id": "plot_nw | ... | null", "structure_type": "bakery | watchtower | greenhouse | windmill | library | granary | pavilion | clock_tower | hospital | defense_wall | triple_gun_tower | null" },',
       '  "visit_plot_id": "plot_nw | ... | null"' +
         (allowAutonomousHire ? ',\n  "hire_worker": null' : '') +
-        (allowAutonomousUnhire ? ',\n  "unhire_worker": null' : ''),
+        (allowAutonomousUnhire ? ',\n  "unhire_worker": null' : '') +
+        (allowAutonomousInterTownRail ? ',\n  "build_inter_town_rail": null' : ''),
       '}',
     ]
       .filter(Boolean)
@@ -2022,6 +2123,8 @@ async function createServer() {
         structures,
         activeWeather,
         allowAutonomousHire,
+        otherTownNames,
+        interTownRailBuilt,
       );
 
       res.json({

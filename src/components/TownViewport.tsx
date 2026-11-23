@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  Bus,
   Check,
   Coffee,
   Compass,
@@ -62,6 +63,9 @@ interface TownViewportProps {
   unlockedBiomes: BiomeId[];
   roads: string[];
   railSpurBuilt: boolean;
+  interTownRailBuilt: boolean;
+  interTownRailTarget: string;
+  nextSavedTownName?: string | null;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
   recentSpeakerId?: AgentId | null;
@@ -85,6 +89,8 @@ interface TownViewportProps {
     | { type: 'plot'; id: PlotId; nonce: number }
     | { type: 'biome'; id: BiomeId; nonce: number }
     | { type: 'rail_spur'; nonce: number }
+    | { type: 'inter_town_rail'; nonce: number }
+    | { type: 'bus_stop'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
     | { type: 'raider_camp'; nonce: number }
     | { type: 'reset'; nonce: number }
@@ -102,6 +108,8 @@ interface TownViewportProps {
   onSelectAgent: (agentId: AgentId) => void;
   onTogglePovAgent: (agentId: AgentId) => void;
   onToggleTrainPov?: (seat: 'cab' | 'passenger') => void;
+  onToggleBusPov?: (seat: 'window' | 'driver') => void;
+  onTravelNextTown?: () => void;
   onChangeCameraMode: (mode: CameraMode, povAgentId?: AgentId | null) => void;
   onExitPov: () => void;
   onSelectLocation: (locationId: LocationId) => void;
@@ -117,6 +125,7 @@ interface TownViewportProps {
   ) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
   onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
+  onBusRadarUpdate?: (pos: { x: number; z: number; atStop: boolean } | null) => void;
   onUserOrbitStart?: () => void;
 }
 
@@ -155,6 +164,9 @@ export function TownViewport({
   unlockedBiomes,
   roads,
   railSpurBuilt,
+  interTownRailBuilt,
+  interTownRailTarget,
+  nextSavedTownName = null,
   activeAgentId,
   selectedAgentId,
   recentSpeakerId = null,
@@ -181,6 +193,8 @@ export function TownViewport({
   onSelectAgent,
   onTogglePovAgent,
   onToggleTrainPov,
+  onToggleBusPov,
+  onTravelNextTown,
   onChangeCameraMode,
   onExitPov,
   onSelectLocation,
@@ -194,6 +208,7 @@ export function TownViewport({
   onRegisterSnapshotFn,
   onMinimapUpdate,
   onRaiderRadarUpdate,
+  onBusRadarUpdate,
   onUserOrbitStart,
 }: TownViewportProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -218,6 +233,9 @@ export function TownViewport({
     unlockedBiomes,
     roads,
     railSpurBuilt,
+    interTownRailBuilt,
+    interTownRailTarget,
+    nextSavedTownName,
     activeAgentId,
     selectedAgentId,
     selectedPlotId,
@@ -234,6 +252,9 @@ export function TownViewport({
     unlockedBiomes,
     roads,
     railSpurBuilt,
+    interTownRailBuilt,
+    interTownRailTarget,
+    nextSavedTownName,
     activeAgentId,
     selectedAgentId,
     selectedPlotId,
@@ -245,11 +266,13 @@ export function TownViewport({
     onSelectAgent,
     onTogglePovAgent,
     onToggleTrainPov,
+    onToggleBusPov,
     onSelectLocation,
     onSelectPlot,
     onSelectSignalRelay,
     onMinimapUpdate,
     onRaiderRadarUpdate,
+    onBusRadarUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
     onRaiderImpact,
@@ -259,11 +282,13 @@ export function TownViewport({
     onSelectAgent,
     onTogglePovAgent,
     onToggleTrainPov,
+    onToggleBusPov,
     onSelectLocation,
     onSelectPlot,
     onSelectSignalRelay,
     onMinimapUpdate,
     onRaiderRadarUpdate,
+    onBusRadarUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
     onRaiderImpact,
@@ -286,6 +311,7 @@ export function TownViewport({
         onSelectAgent: (id) => callbacksRef.current.onSelectAgent(id),
         onToggleAgentPov: (id) => callbacksRef.current.onTogglePovAgent(id),
         onToggleTrainPov: (seat) => callbacksRef.current.onToggleTrainPov?.(seat),
+        onToggleBusPov: (seat) => callbacksRef.current.onToggleBusPov?.(seat),
         onSelectLocation: (id) => callbacksRef.current.onSelectLocation(id),
         onSelectPlot: (id) => callbacksRef.current.onSelectPlot(id),
         onSelectSignalRelay: () => callbacksRef.current.onSelectSignalRelay?.(),
@@ -293,6 +319,7 @@ export function TownViewport({
         onContextRestored: () => setContextLost(false),
         onMinimapUpdate: (coords) => callbacksRef.current.onMinimapUpdate?.(coords),
         onRaiderRadarUpdate: (snap) => callbacksRef.current.onRaiderRadarUpdate?.(snap),
+        onBusRadarUpdate: (pos) => callbacksRef.current.onBusRadarUpdate?.(pos),
         onUserOrbitStart: () => callbacksRef.current.onUserOrbitStart?.(),
         onRaiderImpact: (x, z) => callbacksRef.current.onRaiderImpact?.(x, z),
         onDefenseHitCamp: (dmg) => callbacksRef.current.onDefenseHitCamp?.(dmg),
@@ -330,6 +357,9 @@ export function TownViewport({
       unlockedBiomes: snap.unlockedBiomes,
       roads: snap.roads,
       railSpurBuilt: snap.railSpurBuilt,
+      interTownRailBuilt: snap.interTownRailBuilt,
+      interTownRailTarget: snap.interTownRailTarget,
+      nextTownName: snap.nextSavedTownName ?? '',
       activeAgentId: snap.activeAgentId,
       selectedAgentId: snap.selectedAgentId,
       selectedPlotId: snap.selectedPlotId,
@@ -365,6 +395,9 @@ export function TownViewport({
       unlockedBiomes: snap.unlockedBiomes,
       roads: snap.roads,
       railSpurBuilt: snap.railSpurBuilt,
+      interTownRailBuilt: snap.interTownRailBuilt,
+      interTownRailTarget: snap.interTownRailTarget,
+      nextTownName: snap.nextSavedTownName ?? '',
       activeAgentId: snap.activeAgentId,
       selectedAgentId: snap.selectedAgentId,
       selectedPlotId: snap.selectedPlotId,
@@ -382,8 +415,18 @@ export function TownViewport({
 
   useEffect(() => {
     if (loadedTownKeyRef.current !== currentTownKey) return;
-    controllerRef.current?.syncExpansion(unlockedBiomes, roads, railSpurBuilt);
-  }, [unlockedBiomes, roads, railSpurBuilt, currentTownKey]);
+    controllerRef.current?.syncExpansion(
+      unlockedBiomes,
+      roads,
+      railSpurBuilt,
+      interTownRailBuilt,
+      interTownRailTarget,
+    );
+  }, [unlockedBiomes, roads, railSpurBuilt, interTownRailBuilt, interTownRailTarget, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setBusDestination(nextSavedTownName || interTownRailTarget || '');
+  }, [nextSavedTownName, interTownRailTarget, currentTownKey]);
 
   useEffect(() => {
     if (loadedTownKeyRef.current !== currentTownKey) return;
@@ -461,6 +504,10 @@ export function TownViewport({
       controllerRef.current.focusBiome(focusRequest.id);
     } else if (focusRequest.type === 'rail_spur') {
       controllerRef.current.focusRailSpur();
+    } else if (focusRequest.type === 'inter_town_rail') {
+      controllerRef.current.focusInterTownRail();
+    } else if (focusRequest.type === 'bus_stop') {
+      controllerRef.current.focusBusStop();
     } else if (focusRequest.type === 'signal_relay') {
       controllerRef.current.focusSignalRelay();
     } else if (focusRequest.type === 'raider_camp') {
@@ -711,6 +758,52 @@ export function TownViewport({
                 className="inline-flex min-h-[38px] shrink-0 items-center gap-1 rounded-xl bg-amber-500 px-3 text-xs font-semibold whitespace-nowrap text-slate-950 transition-colors hover:bg-amber-400"
               >
                 <span>Exit</span>
+              </button>
+            </>
+          )}
+
+          {(cameraMode === 'bus_window' || cameraMode === 'bus_driver') && (
+            <>
+              <div className="flex min-w-0 items-center gap-2 text-xs">
+                <Bus className="h-4 w-4 shrink-0 text-amber-300" />
+                <div className="min-w-0 leading-tight">
+                  <div className="truncate font-display font-semibold text-white">
+                    Inter-Town Shuttle Bus
+                  </div>
+                  <div className="truncate text-[11px] text-slate-400">
+                    {cameraMode === 'bus_window'
+                      ? 'Inside Window View'
+                      : 'Driver Front POV'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeCameraMode(
+                    cameraMode === 'bus_window' ? 'bus_driver' : 'bus_window',
+                  )
+                }
+                className="inline-flex min-h-[36px] shrink-0 items-center rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs font-semibold whitespace-nowrap text-slate-100 transition-colors hover:bg-slate-800"
+              >
+                {cameraMode === 'bus_window' ? 'Driver POV' : 'Window Seat'}
+              </button>
+              {nextSavedTownName && onTravelNextTown && (
+                <button
+                  type="button"
+                  onClick={onTravelNextTown}
+                  title={`Take the Shuttle Bus to ${nextSavedTownName}`}
+                  className="hidden min-h-[36px] shrink-0 items-center rounded-xl border border-cyan-400/45 bg-cyan-500/20 px-2.5 text-xs font-semibold whitespace-nowrap text-cyan-100 transition-colors hover:bg-cyan-500/30 sm:inline-flex"
+                >
+                  To {nextSavedTownName} →
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onExitPov}
+                className="inline-flex min-h-[36px] shrink-0 items-center gap-1 rounded-xl bg-amber-500 px-2.5 text-xs font-semibold whitespace-nowrap text-slate-950 transition-colors hover:bg-amber-400"
+              >
+                <span>Exit Bus</span>
               </button>
             </>
           )}

@@ -16,6 +16,7 @@ export interface DefenseTowerAnchor {
   y: number;
   z: number;
   power: number;
+  barrels?: 1 | 3;
 }
 
 export interface RaiderRadarDot {
@@ -149,9 +150,9 @@ interface MarchingRaiderRig {
   targetSiegeIndex: number; // for sappers assisting construction
 }
 
-const MAX_PROJECTILES = 36;
-const MAX_SPARKS = 128;
-const MAX_TRAILS = 84;
+const MAX_PROJECTILES = 48;
+const MAX_SPARKS = 148;
+const MAX_TRAILS = 112;
 
 // Pre-allocated scratch transforms (zero GC inside render loop)
 const _dummy = new THREE.Object3D();
@@ -1329,22 +1330,42 @@ export function buildTownRaidersSystem(shadowTex: THREE.Texture): TownRaidersHan
       if (defenseTowers.length > 0) {
         defenseFireCooldown -= delta;
         if (defenseFireCooldown <= 0) {
-          const shotInterval = Math.max(0.85, 2.2 - defenseTowers.length * 0.34);
+          const shotInterval = Math.max(0.75, 2.1 - defenseTowers.length * 0.32);
           defenseFireCooldown = shotInterval;
           const tower = defenseTowers[Math.floor(Math.random() * defenseTowers.length)];
-          const et = pickEnemyCounterTarget();
-          spawnProjectile(
-            'defense_volley',
-            tower.x,
-            tower.y,
-            tower.z,
-            et.x,
-            et.y,
-            et.z,
-            4.2,
-            1.15,
-            tower.power,
-          );
+          if (tower.barrels === 3) {
+            // Triple-Gun Defense Tower fires a rapid 3-shot counter-volley!
+            spawnSparks(tower.x, tower.y + 0.1, tower.z, 7, 1);
+            for (let b = -1; b <= 1; b++) {
+              const et = pickEnemyCounterTarget();
+              spawnProjectile(
+                'defense_volley',
+                tower.x + b * 0.32,
+                tower.y + (b === 0 ? 0.14 : 0),
+                tower.z + b * 0.22,
+                et.x + b * 0.65,
+                et.y,
+                et.z + b * 0.65,
+                3.6 + Math.abs(b) * 0.55,
+                0.96 + (b + 1) * 0.12,
+                Math.max(4, Math.round(tower.power * 0.62)),
+              );
+            }
+          } else {
+            const et = pickEnemyCounterTarget();
+            spawnProjectile(
+              'defense_volley',
+              tower.x,
+              tower.y,
+              tower.z,
+              et.x,
+              et.y,
+              et.z,
+              4.2,
+              1.15,
+              tower.power,
+            );
+          }
         }
       }
 

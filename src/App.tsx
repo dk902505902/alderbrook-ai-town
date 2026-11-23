@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Award,
   Building2,
+  Bus,
   Camera,
   ChevronDown,
   ChevronLeft,
@@ -488,6 +489,12 @@ export default function App() {
   );
   const [roads, setRoads] = useState<string[]>(initialLocal.current.roads);
   const [railSpurBuilt, setRailSpurBuilt] = useState<boolean>(initialLocal.current.railSpurBuilt);
+  const [interTownRailBuilt, setInterTownRailBuilt] = useState<boolean>(
+    initialLocal.current.interTownRailBuilt,
+  );
+  const [interTownRailTarget, setInterTownRailTarget] = useState<string>(
+    initialLocal.current.interTownRailTarget,
+  );
   const [autoMode, setAutoMode] = useState<boolean>(initialLocal.current.autoMode);
   const [raidState, setRaidState] = useState<EnemyRaidState>(() => {
     try {
@@ -557,6 +564,9 @@ export default function App() {
   const minimapCoordsRef = useRef<Partial<Record<AgentId, AgentWorldCoord>>>({});
   minimapCoordsRef.current = minimapCoords;
   const [raiderRadar, setRaiderRadar] = useState<RaiderRadarSnapshot | null>(null);
+  const [busRadarPos, setBusRadarPos] = useState<{ x: number; z: number; atStop: boolean } | null>(
+    null,
+  );
   const lastRaiderInjuryMsRef = useRef<number>(0);
   const lastDefenseAutoOrderMsRef = useRef<number>(0);
   const [communicationEvent, setCommunicationEvent] = useState<{
@@ -572,6 +582,8 @@ export default function App() {
     | { type: 'plot'; id: PlotId; nonce: number }
     | { type: 'biome'; id: BiomeId; nonce: number }
     | { type: 'rail_spur'; nonce: number }
+    | { type: 'inter_town_rail'; nonce: number }
+    | { type: 'bus_stop'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
     | { type: 'raider_camp'; nonce: number }
     | { type: 'reset'; nonce: number }
@@ -655,6 +667,8 @@ export default function App() {
     setUnlockedBiomes(loaded.unlockedBiomes);
     setRoads(loaded.roads);
     setRailSpurBuilt(loaded.railSpurBuilt);
+    setInterTownRailBuilt(Boolean(loaded.interTownRailBuilt));
+    setInterTownRailTarget(loaded.interTownRailTarget || '');
     setAutoMode(loaded.autoMode);
     setAgents(loaded.agents);
     setStructures(loaded.structures);
@@ -732,6 +746,8 @@ export default function App() {
       unlockedBiomes,
       roads,
       railSpurBuilt,
+      interTownRailBuilt,
+      interTownRailTarget,
       autoMode,
       agents,
       structures,
@@ -767,6 +783,8 @@ export default function App() {
     unlockedBiomes,
     roads,
     railSpurBuilt,
+    interTownRailBuilt,
+    interTownRailTarget,
     autoMode,
     agents,
     structures,
@@ -816,9 +834,12 @@ export default function App() {
   const stateRef = useRef({
     activeTownId,
     townName,
+    savedTowns,
     unlockedBiomes,
     roads,
     railSpurBuilt,
+    interTownRailBuilt,
+    interTownRailTarget,
     autoMode,
     raidState,
     hasServerDefaultKey,
@@ -851,9 +872,12 @@ export default function App() {
   stateRef.current = {
     activeTownId,
     townName,
+    savedTowns,
     unlockedBiomes,
     roads,
     railSpurBuilt,
+    interTownRailBuilt,
+    interTownRailTarget,
     autoMode,
     raidState,
     hasServerDefaultKey,
@@ -987,6 +1011,10 @@ export default function App() {
           weather: snap.weather,
           metrics: snap.metrics,
           socialBonds: formatAgentBondsForPrompt(currentAgent.id, snap.relationships, snap.agents),
+          interTownRailBuilt: snap.interTownRailBuilt,
+          otherTownNames: snap.savedTowns
+            .filter((t) => t.id !== snap.activeTownId)
+            .map((t) => t.name),
         }),
       });
 
@@ -1369,8 +1397,61 @@ export default function App() {
       if (nextRelationships !== snap.relationships) {
         setRelationships(nextRelationships);
       }
+      // Autonomous Mayor Sterling Inter-Town Express Railway construction to another saved town
+      let interTownRailLog: TownLogItem | null = null;
+      let builtInterTownRailTarget: string | null = null;
+      if (
+        result.build_inter_town_rail &&
+        currentAgent.id === 'mayor_sterling' &&
+        !snap.interTownRailBuilt
+      ) {
+        const targetTown = result.build_inter_town_rail.target_town.trim().slice(0, 48);
+        if (targetTown) {
+          builtInterTownRailTarget = targetTown;
+          const nextRoads = snap.roads.includes('plaza_to_spur')
+            ? snap.roads
+            : [...snap.roads, 'plaza_to_spur'].slice(0, 40);
+          setRailSpurBuilt(true);
+          setInterTownRailBuilt(true);
+          setInterTownRailTarget(targetTown);
+          setRoads(nextRoads);
+          setTriggerTrainNonce(now + 4);
+          playBuildFanfare = true;
+          interTownRailLog = {
+            id: `inter-town-rail-${nextTurnNumber}-${now + 4}`,
+            turnNumber: nextTurnNumber,
+            agentId: 'mayor_sterling',
+            agentName: 'Mayor Sterling',
+            rank: 1,
+            location: updatedAgent.location,
+            targetAgent: 'Architect Lyra',
+            thought: `Commissioned Inter-Town Express Railway Track to ${targetTown}: ${result.build_inter_town_rail.reason}`,
+            dialogue: `Historic day! I've laid the Inter-Town Express Railway Track linking ${snap.townName} directly to ${targetTown}!`,
+            newTask: `Manage ${snap.townName} ↔ ${targetTown} express rail`,
+            timestampMs: now + 4,
+            modelUsed: actualModelUsed,
+            providerUsed: resolvedInference.providerId,
+            providerLabel: resolvedInference.providerLabel,
+            keySlot: actualKeySlot,
+          };
+          if (snap.user) {
+            void persistTownExpansion(
+              snap.user.uid,
+              {
+                railSpurBuilt: true,
+                interTownRailBuilt: true,
+                interTownRailTarget: targetTown,
+                roads: nextRoads,
+              },
+              snap.activeTownId,
+            ).catch(() => {});
+          }
+        }
+      }
+
       setLogs((prev) => {
         const additions = [
+          ...(interTownRailLog ? [interTownRailLog] : []),
           ...(unhiredPayload ? [unhiredPayload.log] : []),
           ...(hiredPayload ? hiredPayload.logs : []),
           ...(weatherShift ? [weatherShift.logEntry] : []),
@@ -1378,6 +1459,9 @@ export default function App() {
         ];
         return [...additions, ...prev].slice(0, 50);
       });
+      if (builtInterTownRailTarget) {
+        setFocusRequest({ type: 'inter_town_rail', nonce: now + 4 });
+      }
       setTurnCount(nextTurnNumber);
       setActiveAgentIndex(nextAgentIndex);
       setMetrics(nextMetrics);
@@ -2685,6 +2769,8 @@ export default function App() {
           unlockedBiomes: snap.unlockedBiomes,
           roads: snap.roads,
           railSpurBuilt: snap.railSpurBuilt,
+          interTownRailBuilt: snap.interTownRailBuilt,
+          interTownRailTarget: snap.interTownRailTarget,
           autoMode: snap.autoMode,
           agents: snap.agents,
           structures: snap.structures,
@@ -2750,6 +2836,8 @@ export default function App() {
           unlockedBiomes: snap.unlockedBiomes,
           roads: snap.roads,
           railSpurBuilt: snap.railSpurBuilt,
+          interTownRailBuilt: snap.interTownRailBuilt,
+          interTownRailTarget: snap.interTownRailTarget,
           autoMode: snap.autoMode,
           agents: snap.agents,
           structures: snap.structures,
@@ -2875,7 +2963,16 @@ export default function App() {
     let roadId = '';
     let roadLabel = 'Cobblestone Road';
 
-    if (/\b(cave|crystal|mountain)\b/.test(hint)) {
+    if (/\b(alpine|snow|peak|glacier|ridge)\b/.test(hint)) {
+      roadId = 'plaza_to_alpine';
+      roadLabel = 'Alpine Snow Peaks Road';
+    } else if (/\b(river|turquoise|crossing|bridge|stream)\b/.test(hint)) {
+      roadId = 'plaza_to_river';
+      roadLabel = 'Turquoise River Road';
+    } else if (/\b(canyon|red[- ]?rock|mesa|gorge)\b/.test(hint)) {
+      roadId = 'plaza_to_canyon';
+      roadLabel = 'Red-Rock Canyon Road';
+    } else if (/\b(cave|crystal|mountain)\b/.test(hint)) {
       roadId = 'plaza_to_cave';
       roadLabel = 'Crystal Cave Road';
     } else if (/\b(desert|dune|oasis|sand)\b/.test(hint)) {
@@ -3033,6 +3130,91 @@ export default function App() {
     };
   }, []);
 
+  const handleBuildInterTownRail = useCallback(
+    async (targetHint?: string): Promise<MayorBuildResult> => {
+      const snap = stateRef.current;
+      const now = Date.now();
+      const otherTowns = snap.savedTowns.filter((t) => t.id !== snap.activeTownId);
+      const cleanHint = (targetHint || '')
+        .replace(/^(mayor\s*,?\s*)/i, '')
+        .replace(
+          /^.*?\b(?:to|toward|towards|for|linking|connect(?:ing)?)\b\s*/i,
+          '',
+        )
+        .replace(/\b(other town|another town|next town|town|city)\b/gi, '')
+        .replace(/[.!?]+$/g, '')
+        .trim();
+
+      let chosenTarget = '';
+      if (cleanHint) {
+        const low = cleanHint.toLowerCase();
+        const match = otherTowns.find(
+          (t) =>
+            t.name.toLowerCase() === low ||
+            t.name.toLowerCase().includes(low) ||
+            low.includes(t.name.toLowerCase()),
+        );
+        chosenTarget = match ? match.name : cleanHint.slice(0, 48);
+      }
+      if (!chosenTarget) {
+        chosenTarget = otherTowns[0]?.name || 'Moon';
+      }
+
+      setPovVillagerId(null);
+      setFocusRequest({ type: 'inter_town_rail', nonce: now });
+
+      const nextRoads = snap.roads.includes('plaza_to_spur')
+        ? snap.roads
+        : [...snap.roads, 'plaza_to_spur'].slice(0, 40);
+
+      setRailSpurBuilt(true);
+      setInterTownRailBuilt(true);
+      setInterTownRailTarget(chosenTarget);
+      setRoads(nextRoads);
+      setTriggerTrainNonce(now);
+      soundscape.playBuildCompleteChime();
+
+      const railLog: TownLogItem = {
+        id: `inter-town-rail-${now}`,
+        turnNumber: snap.turnCount,
+        agentId: 'mayor_sterling',
+        agentName: 'Mayor Sterling',
+        rank: 1,
+        location: 'plaza',
+        targetAgent: 'Architect Lyra',
+        thought: `Built Inter-Town Express Railway Track extending east from Frontier Station to the ${chosenTarget} Portal Arch.`,
+        dialogue: `All aboard for ${chosenTarget}! Our Inter-Town Express Railway Track & Portal Arch are open — watch the express railcar run straight to the frontier gate!`,
+        newTask: `Operate ${snap.townName} ↔ ${chosenTarget} Express Rail`,
+        timestampMs: now,
+      };
+      setLogs((prev) => [railLog, ...prev].slice(0, 50));
+
+      if (snap.user) {
+        try {
+          await persistTownExpansion(
+            snap.user.uid,
+            {
+              railSpurBuilt: true,
+              interTownRailBuilt: true,
+              interTownRailTarget: chosenTarget,
+              roads: nextRoads,
+            },
+            snap.activeTownId,
+          );
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      return {
+        ok: true,
+        badge: `Inter-Town Rail → ${chosenTarget}`,
+        detail: `Connected the Inter-Town Express Railway Track & Portal Arch to ${chosenTarget}! The express railcar is now running out to the frontier portal.`,
+      };
+    },
+    [],
+  );
+
   const handleToggleAutoMode = useCallback((next?: boolean) => {
     const snap = stateRef.current;
     const targetVal = typeof next === 'boolean' ? next : !snap.autoMode;
@@ -3129,6 +3311,16 @@ export default function App() {
 
   const handleToggleTrainPov = useCallback((seat: 'cab' | 'passenger') => {
     const targetMode: CameraMode = seat === 'cab' ? 'train_cab' : 'train_passenger';
+    setSelectedPlotId(null);
+    setTownHallPromptOpen(false);
+    setFollowActive(false);
+    setMobileTab(null);
+    setPovVillagerId(null);
+    setCameraMode((prev) => (prev === targetMode ? 'orbit' : targetMode));
+  }, []);
+
+  const handleToggleBusPov = useCallback((seat: 'window' | 'driver') => {
+    const targetMode: CameraMode = seat === 'window' ? 'bus_window' : 'bus_driver';
     setSelectedPlotId(null);
     setTownHallPromptOpen(false);
     setFollowActive(false);
@@ -3827,6 +4019,13 @@ export default function App() {
         return;
       }
 
+      // Priority 3: Build a Triple-Gun Defense Tower for heavy 3-shot counter-volleys
+      const tripleTower = snap.structures.find((s) => s.structureType === 'triple_gun_tower');
+      if (!tripleTower || tripleTower.status === 'building') {
+        await handleMayorBuildStructure('triple_gun_tower', 'Triple-Gun Defense Tower');
+        return;
+      }
+
       if (reason === 'raid_started') {
         setLogs((prev) =>
           [
@@ -4222,6 +4421,7 @@ export default function App() {
     }> = [
       { type: 'custom', label: 'Research Lab', style: 'lab' },
       { type: 'hospital', label: 'Town Hospital' },
+      { type: 'triple_gun_tower', label: 'Triple-Gun Defense Tower' },
       { type: 'defense_wall', label: 'Defense Wall & Turret' },
       { type: 'bakery', label: 'Artisan Bakery' },
       { type: 'greenhouse', label: 'Glass Greenhouse' },
@@ -4248,6 +4448,13 @@ export default function App() {
         const buildingDef = defenses.find((s) => s.status === 'building');
         if (buildingDef) {
           void handleMayorBuildStructure(buildingDef.structureType, buildingDef.customLabel);
+          return;
+        }
+        const hasTripleTower = snap.structures.some(
+          (s) => s.structureType === 'triple_gun_tower',
+        );
+        if (!hasTripleTower) {
+          void handleMayorBuildStructure('triple_gun_tower', 'Triple-Gun Defense Tower');
           return;
         }
         if (defenses.length < 2) {
@@ -4291,6 +4498,13 @@ export default function App() {
         return;
       }
 
+      // 4b) Build Inter-Town Express Railway if another saved town exists
+      const otherTown = snap.savedTowns.find((t) => t.id !== snap.activeTownId);
+      if (snap.railSpurBuilt && !snap.interTownRailBuilt && otherTown) {
+        void handleBuildInterTownRail(otherTown.name);
+        return;
+      }
+
       // 5) Build next civic/custom landmark on an open plot
       const availablePlots = getAvailablePlotIds(snap.unlockedBiomes);
       if (snap.structures.length < availablePlots.length) {
@@ -4318,6 +4532,7 @@ export default function App() {
     handleBuildRoad,
     handleExpandBiome,
     handleExtendRail,
+    handleBuildInterTownRail,
   ]);
 
   const handleMayorSpeak = useCallback((dialogue: string) => {
@@ -4689,6 +4904,16 @@ export default function App() {
 
   const activeSpeaker = agents.find((a) => a.id === activeAgentId);
   const isMainTown = user ? activeTownId === user.uid : activeTownId === LOCAL_MAIN_TOWN_ID;
+  const nextSavedTown = useMemo(
+    () => savedTowns.find((t) => t.id !== activeTownId) ?? null,
+    [savedTowns, activeTownId],
+  );
+  const handleTravelNextTown = useCallback(() => {
+    if (!nextSavedTown) return;
+    setCameraMode('orbit');
+    setPovVillagerId(null);
+    void handleSwitchTown(nextSavedTown.id);
+  }, [nextSavedTown, handleSwitchTown]);
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -4702,6 +4927,9 @@ export default function App() {
         unlockedBiomes={unlockedBiomes}
         roads={roads}
         railSpurBuilt={railSpurBuilt}
+        interTownRailBuilt={interTownRailBuilt}
+        interTownRailTarget={interTownRailTarget}
+        nextSavedTownName={nextSavedTown?.name ?? null}
         activeAgentId={activeAgentId}
         selectedAgentId={selectedAgentId}
         recentSpeakerId={recentSpeakerId}
@@ -4728,6 +4956,8 @@ export default function App() {
         onSelectAgent={handleSelectAgent}
         onTogglePovAgent={handleTogglePovAgent}
         onToggleTrainPov={handleToggleTrainPov}
+        onToggleBusPov={handleToggleBusPov}
+        onTravelNextTown={nextSavedTown ? handleTravelNextTown : undefined}
         onChangeCameraMode={handleChangeCameraMode}
         onExitPov={() => {
           setCameraMode('orbit');
@@ -4749,6 +4979,7 @@ export default function App() {
         }}
         onMinimapUpdate={setMinimapCoords}
         onRaiderRadarUpdate={setRaiderRadar}
+        onBusRadarUpdate={setBusRadarPos}
         onUserOrbitStart={() => setFollowActive(false)}
       />
 
@@ -5073,6 +5304,8 @@ export default function App() {
             structures={structures}
             unlockedBiomes={unlockedBiomes}
             railSpurBuilt={railSpurBuilt}
+            interTownRailBuilt={interTownRailBuilt}
+            busPos={busRadarPos}
             coords={minimapCoords}
             raiderRadar={raidState.active ? raiderRadar : null}
             activeAgentId={activeAgentId}
@@ -5097,6 +5330,14 @@ export default function App() {
               setFollowActive(false);
               setFocusRequest({ type: 'rail_spur', nonce: Date.now() });
             }}
+            onFocusInterTownRail={() => {
+              setSelectedPlotId(null);
+              setCameraMode('orbit');
+              setPovVillagerId(null);
+              setFollowActive(false);
+              setFocusRequest({ type: 'inter_town_rail', nonce: Date.now() });
+            }}
+            onFocusBus={() => handleToggleBusPov('window')}
           />
         )}
         <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-white/10 bg-slate-950/90 p-1 shadow-xl">
@@ -5144,6 +5385,20 @@ export default function App() {
           >
             <TrainFront className="h-4 w-4" />
             <span className="hidden sm:inline">Train</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleToggleBusPov('window')}
+            title="Ride Inter-Town Shuttle Bus (Inside Window & Driver POV)"
+            aria-label="Ride Inter-Town Shuttle Bus"
+            className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
+              cameraMode === 'bus_window' || cameraMode === 'bus_driver'
+                ? 'bg-amber-500/25 text-amber-200'
+                : 'text-slate-300 hover:bg-white/5 hover:text-white'
+            }`}
+          >
+            <Bus className="h-4 w-4" />
+            <span className="hidden sm:inline">Bus</span>
           </button>
           <button
             type="button"
@@ -5618,6 +5873,8 @@ export default function App() {
         unlockedBiomes={unlockedBiomes}
         roads={roads}
         railSpurBuilt={railSpurBuilt}
+        interTownRailBuilt={interTownRailBuilt}
+        interTownRailTarget={interTownRailTarget}
         autoMode={autoMode}
         raidState={raidState}
         agents={agents}
@@ -5643,6 +5900,7 @@ export default function App() {
         onExpandBiome={handleExpandBiome}
         onBuildRoad={handleBuildRoad}
         onExtendRail={handleExtendRail}
+        onBuildInterTownRail={handleBuildInterTownRail}
         onBuildStructure={handleMayorBuildStructure}
         onHireWorker={handleHireWorker}
         onUnhireWorker={handleUnhireWorker}

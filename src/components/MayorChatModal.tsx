@@ -74,6 +74,8 @@ interface MayorChatModalProps {
   unlockedBiomes: BiomeId[];
   roads: string[];
   railSpurBuilt: boolean;
+  interTownRailBuilt: boolean;
+  interTownRailTarget: string;
   autoMode: boolean;
   raidState: EnemyRaidState;
   agents: AgentRecord[];
@@ -96,6 +98,7 @@ interface MayorChatModalProps {
   onExpandBiome: (biome: BiomeId) => Promise<MayorBuildResult>;
   onBuildRoad: (targetHint?: string) => Promise<MayorBuildResult>;
   onExtendRail: () => Promise<MayorBuildResult>;
+  onBuildInterTownRail: (targetHint?: string) => Promise<MayorBuildResult>;
   onBuildStructure: (
     structureType: StructureType,
     displayLabel?: string,
@@ -132,6 +135,7 @@ interface MayorActionPlan {
     | 'expand_biome'
     | 'build_road'
     | 'extend_rail'
+    | 'build_inter_town_rail'
     | 'toggle_auto'
     | 'trigger_raid'
     | 'toggle_raids';
@@ -157,11 +161,11 @@ interface BrowserSpeechRecognition {
 }
 
 const BASE_STARTER_CHIPS = [
+  'Build 3-gun tower',
   'Build Town Hospital',
-  'Build Defense Wall',
   'Trigger enemy raid',
   'Expand map further',
-  'Extend train track',
+  'Rail to other town',
   'Status report',
 ];
 
@@ -180,8 +184,11 @@ function loadWebSearchEnabled(config: WebSearchConfig): boolean {
 
 function detectMentionedBiome(text: string): BiomeId | undefined {
   const lower = text.toLowerCase();
+  if (/\b(alpine|snow|snowy|peak|peaks|glacier|ridge|summit)\b/.test(lower)) return 'alpine';
+  if (/\b(river|turquoise|crossing|bridge|riverbank|stream|waterfront)\b/.test(lower)) return 'river';
+  if (/\b(canyon|red[- ]?rock|mesa|gorge|butte|badlands)\b/.test(lower)) return 'canyon';
   if (/\b(cave|crystal|cavern|mine|mountain)\b/.test(lower)) return 'cave';
-  if (/\b(desert|dune|oasis|sand|cactus|canyon)\b/.test(lower)) return 'desert';
+  if (/\b(desert|dune|oasis|sand|cactus)\b/.test(lower)) return 'desert';
   if (/\b(forest|woods|pine|timber|grove|jungle)\b/.test(lower)) return 'forest';
   return undefined;
 }
@@ -193,7 +200,10 @@ function extractBuildingName(rawText: string): string {
       /^(please\s+)?(can you\s+)?(build|construct|erect|open|add|make|create|upgrade|put)\s+(me\s+)?(a|an|the|new)?\s*/i,
       '',
     )
-    .replace(/\b(in the|near the|at the|by the|inside the)\s+(forest|dense forest|desert|desert dunes|cave|crystal cave|mountain cave|town)\b.*$/i, '')
+    .replace(
+      /\b(in the|near the|at the|by the|inside the)\s+(forest|dense forest|desert|desert dunes|cave|crystal cave|mountain cave|alpine|alpine ridge|snow peaks|river|river crossing|canyon|red rock canyon|town)\b.*$/i,
+      '',
+    )
     .replace(/[.!?]+$/g, '')
     .trim();
   return cleaned.slice(0, 36);
@@ -213,6 +223,17 @@ function mapBuildingRequest(rawText: string): {
     return {
       structureType: 'hospital',
       displayLabel: STRUCTURE_META.hospital.label,
+      preferredBiome,
+    };
+  }
+  if (
+    /\b(3[- ]?gun|triple[- ]?gun|three[- ]?gun|3[- ]?barrel|triple[- ]?barrel|triple turret|three barrel|3 turret|multi[- ]?gun)\b/.test(
+      lower,
+    )
+  ) {
+    return {
+      structureType: 'triple_gun_tower',
+      displayLabel: STRUCTURE_META.triple_gun_tower.label,
       preferredBiome,
     };
   }
@@ -320,8 +341,8 @@ function buildLiveStatusSummary(
 
   const frontierPart =
     unlockedBiomes.length > 0
-      ? `Biomes unlocked: ${unlockedBiomes.map((b) => BIOME_META[b].shortLabel).join(', ')}`
-      : '3 outer biomes (Forest, Desert, Cave) await expansion';
+      ? `Biomes unlocked (${unlockedBiomes.length}/${ALL_BIOME_IDS.length}): ${unlockedBiomes.map((b) => BIOME_META[b].shortLabel).join(', ')}`
+      : '6 outer biomes (Forest, Desert, Cave, Alpine, River, Canyon) await expansion';
 
   const infraPart = `${roads.length} road${roads.length === 1 ? '' : 's'}, rail spur ${railSpurBuilt ? 'active' : 'not yet built'}, Auto Mode ${autoMode ? 'ON' : 'OFF'}`;
   const pulsePart = `Pulse: Prosperity ${metrics.prosperity}, Order ${metrics.orderLevel}, Morale ${metrics.morale}`;
@@ -428,6 +449,7 @@ function parseNewTownName(text: string): string | null {
 function parseLocalIntent(
   text: string,
   unlockedBiomes: BiomeId[],
+  otherTownNames: string[] = [],
 ): { reply: string; action: MayorActionPlan } | null {
   const lower = text.toLowerCase();
 
@@ -470,11 +492,30 @@ function parseLocalIntent(
     };
   }
 
-  // 2) Create a NEW saved town / city (non-destructive) — handles "Create moon city", "Create a new town called New Haven", etc.
+  // 2) Inter-Town Express Railway Track to another saved town (checked BEFORE create_town & local extend_rail)
+  const hasRailKeyword = /\b(train|rail|railway|track|tracks|express)\b/.test(lower);
+  const matchedOtherTown = otherTownNames.find(
+    (name) => name && lower.includes(name.toLowerCase()),
+  );
+  if (
+    hasRailKeyword &&
+    (Boolean(matchedOtherTown) ||
+      /\b(other town|another town|next town|inter[- ]?town|neighbor|neighbour|moon|portal|connect.*town|track.*town|rail.*town)\b/.test(
+        lower,
+      ))
+  ) {
+    const targetTown = matchedOtherTown || otherTownNames[0] || 'Moon';
+    return {
+      reply: `Full steam ahead! Laying the Inter-Town Express Railway Track straight to the frontier portal bound for ${targetTown}!`,
+      action: { type: 'build_inter_town_rail', townName: targetTown },
+    };
+  }
+
+  // 3) Create a NEW saved town / city (non-destructive) — handles "Create moon city", "Create a new town called New Haven", etc.
   if (
     /\b(create|start|found|charter|make|open|build)\b/.test(lower) &&
     /\b(town|city|village|settlement)\b/.test(lower) &&
-    !/\b(town hall|town log|town pulse|town status|city hall|in town|in the town|for the town)\b/.test(
+    !/\b(town hall|town log|town pulse|town status|city hall|in town|in the town|for the town|other town|another town|next town)\b/.test(
       lower,
     )
   ) {
@@ -485,7 +526,7 @@ function parseLocalIntent(
     };
   }
 
-  // 3) Extend Train Track / Connected Outer Railway Loop
+  // 4) Extend Train Track / Connected Outer Railway Loop
   if (
     /\b(train|rail|railway|track|tracks|spur|depot|express|loop)\b/.test(lower) &&
     /\b(extend|build|add|expand|lay|connect|spur|new stop|station|loop)\b/.test(lower)
@@ -497,7 +538,7 @@ function parseLocalIntent(
     };
   }
 
-  // 4) Build Cobblestone Roads
+  // 5) Build Cobblestone Roads
   if (
     /\b(road|roads|path|street|cobblestone|highway|trail|lane)\b/.test(lower) &&
     /\b(build|lay|make|add|connect|extend|pave|create)\b/.test(lower)
@@ -513,10 +554,10 @@ function parseLocalIntent(
     };
   }
 
-  // 5) Expand Map Further / Expand City / Unlock Outer Biomes (Dense Forest, Desert Dunes, Crystal Mountain Cave)
+  // 6) Expand Map Further / Expand City / Unlock Outer Biomes (6 Biomes including Alpine, River, Canyon)
   if (
     /\b(expand|unlock|open|explore|discover|reveal|grow|enlarge|add)\b/.test(lower) &&
-    /\b(map|city|town|further|biome|biomes|frontier|forest|woods|desert|dunes|cave|crystal|mountain|outer|territory|district|plots)\b/.test(
+    /\b(map|city|town|further|biome|biomes|frontier|forest|woods|desert|dunes|cave|crystal|mountain|alpine|snow|peak|ridge|river|turquoise|crossing|canyon|red[- ]?rock|mesa|outer|territory|district|plots)\b/.test(
       lower,
     )
   ) {
@@ -529,16 +570,16 @@ function parseLocalIntent(
     return {
       reply: nextLocked
         ? `Surveyors dispatched! We are expanding our map further into the ${BIOME_META[chosenBiome].label}, pushing back the frontier bounds and opening ${BIOME_META[chosenBiome].plots.length} outer building plots (${remainingOpen} total plots across town).`
-        : `All 3 outer frontier biomes are already wide open with ${remainingOpen} buildable plots! Ask me to build in any outer district or turn Auto mode ON.`,
+        : `All ${ALL_BIOME_IDS.length} outer frontier biomes are already wide open with ${remainingOpen} buildable plots! Ask me to build in any outer district or turn Auto mode ON.`,
       action: { type: 'expand_biome', biome: chosenBiome },
     };
   }
 
-  // 6) Build / Construct ANY preset or custom building (Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, etc.)
+  // 7) Build / Construct ANY preset or custom building (Triple-Gun Tower, Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, etc.)
   if (
     /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
     !/\b(worker|villager|staff)\b/.test(lower) &&
-    /\b(hospital|clinic|infirmary|wall|palisade|turret|cannon|bastion|defense|lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
+    /\b(3[- ]?gun|triple|barrel|gun|hospital|clinic|infirmary|wall|palisade|turret|cannon|bastion|defense|lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
       lower,
     )
   ) {
@@ -617,6 +658,8 @@ export function MayorChatModal({
   unlockedBiomes,
   roads,
   railSpurBuilt,
+  interTownRailBuilt,
+  interTownRailTarget,
   autoMode,
   raidState,
   agents,
@@ -639,6 +682,7 @@ export function MayorChatModal({
   onExpandBiome,
   onBuildRoad,
   onExtendRail,
+  onBuildInterTownRail,
   onBuildStructure,
   onHireWorker,
   onUnhireWorker,
@@ -808,6 +852,14 @@ export function MayorChatModal({
       const res = await onExtendRail();
       return {
         badge: res.ok ? `🚂 ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.ok ? undefined : res.detail,
+      };
+    }
+
+    if (action.type === 'build_inter_town_rail') {
+      const res = await onBuildInterTownRail(action.townName || action.target || fallbackText);
+      return {
+        badge: res.ok ? `🚆 ${res.badge}` : `⚠️ ${res.badge}`,
         extraNote: res.ok ? undefined : res.detail,
       };
     }
@@ -1052,6 +1104,10 @@ export function MayorChatModal({
       let actionPlan: MayorActionPlan = { type: 'none' };
       let modelTag = 'Local Intent · 0 tokens';
 
+      const otherTownNames = savedTowns
+        .filter((t) => t.id !== activeTownId)
+        .map((t) => t.name);
+
       if (hasUsableMayorLlm) {
         try {
           advanceProviderKeyCursor(resolvedMayorModel);
@@ -1068,6 +1124,9 @@ export function MayorChatModal({
               unlockedBiomes,
               roads,
               railSpurBuilt,
+              interTownRailBuilt,
+              interTownRailTarget,
+              otherTownNames,
               autoMode,
               metrics,
               agents: agents.map((a) => ({
@@ -1111,7 +1170,7 @@ export function MayorChatModal({
 
       // 4) Local Intent Fallback (guaranteed action execution even offline / zero-token mode)
       if (!replyText) {
-        const localIntent = parseLocalIntent(trimmed, unlockedBiomes);
+        const localIntent = parseLocalIntent(trimmed, unlockedBiomes, otherTownNames);
         if (localIntent) {
           replyText = localIntent.reply;
           actionPlan = localIntent.action;
@@ -1128,10 +1187,10 @@ export function MayorChatModal({
             roads,
             railSpurBuilt,
             autoMode,
-          )} Try "Build a Research Lab", "Expand map to Cave", "Extend the train track", or "Mayor go automatic".`;
+          )} Try "Build 3-gun tower", "Expand to Alpine", "Build train track to other town", or "Mayor go automatic".`;
         }
       } else if (actionPlan.type === 'none') {
-        const fallbackIntent = parseLocalIntent(trimmed, unlockedBiomes);
+        const fallbackIntent = parseLocalIntent(trimmed, unlockedBiomes, otherTownNames);
         if (fallbackIntent) {
           actionPlan = fallbackIntent.action;
         }

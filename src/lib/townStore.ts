@@ -82,6 +82,8 @@ export interface LoadedTownState {
   unlockedBiomes: BiomeId[];
   roads: string[];
   railSpurBuilt: boolean;
+  interTownRailBuilt: boolean;
+  interTownRailTarget: string;
   autoMode: boolean;
   agents: AgentRecord[];
   structures: TownStructure[];
@@ -299,15 +301,19 @@ function buildAgentDocPayload(uid: string, agent: AgentRecord): Record<string, u
 function buildStructureCreatePayload(uid: string, structure: TownStructure): Record<string, unknown> {
   const isHospital = structure.structureType === 'hospital';
   const isDefenseWall = structure.structureType === 'defense_wall';
-  const remoteStructureType = isHospital || isDefenseWall ? 'custom' : structure.structureType;
+  const isTripleGun = structure.structureType === 'triple_gun_tower';
+  const remoteStructureType =
+    isHospital || isDefenseWall || isTripleGun ? 'custom' : structure.structureType;
   const remoteCustomLabel = isHospital
     ? structure.customLabel?.trim() || 'Town Hospital'
-    : isDefenseWall
-      ? structure.customLabel?.trim() || 'Defense Wall & Turret'
-      : structure.customLabel?.trim() || '';
+    : isTripleGun
+      ? structure.customLabel?.trim() || 'Triple-Gun Defense Tower'
+      : isDefenseWall
+        ? structure.customLabel?.trim() || 'Defense Wall & Turret'
+        : structure.customLabel?.trim() || '';
   const remoteCustomStyle: CustomBuildingStyle | undefined = isHospital
     ? 'lab'
-    : isDefenseWall
+    : isDefenseWall || isTripleGun
       ? 'tower'
       : structure.customStyle;
 
@@ -412,6 +418,8 @@ export function createFreshTownState(
     unlockedBiomes: [],
     roads: [],
     railSpurBuilt: false,
+    interTownRailBuilt: false,
+    interTownRailTarget: '',
     autoMode: false,
     agents,
     structures: [],
@@ -545,6 +553,9 @@ export function loadLocalTown(townId: string): LoadedTownState | null {
       unlockedBiomes: sanitizeBiomes(d.unlockedBiomes),
       roads: sanitizeRoads(d.roads),
       railSpurBuilt: Boolean(d.railSpurBuilt),
+      interTownRailBuilt: Boolean(d.interTownRailBuilt),
+      interTownRailTarget:
+        typeof d.interTownRailTarget === 'string' ? clampStr(d.interTownRailTarget.trim(), 60) : '',
       autoMode: Boolean(d.autoMode),
       agents,
       structures,
@@ -603,6 +614,8 @@ export function importTownToLocalSlot(
   const newId = `local_imp_${slug}_${rand}`;
   const state: LoadedTownState = {
     ...imported,
+    interTownRailBuilt: false,
+    interTownRailTarget: '',
     townId: newId,
     townName: cleanName,
     resources: sanitizeResources(imported.resources),
@@ -938,6 +951,8 @@ export async function loadOrInitializeTown(
     if (rawStructureType === 'custom' && customLabel) {
       if (/\b(hospital|clinic|infirmary)\b/i.test(customLabel)) {
         structureType = 'hospital';
+      } else if (/\b(triple[- ]?gun|3[- ]?gun|three[- ]?gun)\b/i.test(customLabel)) {
+        structureType = 'triple_gun_tower';
       } else if (/\b(defense wall|palisade|cannon turret|bastion)\b/i.test(customLabel)) {
         structureType = 'defense_wall';
       }
@@ -1020,6 +1035,11 @@ export async function loadOrInitializeTown(
     unlockedBiomes: sanitizeBiomes(townData.unlockedBiomes),
     roads: sanitizeRoads(townData.roads),
     railSpurBuilt: Boolean(townData.railSpurBuilt),
+    interTownRailBuilt: Boolean(townData.interTownRailBuilt),
+    interTownRailTarget:
+      typeof townData.interTownRailTarget === 'string'
+        ? clampStr(townData.interTownRailTarget.trim(), 60)
+        : '',
     autoMode: Boolean(townData.autoMode),
     agents: orderedAgents,
     structures,
@@ -1035,6 +1055,8 @@ export async function persistTownExpansion(
     unlockedBiomes?: BiomeId[];
     roads?: string[];
     railSpurBuilt?: boolean;
+    interTownRailBuilt?: boolean;
+    interTownRailTarget?: string;
     autoMode?: boolean;
   },
   townId: string = uid,
@@ -1053,6 +1075,12 @@ export async function persistTownExpansion(
   }
   if (updates.railSpurBuilt !== undefined) {
     patch.railSpurBuilt = Boolean(updates.railSpurBuilt);
+  }
+  if (updates.interTownRailBuilt !== undefined) {
+    patch.interTownRailBuilt = Boolean(updates.interTownRailBuilt);
+  }
+  if (updates.interTownRailTarget !== undefined) {
+    patch.interTownRailTarget = clampStr(updates.interTownRailTarget.trim(), 60);
   }
   if (updates.autoMode !== undefined) {
     patch.autoMode = Boolean(updates.autoMode);
@@ -1701,6 +1729,8 @@ export async function resetTownInFirestore(
     unlockedBiomes: [],
     roads: [],
     railSpurBuilt: false,
+    interTownRailBuilt: false,
+    interTownRailTarget: '',
     autoMode: false,
     updatedAt: serverTimestamp(),
   });
