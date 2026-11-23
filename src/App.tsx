@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Award,
   Building2,
+  Camera,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -8,11 +10,13 @@ import {
   Compass,
   Crown,
   FastForward,
+  Footprints,
   Gauge,
   HelpCircle,
   LogOut,
   Map as MapIcon,
   MessageSquareText,
+  Newspaper,
   Palette,
   Pause,
   Play,
@@ -20,10 +24,13 @@ import {
   Radio,
   ScrollText,
   Settings,
+  Sparkles,
+  TrainFront,
   Users,
   Video,
   Volume2,
   VolumeX,
+  X,
   Zap,
 } from 'lucide-react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
@@ -34,9 +41,11 @@ import { HierarchyPanel } from './components/HierarchyPanel.tsx';
 import { MayorChatModal, type MayorBuildResult } from './components/MayorChatModal.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
 import { SignalRelayModal } from './components/SignalRelayModal.tsx';
+import { TownChronicleModal, type ChronicleTab } from './components/TownChronicleModal.tsx';
 import { TownLogPanel } from './components/TownLogPanel.tsx';
 import { TownMinimap } from './components/TownMinimap.tsx';
 import { TownViewport } from './components/TownViewport.tsx';
+import { VillagerChatModal } from './components/VillagerChatModal.tsx';
 import {
   advanceProviderKeyCursor,
   buildInferenceHeaders,
@@ -52,6 +61,7 @@ import {
   createNewLocalTown,
   createNewTownInFirestore,
   enqueueRemoteCommand,
+  importTownToLocalSlot,
   listLocalTowns,
   listUserTowns,
   loadLocalTown,
@@ -65,13 +75,34 @@ import {
   persistGodDecree,
   persistHiredWorkers,
   persistRemoteStructureAction,
+  persistStructureDelete,
+  persistStructureRename,
   persistTownExpansion,
   persistWeatherShift,
+  persistWorkerAssignment,
   resetTownInFirestore,
   saveLocalTown,
   subscribePendingRemoteCommands,
   type LoadedTownState,
 } from './lib/townStore.ts';
+import {
+  appendHistoryPoint,
+  compileTownGazette,
+  computeResourceRates,
+  computeTownEconomy,
+  computeTownRank,
+  computeTradeTrainPayout,
+  DECOR_PACKS,
+  evaluateTownMilestones,
+  formatAgentBondsForPrompt,
+  generateCouncilProposals,
+  getDemolishSalvageGold,
+  parseTownImport,
+  pickTownEvent,
+  recordSocialInteraction,
+  serializeTownExport,
+  TOWN_POLICIES,
+} from './lib/townSystems.ts';
 import {
   loadWebSearchConfig,
   saveWebSearchConfig,
@@ -106,20 +137,31 @@ import {
   type AgentTurnResponse,
   type AIProviderConfig,
   type BiomeId,
+  type CameraMode,
   type CliAgentActivity,
+  type CouncilProposal,
   type CustomBuildingStyle,
+  type DecorPackId,
   type GraphicsQuality,
   type HiredWorkerSpec,
   type LocationId,
+  type MilestoneId,
   type PlotId,
+  type PolicyId,
   type RemoteBridgeConfig,
   type RemoteCommandRecord,
   type RemoteCommandType,
   type SignalRelayConfig,
   type StructureType,
   type TimeOfDay,
+  type TownEvent,
+  type TownEventOption,
+  type TownHistoryPoint,
   type TownLogItem,
   type TownMetrics,
+  type TownMilestone,
+  type TownRelationship,
+  type TownResources,
   type TownStructure,
   type TownSummary,
   type TownTheme,
@@ -437,6 +479,20 @@ export default function App() {
   const [roads, setRoads] = useState<string[]>(initialLocal.current.roads);
   const [railSpurBuilt, setRailSpurBuilt] = useState<boolean>(initialLocal.current.railSpurBuilt);
   const [autoMode, setAutoMode] = useState<boolean>(initialLocal.current.autoMode);
+  const [treasuryGold, setTreasuryGold] = useState<number>(initialLocal.current.treasuryGold);
+  const [resources, setResources] = useState<TownResources>(initialLocal.current.resources);
+  const [activePolicies, setActivePolicies] = useState<PolicyId[]>(
+    initialLocal.current.activePolicies,
+  );
+  const [decorPacks, setDecorPacks] = useState<DecorPackId[]>(initialLocal.current.decorPacks);
+  const [unlockedMilestones, setUnlockedMilestones] = useState<MilestoneId[]>(
+    initialLocal.current.unlockedMilestones,
+  );
+  const [history, setHistory] = useState<TownHistoryPoint[]>(initialLocal.current.history);
+  const [autoDayNight, setAutoDayNight] = useState<boolean>(initialLocal.current.autoDayNight);
+  const [relationships, setRelationships] = useState<TownRelationship[]>(
+    initialLocal.current.relationships,
+  );
 
   const [agents, setAgents] = useState<AgentRecord[]>(initialLocal.current.agents);
   const [structures, setStructures] = useState<TownStructure[]>(initialLocal.current.structures);
@@ -464,9 +520,19 @@ export default function App() {
   const [topBarNewTownName, setTopBarNewTownName] = useState('');
 
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId | null>('mayor_sterling');
+  const [recentSpeakerId, setRecentSpeakerId] = useState<AgentId | null>(null);
+  const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
   const [povVillagerId, setPovVillagerId] = useState<AgentId | null>(null);
   const [selectedPlotId, setSelectedPlotId] = useState<PlotId | null>(null);
   const [followActive, setFollowActive] = useState(false);
+  const [activeTownEvent, setActiveTownEvent] = useState<TownEvent | null>(null);
+  const [recentEventIds, setRecentEventIds] = useState<string[]>([]);
+  const [chronicleOpen, setChronicleOpen] = useState(false);
+  const [chronicleInitialTab, setChronicleInitialTab] = useState<ChronicleTab>('gazette');
+  const [lastPostcardDataUrl, setLastPostcardDataUrl] = useState<string | null>(null);
+  const snapshotFnRef = useRef<((townName: string, subtitle?: string) => string | null) | null>(
+    null,
+  );
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [showMinimap, setShowMinimap] = useState(false);
   const [minimapCoords, setMinimapCoords] = useState<Partial<Record<AgentId, AgentWorldCoord>>>({});
@@ -517,6 +583,10 @@ export default function App() {
   const [remoteExecutedCount, setRemoteExecutedCount] = useState(0);
   const [signalRelayPulseNonce, setSignalRelayPulseNonce] = useState(0);
   const [triggerTrainNonce, setTriggerTrainNonce] = useState(0);
+  const [triggerCelebrationNonce, setTriggerCelebrationNonce] = useState(0);
+  const [chatVillagerId, setChatVillagerId] = useState<AgentId | null>(null);
+  const [milestoneToast, setMilestoneToast] = useState<TownMilestone | null>(null);
+  const [councilRefreshNonce, setCouncilRefreshNonce] = useState(0);
   const [recentCliAgents, setRecentCliAgents] = useState<CliAgentActivity[]>([]);
   const [relayServerOnline, setRelayServerOnline] = useState(false);
   const [hasServerDefaultKey, setHasServerDefaultKey] = useState(false);
@@ -547,6 +617,14 @@ export default function App() {
     setActiveAgentIndex(loaded.activeAgentIndex);
     setActiveDecree(loaded.activeDecree);
     setMetrics(loaded.metrics);
+    setTreasuryGold(loaded.treasuryGold);
+    setResources(loaded.resources);
+    setActivePolicies(loaded.activePolicies);
+    setDecorPacks(loaded.decorPacks);
+    setUnlockedMilestones(loaded.unlockedMilestones);
+    setHistory(loaded.history);
+    setAutoDayNight(loaded.autoDayNight);
+    setRelationships(loaded.relationships);
     setTimeOfDay(loaded.timeOfDay);
     setWeather(loaded.weather);
     setTownTheme(loaded.theme);
@@ -559,7 +637,12 @@ export default function App() {
     setLogs(loaded.logs);
     setSelectedPlotId(null);
     setSelectedAgentId('mayor_sterling');
+    setRecentSpeakerId(null);
+    setChatVillagerId(null);
+    setMilestoneToast(null);
+    setCameraMode('orbit');
     setPovVillagerId(null);
+    setActiveTownEvent(null);
     setFollowActive(false);
     setFocusRequest({ type: 'reset', nonce: Date.now() });
   }, []);
@@ -612,6 +695,13 @@ export default function App() {
       activeAgentIndex,
       activeDecree,
       metrics,
+      treasuryGold,
+      resources,
+      activePolicies,
+      decorPacks,
+      unlockedMilestones,
+      history: history.slice(-30),
+      autoDayNight,
       timeOfDay,
       weather,
       theme: townTheme,
@@ -621,6 +711,7 @@ export default function App() {
       autoMode,
       agents,
       structures,
+      relationships,
       logs: logs.slice(0, 40),
     };
     saveLocalTown(snapshot);
@@ -639,6 +730,13 @@ export default function App() {
     activeAgentIndex,
     activeDecree,
     metrics,
+    treasuryGold,
+    resources,
+    activePolicies,
+    decorPacks,
+    unlockedMilestones,
+    history,
+    autoDayNight,
     timeOfDay,
     weather,
     townTheme,
@@ -648,6 +746,7 @@ export default function App() {
     autoMode,
     agents,
     structures,
+    relationships,
     logs,
     mergeCloudAndLocalTowns,
   ]);
@@ -697,6 +796,16 @@ export default function App() {
     roads,
     railSpurBuilt,
     autoMode,
+    treasuryGold,
+    resources,
+    activePolicies,
+    decorPacks,
+    unlockedMilestones,
+    history,
+    autoDayNight,
+    relationships,
+    recentEventIds,
+    activeTownEvent,
     isPlaying,
     agents,
     structures,
@@ -720,6 +829,16 @@ export default function App() {
     roads,
     railSpurBuilt,
     autoMode,
+    treasuryGold,
+    resources,
+    activePolicies,
+    decorPacks,
+    unlockedMilestones,
+    history,
+    autoDayNight,
+    relationships,
+    recentEventIds,
+    activeTownEvent,
     isPlaying,
     agents,
     structures,
@@ -839,6 +958,7 @@ export default function App() {
           timeOfDay: snap.timeOfDay,
           weather: snap.weather,
           metrics: snap.metrics,
+          socialBonds: formatAgentBondsForPrompt(currentAgent.id, snap.relationships, snap.agents),
         }),
       });
 
@@ -912,10 +1032,14 @@ export default function App() {
           activePlotId = created.plotId;
         } else if (buildOrder.action === 'construct' && existingSite && existingSite.status === 'building') {
           const baseStepGain = currentAgent.rank === 3 ? 45 : 30;
+          const nightShiftMult = snap.activePolicies.includes('night_shift') ? 1.35 : 1.0;
           const stepGain = Math.max(
             15,
-            Math.round(baseStepGain * weatherEffect.constructionMultiplier),
+            Math.round(baseStepGain * weatherEffect.constructionMultiplier * nightShiftMult),
           );
+          if (snap.activePolicies.includes('night_shift')) {
+            moraleDelta -= 2;
+          }
           const nextProgress = Math.min(100, existingSite.progress + stepGain);
           const finished = nextProgress >= 100;
           const progressed: TownStructure = {
@@ -1015,6 +1139,14 @@ export default function App() {
         }
       }
 
+      // Apply Active Town Policies to Turn Metrics
+      if (snap.activePolicies.includes('free_bread')) {
+        moraleDelta += 3;
+      }
+      if (snap.activePolicies.includes('open_trade') && nextTurnNumber % 2 === 0) {
+        orderDelta -= 1;
+      }
+
       const nextMetrics: TownMetrics = {
         prosperity: clampMetric(snap.metrics.prosperity + prosperityDelta),
         orderLevel: clampMetric(snap.metrics.orderLevel + orderDelta),
@@ -1099,9 +1231,76 @@ export default function App() {
       ].slice(0, MAX_TOWN_AGENTS);
       const nextAgentIndex = (snap.activeAgentIndex + 1) % nextAgentsList.length;
 
+      // Update Town Treasury & 4-Resource Supply Chain from live economy
+      const nextWeatherForEcon = weatherShift ? weatherShift.weather : snap.weather;
+      const turnEcon = computeTownEconomy(
+        nextStructures,
+        nextAgentsList,
+        nextWeatherForEcon,
+        snap.railSpurBuilt,
+        snap.treasuryGold,
+        snap.activePolicies,
+        snap.decorPacks,
+      );
+      const nextTreasury = Math.max(0, snap.treasuryGold + turnEcon.netPerTurn);
+      const turnResRates = computeResourceRates(
+        nextStructures,
+        snap.unlockedBiomes,
+        snap.activePolicies,
+      );
+      const nextResources: TownResources = {
+        timber: snap.resources.timber + turnResRates.timber,
+        stone: snap.resources.stone + turnResRates.stone,
+        harvest: snap.resources.harvest + turnResRates.harvest,
+        crystal: snap.resources.crystal + turnResRates.crystal,
+      };
+      const nextHistory = appendHistoryPoint(snap.history, {
+        turn: nextTurnNumber,
+        treasuryGold: nextTreasury,
+        prosperity: nextMetrics.prosperity,
+        orderLevel: nextMetrics.orderLevel,
+        morale: nextMetrics.morale,
+        population: nextAgentsList.length,
+        buildings: nextStructures.filter((s) => s.status === 'complete').length,
+      });
+
+      // Strengthen Villager Friendships & Social Memory when villagers converse or recruit
+      let nextRelationships = snap.relationships;
+      if (result.target_agent) {
+        const spokenTarget = nextAgentsList.find(
+          (a) => a.name.toLowerCase() === result.target_agent?.toLowerCase(),
+        );
+        if (spokenTarget && spokenTarget.id !== updatedAgent.id) {
+          nextRelationships = recordSocialInteraction(
+            nextRelationships,
+            updatedAgent.id,
+            spokenTarget.id,
+            4,
+            `${updatedAgent.name.split(' ')[0]} chatted: "${result.dialogue.slice(0, 42)}"`,
+          );
+        }
+      }
+      if (hiredPayload) {
+        for (const w of hiredPayload.workers) {
+          nextRelationships = recordSocialInteraction(
+            nextRelationships,
+            'mayor_sterling',
+            w.id,
+            8,
+            `Welcomed ${w.name} as ${w.role}`,
+          );
+        }
+      }
+
       setAgents(nextAgentsList);
       if (structureMutation) {
         setStructures(nextStructures);
+      }
+      setTreasuryGold(nextTreasury);
+      setResources(nextResources);
+      setHistory(nextHistory);
+      if (nextRelationships !== snap.relationships) {
+        setRelationships(nextRelationships);
       }
       setLogs((prev) => {
         const additions = [
@@ -1121,6 +1320,7 @@ export default function App() {
         setWeather(weatherShift.weather);
       }
       setSelectedAgentId(hiredPayload ? hiredPayload.workers[0].id : updatedAgent.id);
+      setRecentSpeakerId(updatedAgent.id);
       setSecondsLeft(snap.turnIntervalSeconds);
       setCommunicationEvent({
         speakerId: updatedAgent.id,
@@ -1128,6 +1328,24 @@ export default function App() {
         accentColor: updatedAgent.accentColor,
         nonce: now,
       });
+
+      // Trigger a Dynamic Town Event every 5 turns when playing (non-intrusive card)
+      if (
+        snap.isPlaying &&
+        nextTurnNumber > 0 &&
+        nextTurnNumber % 5 === 0 &&
+        !snap.activeTownEvent
+      ) {
+        const ev = pickTownEvent(
+          snap.townName,
+          nextTurnNumber,
+          snap.unlockedBiomes,
+          snap.railSpurBuilt,
+          snap.recentEventIds,
+        );
+        setActiveTownEvent(ev);
+        setRecentEventIds((prev) => [ev.id, ...prev.filter((id) => id !== ev.id)].slice(0, 4));
+      }
 
       if (playBuildFanfare) {
         soundscape.playBuildCompleteChime();
@@ -1199,6 +1417,137 @@ export default function App() {
 
     return () => window.clearInterval(timer);
   }, [isPlaying, runTurn]);
+
+  const economy = useMemo(
+    () =>
+      computeTownEconomy(
+        structures,
+        agents,
+        weather,
+        railSpurBuilt,
+        treasuryGold,
+        activePolicies,
+        decorPacks,
+      ),
+    [structures, agents, weather, railSpurBuilt, treasuryGold, activePolicies, decorPacks],
+  );
+
+  const resourceRates = useMemo(
+    () => computeResourceRates(structures, unlockedBiomes, activePolicies),
+    [structures, unlockedBiomes, activePolicies],
+  );
+
+  const townRank = useMemo(
+    () =>
+      computeTownRank({
+        structures,
+        agents,
+        unlockedBiomes,
+        railSpurBuilt,
+        treasuryGold,
+      }),
+    [structures, agents, unlockedBiomes, railSpurBuilt, treasuryGold],
+  );
+
+  const milestoneEval = useMemo(
+    () =>
+      evaluateTownMilestones({
+        structures,
+        agents,
+        unlockedBiomes,
+        railSpurBuilt,
+        treasuryGold,
+        relationships,
+        alreadyUnlocked: unlockedMilestones,
+      }),
+    [structures, agents, unlockedBiomes, railSpurBuilt, treasuryGold, relationships, unlockedMilestones],
+  );
+
+  const councilProposals = useMemo(
+    () =>
+      generateCouncilProposals({
+        agents,
+        structures,
+        unlockedBiomes,
+        railSpurBuilt,
+        turnCount: turnCount + councilRefreshNonce,
+      }),
+    [agents, structures, unlockedBiomes, railSpurBuilt, turnCount, councilRefreshNonce],
+  );
+
+  // Auto-award one-time Milestone Badges & gold bonuses
+  useEffect(() => {
+    if (milestoneEval.newlyUnlocked.length === 0) return;
+    const newly = milestoneEval.newlyUnlocked;
+    const totalBonus = newly.reduce((sum, m) => sum + m.rewardGold, 0);
+    const now = Date.now();
+    setUnlockedMilestones((prev) => Array.from(new Set([...prev, ...newly.map((m) => m.id)])));
+    setTreasuryGold((g) => g + totalBonus);
+    setMilestoneToast(newly[0]);
+    soundscape.playBuildCompleteChime();
+    const badgeLogs: TownLogItem[] = newly.map((m, i) => ({
+      id: `milestone-${m.id}-${now + i}`,
+      turnNumber: stateRef.current.turnCount,
+      agentId: 'mayor_sterling',
+      agentName: `Milestone · ${m.title}`,
+      rank: 1,
+      location: 'town_hall',
+      targetAgent: null,
+      thought: m.description,
+      dialogue: `Town Milestone Unlocked: "${m.title}" (+${m.rewardGold}g bonus awarded to Treasury)!`,
+      newTask: `Unlocked ${m.title}`,
+      timestampMs: now + i,
+    }));
+    setLogs((prev) => [...badgeLogs, ...prev].slice(0, 50));
+    const timer = window.setTimeout(() => {
+      setMilestoneToast((curr) => (curr && newly.some((n) => n.id === curr.id) ? null : curr));
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [milestoneEval.newlyUnlocked]);
+
+  const gazette = useMemo(
+    () =>
+      compileTownGazette({
+        townName,
+        turnCount,
+        weather,
+        timeOfDay,
+        metrics,
+        economy,
+        structures,
+        agents,
+        relationships,
+        unlockedBiomes,
+        railSpurBuilt,
+        logs,
+      }),
+    [
+      townName,
+      turnCount,
+      weather,
+      timeOfDay,
+      metrics,
+      economy,
+      structures,
+      agents,
+      relationships,
+      unlockedBiomes,
+      railSpurBuilt,
+      logs,
+    ],
+  );
+
+  // Automatic Day / Night Routine Cycle (every 35s when Auto Cycle is ON)
+  useEffect(() => {
+    if (!autoDayNight) return;
+    const cycleTimer = window.setInterval(() => {
+      setTimeOfDay((prev) => {
+        const idx = TIME_CYCLE.indexOf(prev);
+        return TIME_CYCLE[(idx + 1) % TIME_CYCLE.length];
+      });
+    }, 35000);
+    return () => window.clearInterval(cycleTimer);
+  }, [autoDayNight]);
 
   const handleSaveRemoteBridge = (nextConfig: RemoteBridgeConfig) => {
     setRemoteBridgeConfig(nextConfig);
@@ -1960,6 +2309,7 @@ export default function App() {
 
   const handleSelectSignalRelay = () => {
     setSelectedPlotId(null);
+    setCameraMode('orbit');
     setPovVillagerId(null);
     setFollowActive(false);
     setMobileTab(null);
@@ -2108,6 +2458,13 @@ export default function App() {
           activeAgentIndex: snap.activeAgentIndex,
           activeDecree: snap.activeDecree,
           metrics: snap.metrics,
+          treasuryGold: snap.treasuryGold,
+          resources: snap.resources,
+          activePolicies: snap.activePolicies,
+          decorPacks: snap.decorPacks,
+          unlockedMilestones: snap.unlockedMilestones,
+          history: snap.history.slice(-30),
+          autoDayNight: snap.autoDayNight,
           timeOfDay: snap.timeOfDay,
           weather: snap.weather,
           theme: snap.townTheme,
@@ -2117,6 +2474,7 @@ export default function App() {
           autoMode: snap.autoMode,
           agents: snap.agents,
           structures: snap.structures,
+          relationships: snap.relationships,
           logs: snap.logs.slice(0, 40),
         });
       }
@@ -2165,6 +2523,13 @@ export default function App() {
           activeAgentIndex: snap.activeAgentIndex,
           activeDecree: snap.activeDecree,
           metrics: snap.metrics,
+          treasuryGold: snap.treasuryGold,
+          resources: snap.resources,
+          activePolicies: snap.activePolicies,
+          decorPacks: snap.decorPacks,
+          unlockedMilestones: snap.unlockedMilestones,
+          history: snap.history.slice(-30),
+          autoDayNight: snap.autoDayNight,
           timeOfDay: snap.timeOfDay,
           weather: snap.weather,
           theme: snap.townTheme,
@@ -2174,6 +2539,7 @@ export default function App() {
           autoMode: snap.autoMode,
           agents: snap.agents,
           structures: snap.structures,
+          relationships: snap.relationships,
           logs: snap.logs.slice(0, 40),
         });
       }
@@ -2509,10 +2875,26 @@ export default function App() {
     soundscape.setEnabled(next);
   };
 
+  const handleChangeCameraMode = useCallback((mode: CameraMode, agentId?: AgentId | null) => {
+    setCameraMode(mode);
+    setSelectedPlotId(null);
+    setTownHallPromptOpen(false);
+    if (mode !== 'orbit') {
+      setFollowActive(false);
+      setMobileTab(null);
+    }
+    if (mode === 'villager_pov') {
+      setPovVillagerId(agentId ?? 'mayor_sterling');
+    } else {
+      setPovVillagerId(null);
+    }
+  }, []);
+
   const handleSelectAgent = (id: AgentId) => {
     setSelectedAgentId(id);
     setSelectedPlotId(null);
     setTownHallPromptOpen(false);
+    setCameraMode('orbit');
     setPovVillagerId(null);
     setFollowActive(false);
     setFocusRequest({ type: 'agent', id, nonce: Date.now() });
@@ -2524,16 +2906,329 @@ export default function App() {
     setTownHallPromptOpen(false);
     setFollowActive(false);
     setMobileTab(null);
-    setPovVillagerId((prev) => (prev === id ? null : id));
+    setPovVillagerId((prev) => {
+      const next = prev === id ? null : id;
+      setCameraMode(next ? 'villager_pov' : 'orbit');
+      return next;
+    });
+  }, []);
+
+  const handleToggleTrainPov = useCallback((seat: 'cab' | 'passenger') => {
+    const targetMode: CameraMode = seat === 'cab' ? 'train_cab' : 'train_passenger';
+    setSelectedPlotId(null);
+    setTownHallPromptOpen(false);
+    setFollowActive(false);
+    setMobileTab(null);
+    setPovVillagerId(null);
+    setCameraMode((prev) => (prev === targetMode ? 'orbit' : targetMode));
   }, []);
 
   const handleFocusLocation = (id: LocationId) => {
     setSelectedPlotId(null);
+    setCameraMode('orbit');
     setPovVillagerId(null);
     setTownHallPromptOpen(id === 'town_hall');
     setFollowActive(false);
     setFocusRequest({ type: 'location', id, nonce: Date.now() });
   };
+
+  const handleRenameStructure = useCallback((plotId: PlotId, newLabel: string) => {
+    const clean = newLabel.trim().slice(0, 36);
+    if (!clean) return;
+    const snap = stateRef.current;
+    const now = Date.now();
+    setStructures((prev) =>
+      prev.map((s) =>
+        s.plotId === plotId ? { ...s, customLabel: clean, updatedAtMs: now } : s,
+      ),
+    );
+    const renameLog: TownLogItem = {
+      id: `rename-${plotId}-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'mayor_sterling',
+      agentName: 'Mayor Sterling',
+      rank: 1,
+      location: 'town_hall',
+      targetAgent: null,
+      thought: `Updated civic nameplate on ${PLOT_META[plotId].label}.`,
+      dialogue: `Dedicated ${PLOT_META[plotId].shortLabel} as "${clean}"!`,
+      newTask: `Renamed ${clean}`,
+      timestampMs: now,
+    };
+    setLogs((prev) => [renameLog, ...prev].slice(0, 50));
+    if (snap.user && !snap.activeTownId.startsWith('local_')) {
+      void persistStructureRename(snap.user.uid, plotId, clean, snap.activeTownId).catch(() => {});
+    }
+  }, []);
+
+  const handleAssignWorkerToPlot = useCallback((plotId: PlotId, agentId: AgentId | null) => {
+    const snap = stateRef.current;
+    const struct = snap.structures.find((s) => s.plotId === plotId);
+    const structLabel = struct ? getStructureDisplayLabel(struct) : PLOT_META[plotId].shortLabel;
+    const now = Date.now();
+
+    const previouslyAssigned = snap.agents.filter((a) => a.assignedPlotId === plotId);
+    setAgents((prev) =>
+      prev.map((a) => {
+        if (a.id === agentId) {
+          return {
+            ...a,
+            assignedPlotId: plotId,
+            activePlotId: plotId,
+            currentTask: `Manage ${structLabel}`,
+            updatedAtMs: now,
+          };
+        }
+        if (a.assignedPlotId === plotId) {
+          return {
+            ...a,
+            assignedPlotId: null,
+            activePlotId: a.activePlotId === plotId ? null : a.activePlotId,
+            updatedAtMs: now,
+          };
+        }
+        return a;
+      }),
+    );
+
+    const chosen = agentId ? snap.agents.find((a) => a.id === agentId) : null;
+    const assignLog: TownLogItem = {
+      id: `assign-${plotId}-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: chosen?.id ?? 'mayor_sterling',
+      agentName: chosen?.name ?? 'Mayor Sterling',
+      rank: chosen?.rank ?? 1,
+      location: chosen?.location ?? 'town_hall',
+      targetAgent: chosen ? 'Mayor Sterling' : null,
+      thought: chosen
+        ? `Assigned to staff ${structLabel} (+20% gold yield).`
+        : `Cleared dedicated staffing slot on ${structLabel}.`,
+      dialogue: chosen
+        ? `On my way to staff ${structLabel}!`
+        : `${structLabel} staffing slot is now open.`,
+      newTask: chosen ? `Manage ${structLabel}` : `Open post at ${structLabel}`,
+      timestampMs: now,
+    };
+    setLogs((prev) => [assignLog, ...prev].slice(0, 50));
+    soundscape.playAgentChime(2);
+
+    if (snap.user && !snap.activeTownId.startsWith('local_')) {
+      for (const old of previouslyAssigned) {
+        if (old.id !== agentId) {
+          void persistWorkerAssignment(
+            snap.user.uid,
+            old.id,
+            null,
+            old.currentTask,
+            snap.activeTownId,
+          ).catch(() => {});
+        }
+      }
+      if (agentId) {
+        void persistWorkerAssignment(
+          snap.user.uid,
+          agentId,
+          plotId,
+          `Manage ${structLabel}`,
+          snap.activeTownId,
+        ).catch(() => {});
+      }
+    }
+  }, []);
+
+  const handleDemolishStructure = useCallback((plotId: PlotId) => {
+    const snap = stateRef.current;
+    const target = snap.structures.find((s) => s.plotId === plotId);
+    if (!target) return;
+    const now = Date.now();
+    const label = getStructureDisplayLabel(target);
+    const salvage = getDemolishSalvageGold(target);
+
+    setStructures((prev) => prev.filter((s) => s.plotId !== plotId));
+    setAgents((prev) =>
+      prev.map((a) =>
+        a.assignedPlotId === plotId || a.activePlotId === plotId
+          ? {
+              ...a,
+              assignedPlotId: a.assignedPlotId === plotId ? null : a.assignedPlotId,
+              activePlotId: a.activePlotId === plotId ? null : a.activePlotId,
+              currentTask: 'Ready for next civic assignment',
+              updatedAtMs: now,
+            }
+          : a,
+      ),
+    );
+    setTreasuryGold((g) => g + salvage);
+    setSelectedPlotId(null);
+    soundscape.playAgentChime(3);
+
+    const demoLog: TownLogItem = {
+      id: `demolish-${plotId}-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'architect_lyra',
+      agentName: 'Architect Lyra',
+      rank: 2,
+      location: 'workshop',
+      targetAgent: 'Mayor Sterling',
+      thought: `Cleared ${label} from ${PLOT_META[plotId].label} and recovered ${salvage}g in salvage timber and stone.`,
+      dialogue: `Cleared ${label} (+${salvage}g salvaged). ${PLOT_META[plotId].shortLabel} is ready for a new build!`,
+      newTask: `Reclaimed ${PLOT_META[plotId].shortLabel}`,
+      timestampMs: now,
+    };
+    setLogs((prev) => [demoLog, ...prev].slice(0, 50));
+
+    if (snap.user && !snap.activeTownId.startsWith('local_')) {
+      void persistStructureDelete(snap.user.uid, plotId, snap.activeTownId).catch(() => {});
+    }
+  }, []);
+
+  const handleTriggerTownEvent = useCallback(() => {
+    const snap = stateRef.current;
+    const ev = pickTownEvent(
+      snap.townName,
+      snap.turnCount + 1,
+      snap.unlockedBiomes,
+      snap.railSpurBuilt,
+      snap.recentEventIds,
+    );
+    setActiveTownEvent(ev);
+    setRecentEventIds((prev) => [ev.id, ...prev.filter((id) => id !== ev.id)].slice(0, 4));
+    soundscape.playDecreeGong();
+  }, []);
+
+  const handleResolveTownEvent = useCallback((option: TownEventOption) => {
+    const snap = stateRef.current;
+    const currentEvent = snap.activeTownEvent;
+    if (!currentEvent) return;
+    const now = Date.now();
+
+    setTreasuryGold((g) => Math.max(0, g + option.goldDelta));
+    setMetrics((m) => ({
+      prosperity: clampMetric(m.prosperity + (option.metricsDelta.prosperity ?? 0)),
+      orderLevel: clampMetric(m.orderLevel + (option.metricsDelta.orderLevel ?? 0)),
+      morale: clampMetric(m.morale + (option.metricsDelta.morale ?? 0)),
+    }));
+
+    if (option.boostAllBonds && option.boostAllBonds > 0) {
+      setRelationships((prev) => {
+        let next = prev;
+        const coreIds = snap.agents.slice(0, 6).map((a) => a.id);
+        for (let i = 0; i < coreIds.length - 1; i++) {
+          next = recordSocialInteraction(
+            next,
+            coreIds[i],
+            coreIds[i + 1],
+            option.boostAllBonds!,
+            currentEvent.title,
+          );
+        }
+        return next;
+      });
+    }
+
+    if (option.triggerTrain) {
+      setTriggerTrainNonce(now);
+    }
+
+    if (currentEvent.category === 'festival') {
+      setTriggerCelebrationNonce(now);
+    }
+
+    const eventLog: TownLogItem = {
+      id: `event-${currentEvent.id}-${now}`,
+      turnNumber: snap.turnCount,
+      agentId: 'mayor_sterling',
+      agentName: `Town Event · ${currentEvent.title}`.slice(0, 60),
+      rank: 1,
+      location: 'plaza',
+      targetAgent: null,
+      thought: `${option.label}: ${option.effectSummary}`,
+      dialogue: option.logOutcome,
+      newTask: option.effectSummary,
+      timestampMs: now,
+    };
+    setLogs((prev) => [eventLog, ...prev].slice(0, 50));
+    setActiveTownEvent(null);
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleCapturePostcard = useCallback(() => {
+    const snap = stateRef.current;
+    const subtitle = `Turn ${snap.turnCount} · ${snap.agents.length} Citizens · ${snap.structures.filter((s) => s.status === 'complete').length} Buildings`;
+    const url = snapshotFnRef.current?.(snap.townName, subtitle) ?? null;
+    if (url) {
+      setLastPostcardDataUrl(url);
+      soundscape.playAgentChime(1);
+    }
+    setChronicleInitialTab('gazette');
+    setChronicleOpen(true);
+  }, []);
+
+  const handleExportTownJson = useCallback(() => {
+    const snap = stateRef.current;
+    const raw = serializeTownExport({
+      townName: snap.townName,
+      turnCount: snap.turnCount,
+      activeAgentIndex: snap.activeAgentIndex,
+      activeDecree: snap.activeDecree,
+      metrics: snap.metrics,
+      treasuryGold: snap.treasuryGold,
+      resources: snap.resources,
+      activePolicies: snap.activePolicies,
+      decorPacks: snap.decorPacks,
+      unlockedMilestones: snap.unlockedMilestones,
+      history: snap.history,
+      autoDayNight: snap.autoDayNight,
+      timeOfDay: snap.timeOfDay,
+      weather: snap.weather,
+      theme: snap.townTheme,
+      unlockedBiomes: snap.unlockedBiomes,
+      roads: snap.roads,
+      railSpurBuilt: snap.railSpurBuilt,
+      autoMode: snap.autoMode,
+      agents: snap.agents,
+      structures: snap.structures,
+      relationships: snap.relationships,
+      logs: snap.logs.slice(0, 50),
+    });
+    const slug = snap.townName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'town';
+    const blob = new Blob([raw], { type: 'application/json' });
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = `${slug}-backup.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+  }, []);
+
+  const handleImportTownJson = useCallback(
+    (rawJson: string): { ok: boolean; message: string } => {
+      const parsed = parseTownImport(rawJson);
+      if (!parsed.ok) {
+        return { ok: false, message: parsed.error };
+      }
+      const imported = importTownToLocalSlot(parsed.data);
+      applyLoadedTownState(imported);
+      if (!stateRef.current.user) {
+        setSavedTowns(listLocalTowns());
+      } else {
+        setSavedTowns((prev) =>
+          mergeCloudAndLocalTowns(prev.filter((t) => !t.id.startsWith('local_'))),
+        );
+      }
+      soundscape.playBuildCompleteChime();
+      return {
+        ok: true,
+        message: `Imported "${imported.townName}" as a new saved town slot (${imported.structures.length} buildings, ${imported.agents.length} villagers). Existing towns stay untouched!`,
+      };
+    },
+    [applyLoadedTownState, mergeCloudAndLocalTowns],
+  );
 
   const handleMayorBuildStructure = useCallback(
     async (
@@ -2878,8 +3573,290 @@ export default function App() {
     [handleHireWorker],
   );
 
+  // ============================================================================
+  // Spendable Treasury, Policies, Street Decor, Council Ballot & Villager Chat
+  // ============================================================================
+
+  const handleSpendRushBuild = useCallback(() => {
+    const snap = stateRef.current;
+    const site = snap.structures.find((s) => s.status === 'building');
+    if (!site || snap.treasuryGold < 60) return;
+    const now = Date.now();
+    const label = getStructureDisplayLabel(site);
+    const finished: TownStructure = {
+      ...site,
+      progress: 100,
+      status: 'complete',
+      lastBuilder: 'Treasury Rush Crew',
+      updatedAtMs: now,
+    };
+    setTreasuryGold((g) => Math.max(0, g - 60));
+    setStructures((prev) => prev.map((s) => (s.plotId === site.plotId ? finished : s)));
+    const bonus = STRUCTURE_META[site.structureType].bonus;
+    setMetrics((m) => ({
+      prosperity: clampMetric(m.prosperity + bonus.prosperity),
+      orderLevel: clampMetric(m.orderLevel + bonus.order),
+      morale: clampMetric(m.morale + bonus.morale),
+    }));
+    setLogs((prev) =>
+      [
+        {
+          id: `rush-${site.plotId}-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'architect_lyra',
+          agentName: 'Architect Lyra',
+          rank: 2 as const,
+          location: 'workshop' as const,
+          targetAgent: 'Mayor Sterling',
+          thought: `Funded overtime timber & masonry crew (-60g) to finish ${label}.`,
+          dialogue: `${label} is 100% complete ahead of schedule!`,
+          newTask: `Finished ${label}`,
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+    soundscape.playBuildCompleteChime();
+    setFocusRequest({ type: 'plot', id: site.plotId, nonce: now });
+  }, []);
+
+  const handleSpendUpgradeBuilding = useCallback(() => {
+    const snap = stateRef.current;
+    const candidate = [...snap.structures]
+      .filter((s) => s.status === 'complete' && s.tier < 3)
+      .sort((a, b) => a.tier - b.tier)[0];
+    if (!candidate || snap.treasuryGold < 120) return;
+    const now = Date.now();
+    const label = getStructureDisplayLabel(candidate);
+    const upgraded: TownStructure = {
+      ...candidate,
+      tier: Math.min(3, candidate.tier + 1),
+      lastBuilder: 'Master Guild Upgrade',
+      updatedAtMs: now,
+    };
+    setTreasuryGold((g) => Math.max(0, g - 120));
+    setStructures((prev) => prev.map((s) => (s.plotId === candidate.plotId ? upgraded : s)));
+    setMetrics((m) => ({
+      prosperity: clampMetric(m.prosperity + 3),
+      orderLevel: clampMetric(m.orderLevel + 2),
+      morale: clampMetric(m.morale + 3),
+    }));
+    setLogs((prev) =>
+      [
+        {
+          id: `treasury-upg-${candidate.plotId}-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'architect_lyra',
+          agentName: 'Architect Lyra',
+          rank: 2 as const,
+          location: 'workshop' as const,
+          targetAgent: 'Mayor Sterling',
+          thought: `Invested 120g from Town Treasury to upgrade ${label} to Tier ${upgraded.tier}.`,
+          dialogue: `${label} now stands proudly at Tier ${upgraded.tier}!`,
+          newTask: `Upgraded ${label} (Tier ${upgraded.tier})`,
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+    soundscape.playBuildCompleteChime();
+    setFocusRequest({ type: 'plot', id: candidate.plotId, nonce: now });
+  }, []);
+
+  const handleSpendLaunchFestival = useCallback((chargeGold = true) => {
+    const snap = stateRef.current;
+    if (chargeGold && snap.treasuryGold < 45) return;
+    const now = Date.now();
+    if (chargeGold) {
+      setTreasuryGold((g) => Math.max(0, g - 45));
+    }
+    setMetrics((m) => ({
+      ...m,
+      morale: clampMetric(m.morale + 10),
+    }));
+    setRelationships((prev) => {
+      let next = prev;
+      const ids = snap.agents.slice(0, 6).map((a) => a.id);
+      for (let i = 0; i < ids.length - 1; i++) {
+        next = recordSocialInteraction(next, ids[i], ids[i + 1], 4, 'Sky Lantern Plaza Festival');
+      }
+      return next;
+    });
+    setTriggerCelebrationNonce(now);
+    setLogs((prev) =>
+      [
+        {
+          id: `festival-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'mayor_sterling',
+          agentName: 'Mayor Sterling',
+          rank: 1 as const,
+          location: 'plaza' as const,
+          targetAgent: null,
+          thought: `Celebrated in Town Square with sky lanterns & fireworks${chargeGold ? ' (-45g)' : ''}.`,
+          dialogue: `Light the sky lanterns! Every neighbor in ${snap.townName} is cheering tonight!`,
+          newTask: 'Plaza Sky Lantern Festival (+10 Morale)',
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleSpendTradeTrain = useCallback(() => {
+    const snap = stateRef.current;
+    if (snap.treasuryGold < 35) return;
+    const payout = computeTradeTrainPayout(snap.resources, snap.railSpurBuilt);
+    const totalShipped =
+      payout.shipped.timber +
+      payout.shipped.stone +
+      payout.shipped.harvest +
+      payout.shipped.crystal;
+    if (totalShipped === 0) return;
+    const now = Date.now();
+    setTreasuryGold((g) => Math.max(0, g - 35 + payout.goldEarned));
+    setResources((r) => ({
+      timber: Math.max(0, r.timber - payout.shipped.timber),
+      stone: Math.max(0, r.stone - payout.shipped.stone),
+      harvest: Math.max(0, r.harvest - payout.shipped.harvest),
+      crystal: Math.max(0, r.crystal - payout.shipped.crystal),
+    }));
+    setTriggerTrainNonce(now);
+    setLogs((prev) =>
+      [
+        {
+          id: `trade-train-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'mayor_sterling',
+          agentName: 'Express Trade Train',
+          rank: 1 as const,
+          location: 'market' as const,
+          targetAgent: null,
+          thought: `Exported ${totalShipped} resource crates via Steam Express (-35g dispatch, +${payout.goldEarned}g revenue).`,
+          dialogue: `All aboard! Exported ${totalShipped} cargo crates for +${payout.goldEarned}g!`,
+          newTask: `Net +${payout.goldEarned - 35}g from cargo export`,
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleTogglePolicy = useCallback((policyId: PolicyId) => {
+    const snap = stateRef.current;
+    const exists = snap.activePolicies.includes(policyId);
+    const next = exists
+      ? snap.activePolicies.filter((p) => p !== policyId)
+      : [...snap.activePolicies, policyId];
+    const meta = TOWN_POLICIES.find((p) => p.id === policyId);
+    setActivePolicies(next);
+    const now = Date.now();
+    setLogs((prev) =>
+      [
+        {
+          id: `policy-${policyId}-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'mayor_sterling',
+          agentName: 'Town Council Law',
+          rank: 1 as const,
+          location: 'town_hall' as const,
+          targetAgent: null,
+          thought: meta ? `${meta.benefit} (${meta.tradeoff})` : policyId,
+          dialogue: `${exists ? 'Repealed' : 'Enacted'} civic policy: ${meta?.label ?? policyId}.`,
+          newTask: `${exists ? 'Repealed' : 'Active'}: ${meta?.label ?? policyId}`,
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+    soundscape.playAgentChime(1);
+  }, []);
+
+  const handleToggleDecorPack = useCallback((packId: DecorPackId) => {
+    const snap = stateRef.current;
+    const meta = DECOR_PACKS.find((d) => d.id === packId);
+    if (!meta) return;
+    const installed = snap.decorPacks.includes(packId);
+    const now = Date.now();
+    if (installed) {
+      setDecorPacks((prev) => prev.filter((id) => id !== packId));
+      soundscape.playAgentChime(3);
+      return;
+    }
+    if (snap.treasuryGold < meta.costGold) return;
+    setTreasuryGold((g) => Math.max(0, g - meta.costGold));
+    setDecorPacks((prev) => [...prev, packId]);
+    setMetrics((m) => ({
+      ...m,
+      morale: clampMetric(m.morale + meta.moraleBonus),
+    }));
+    setLogs((prev) =>
+      [
+        {
+          id: `decor-${packId}-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'architect_lyra',
+          agentName: 'Architect Lyra',
+          rank: 2 as const,
+          location: 'plaza' as const,
+          targetAgent: 'Mayor Sterling',
+          thought: `Placed 3D street decor "${meta.label}" (-${meta.costGold}g, +${meta.moraleBonus} Morale).`,
+          dialogue: `Installed ${meta.label} around Town Square — the plaza looks livelier already!`,
+          newTask: `Placed ${meta.label}`,
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleEnactCouncilProposal = useCallback(
+    (proposal: CouncilProposal) => {
+      const snap = stateRef.current;
+      if (snap.treasuryGold < proposal.costGold) return;
+      if (proposal.costGold > 0) {
+        setTreasuryGold((g) => Math.max(0, g - proposal.costGold));
+      }
+      if (proposal.actionType === 'festival') {
+        handleSpendLaunchFestival(false);
+      } else if (proposal.actionType === 'extend_rail') {
+        void handleExtendRail();
+      } else if (proposal.actionType === 'expand_biome' && proposal.biome) {
+        void handleExpandBiome(proposal.biome);
+      } else if (
+        (proposal.actionType === 'build' || proposal.actionType === 'upgrade') &&
+        proposal.structureType
+      ) {
+        void handleMayorBuildStructure(proposal.structureType, proposal.customLabel);
+      }
+      setCouncilRefreshNonce((n) => n + 1);
+    },
+    [handleSpendLaunchFestival, handleExtendRail, handleExpandBiome, handleMayorBuildStructure],
+  );
+
+  const handleVillagerChatReply = useCallback((agentId: AgentId, reply: string) => {
+    const clean = reply.trim().slice(0, 200);
+    if (!clean) return;
+    const now = Date.now();
+    setAgents((prev) =>
+      prev.map((a) => (a.id === agentId ? { ...a, dialogue: clean, updatedAtMs: now } : a)),
+    );
+    setRecentSpeakerId(agentId);
+    if (agentId !== 'mayor_sterling') {
+      setRelationships((prev) =>
+        recordSocialInteraction(prev, 'mayor_sterling', agentId, 3, '1-on-1 Town Chat'),
+      );
+    }
+    setMetrics((m) => ({ ...m, morale: clampMetric(m.morale + 1) }));
+    soundscape.playAgentChime(2);
+  }, []);
+
   const handleSelectPlot = (plotId: PlotId) => {
     setSelectedPlotId(plotId);
+    setCameraMode('orbit');
     setPovVillagerId(null);
     setFollowActive(false);
     setFocusRequest({ type: 'plot', id: plotId, nonce: Date.now() });
@@ -2916,6 +3893,8 @@ export default function App() {
         railSpurBuilt={railSpurBuilt}
         activeAgentId={activeAgentId}
         selectedAgentId={selectedAgentId}
+        recentSpeakerId={recentSpeakerId}
+        cameraMode={cameraMode}
         povVillagerId={povVillagerId}
         selectedPlotId={selectedPlotId}
         timeOfDay={timeOfDay}
@@ -2927,9 +3906,16 @@ export default function App() {
         focusRequest={focusRequest}
         signalRelayPulseNonce={signalRelayPulseNonce}
         triggerTrainNonce={triggerTrainNonce}
+        decorPacks={decorPacks}
+        triggerCelebrationNonce={triggerCelebrationNonce}
         onSelectAgent={handleSelectAgent}
         onTogglePovAgent={handleTogglePovAgent}
-        onExitPov={() => setPovVillagerId(null)}
+        onToggleTrainPov={handleToggleTrainPov}
+        onChangeCameraMode={handleChangeCameraMode}
+        onExitPov={() => {
+          setCameraMode('orbit');
+          setPovVillagerId(null);
+        }}
         onSelectLocation={(loc) => {
           handleFocusLocation(loc);
           setErrorBanner(null);
@@ -2938,6 +3924,12 @@ export default function App() {
         onSelectSignalRelay={handleSelectSignalRelay}
         onDismissPlot={() => setSelectedPlotId(null)}
         onWhisperBuildPlot={handleWhisperBuildPlot}
+        onRenameStructure={handleRenameStructure}
+        onAssignWorkerToPlot={handleAssignWorkerToPlot}
+        onDemolishStructure={handleDemolishStructure}
+        onRegisterSnapshotFn={(fn) => {
+          snapshotFnRef.current = fn;
+        }}
         onMinimapUpdate={setMinimapCoords}
         onUserOrbitStart={() => setFollowActive(false)}
       />
@@ -3237,7 +4229,7 @@ export default function App() {
       )}
 
       {/* Floating Town Radar Minimap + Quick Camera Controls (Bottom-Center Desktop, Floating Corner Mobile) */}
-      <div className="fixed right-3 bottom-16 z-20 flex flex-col items-end gap-2 md:right-auto md:bottom-4 md:left-1/2 md:-translate-x-1/2 md:items-center">
+      <div className="fixed right-3 bottom-16 z-20 flex max-w-[calc(100vw-1.5rem)] flex-col items-end gap-2 md:right-auto md:bottom-4 md:left-1/2 md:-translate-x-1/2 md:items-center">
         {showMinimap && (
           <TownMinimap
             agents={agents}
@@ -3254,81 +4246,136 @@ export default function App() {
             onSelectSignalRelay={handleSelectSignalRelay}
             onFocusBiome={(biome) => {
               setSelectedPlotId(null);
+              setCameraMode('orbit');
               setPovVillagerId(null);
               setFollowActive(false);
               setFocusRequest({ type: 'biome', id: biome, nonce: Date.now() });
             }}
             onFocusRailSpur={() => {
               setSelectedPlotId(null);
+              setCameraMode('orbit');
               setPovVillagerId(null);
               setFollowActive(false);
               setFocusRequest({ type: 'rail_spur', nonce: Date.now() });
             }}
           />
         )}
-        <div className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-950/90 p-1 shadow-xl">
+        <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-white/10 bg-slate-950/90 p-1 shadow-xl">
           <button
             type="button"
             onClick={() => setShowMinimap((m) => !m)}
             aria-label={showMinimap ? 'Hide town radar' : 'Show town radar'}
-            className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-3 text-xs font-medium whitespace-nowrap transition-colors ${
+            className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
               showMinimap
                 ? 'bg-amber-500/20 text-amber-200'
                 : 'text-slate-300 hover:bg-white/5 hover:text-white'
             }`}
           >
             <MapIcon className="h-4 w-4" />
-            <span>Radar</span>
+            <span className="hidden sm:inline">Radar</span>
           </button>
           <button
             type="button"
-            onClick={() => {
-              setPovVillagerId(null);
-              setFollowActive((f) => !f);
-            }}
-            aria-label={followActive ? 'Disable follow cam' : 'Enable follow cam'}
-            className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors md:hidden ${
-              followActive
-                ? 'bg-amber-500/20 text-amber-200'
+            onClick={() =>
+              handleChangeCameraMode(cameraMode === 'free_roam' ? 'orbit' : 'free_roam')
+            }
+            title="Walk Free-Roam Mode (WASD / Touch Joystick)"
+            aria-label={cameraMode === 'free_roam' ? 'Exit Walk mode' : 'Enter Walk mode'}
+            className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
+              cameraMode === 'free_roam'
+                ? 'bg-emerald-500/25 text-emerald-200'
+                : 'text-slate-300 hover:bg-white/5 hover:text-white'
+            }`}
+          >
+            <Footprints className="h-4 w-4" />
+            <span className="hidden sm:inline">Walk</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleToggleTrainPov('cab')}
+            title="Ride Steam Express (Cab & Passenger POV)"
+            aria-label="Ride Steam Express Train"
+            className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
+              cameraMode === 'train_cab' || cameraMode === 'train_passenger'
+                ? 'bg-amber-500/25 text-amber-200'
+                : 'text-slate-300 hover:bg-white/5 hover:text-white'
+            }`}
+          >
+            <TrainFront className="h-4 w-4" />
+            <span className="hidden sm:inline">Train</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleChangeCameraMode(cameraMode === 'tour' ? 'orbit' : 'tour')}
+            title="Cinematic Town Tour"
+            aria-label={cameraMode === 'tour' ? 'Stop Town Tour' : 'Start Cinematic Town Tour'}
+            className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
+              cameraMode === 'tour'
+                ? 'bg-sky-500/25 text-sky-200'
                 : 'text-slate-300 hover:bg-white/5 hover:text-white'
             }`}
           >
             <Video className="h-4 w-4" />
+            <span className="hidden md:inline">Tour</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setChronicleInitialTab('gazette');
+              setChronicleOpen(true);
+            }}
+            title="Town Gazette, Treasury Economy & JSON Backup"
+            aria-label="Open Town Gazette and Economy"
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Newspaper className="h-4 w-4 text-amber-300" />
+            <span className="hidden md:inline">Gazette</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleCapturePostcard}
+            title="Snap 3D Photo Postcard"
+            aria-label="Snap 3D Photo Postcard"
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Camera className="h-4 w-4 text-amber-300" />
+            <span className="hidden lg:inline">Photo</span>
           </button>
           <button
             type="button"
             onClick={handleCycleTownTheme}
             title={`World Theme: ${TOWN_THEME_META[townTheme].label} (tap to switch)`}
             aria-label={`World Theme: ${TOWN_THEME_META[townTheme].label}. Tap to switch theme`}
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
           >
             <Palette className="h-4 w-4 text-amber-300" />
-            <span>{TOWN_THEME_META[townTheme].shortLabel}</span>
+            <span className="hidden lg:inline">{TOWN_THEME_META[townTheme].shortLabel}</span>
           </button>
           <button
             type="button"
             onClick={handleCycleGraphicsQuality}
             title={`Graphics Quality: ${graphicsQuality} (tap to cycle)`}
             aria-label={`Graphics Quality: ${graphicsQuality}. Tap to cycle Low, Medium, High`}
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
           >
             <Gauge className="h-4 w-4 text-amber-300" />
-            <span>
+            <span className="hidden sm:inline">
               {graphicsQuality === 'low' ? 'Low' : graphicsQuality === 'medium' ? 'Med' : 'High'}
             </span>
           </button>
           <button
             type="button"
             onClick={() => {
+              setCameraMode('orbit');
               setPovVillagerId(null);
               setFollowActive(false);
               setFocusRequest({ type: 'reset', nonce: Date.now() });
             }}
             aria-label="Reset camera view"
-            className="inline-flex min-h-[44px] items-center gap-1 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
           >
             <Compass className="h-4 w-4" />
-            <span className="hidden md:inline">Center</span>
+            <span className="hidden xl:inline">Center</span>
           </button>
         </div>
       </div>
@@ -3360,6 +4407,11 @@ export default function App() {
                 agents={agents}
                 structures={structures}
                 metrics={metrics}
+                economy={economy}
+                resources={resources}
+                resourceRates={resourceRates}
+                townRank={townRank}
+                relationships={relationships}
                 weather={weather}
                 providerConfig={providerConfig}
                 activeAgentId={activeAgentId}
@@ -3368,12 +4420,18 @@ export default function App() {
                 isHiring={isHiring}
                 onSelectAgent={handleSelectAgent}
                 onTogglePovAgent={handleTogglePovAgent}
+                onChatVillager={(id) => setChatVillagerId(id)}
                 onSendAgentNote={handleSendAgentNote}
                 onHireWorker={handleHireWorker}
                 onFocusLocation={handleFocusLocation}
                 onSelectPlot={handleSelectPlot}
                 onSelectSignalRelay={handleSelectSignalRelay}
+                onOpenChronicle={(tab) => {
+                  setChronicleInitialTab(tab);
+                  setChronicleOpen(true);
+                }}
                 onResetCamera={() => {
+                  setCameraMode('orbit');
                   setPovVillagerId(null);
                   setFollowActive(false);
                   setSelectedPlotId(null);
@@ -3430,16 +4488,24 @@ export default function App() {
               <DecreePanel
                 activeDecree={activeDecree}
                 timeOfDay={timeOfDay}
+                autoDayNight={autoDayNight}
                 weather={weather}
                 townTheme={townTheme}
                 graphicsQuality={graphicsQuality}
                 turnIntervalSeconds={turnIntervalSeconds}
                 onIssueDecree={handleIssueDecree}
                 onChangeTimeOfDay={handleChangeTimeOfDay}
+                onToggleAutoDayNight={() => setAutoDayNight((v) => !v)}
                 onChangeWeather={handleChangeWeather}
                 onChangeTownTheme={handleChangeTownTheme}
                 onChangeGraphicsQuality={handleChangeGraphicsQuality}
                 onChangeTurnInterval={handleChangeTurnInterval}
+                onTriggerTownEvent={handleTriggerTownEvent}
+                onLaunchFestival={() => handleSpendLaunchFestival(false)}
+                onOpenCouncil={() => {
+                  setChronicleInitialTab('civic');
+                  setChronicleOpen(true);
+                }}
                 onResetTown={handleResetTown}
               />
             </div>
@@ -3496,6 +4562,11 @@ export default function App() {
                   agents={agents}
                   structures={structures}
                   metrics={metrics}
+                  economy={economy}
+                  resources={resources}
+                  resourceRates={resourceRates}
+                  townRank={townRank}
+                  relationships={relationships}
                   weather={weather}
                   providerConfig={providerConfig}
                   activeAgentId={activeAgentId}
@@ -3504,6 +4575,10 @@ export default function App() {
                   isHiring={isHiring}
                   onSelectAgent={handleSelectAgent}
                   onTogglePovAgent={handleTogglePovAgent}
+                  onChatVillager={(id) => {
+                    setChatVillagerId(id);
+                    setMobileTab(null);
+                  }}
                   onSendAgentNote={handleSendAgentNote}
                   onHireWorker={handleHireWorker}
                   onFocusLocation={(loc) => {
@@ -3515,7 +4590,13 @@ export default function App() {
                     setMobileTab(null);
                   }}
                   onSelectSignalRelay={handleSelectSignalRelay}
+                  onOpenChronicle={(tab) => {
+                    setChronicleInitialTab(tab);
+                    setChronicleOpen(true);
+                    setMobileTab(null);
+                  }}
                   onResetCamera={() => {
+                    setCameraMode('orbit');
                     setPovVillagerId(null);
                     setFollowActive(false);
                     setSelectedPlotId(null);
@@ -3529,6 +4610,7 @@ export default function App() {
                 <DecreePanel
                   activeDecree={activeDecree}
                   timeOfDay={timeOfDay}
+                  autoDayNight={autoDayNight}
                   weather={weather}
                   townTheme={townTheme}
                   graphicsQuality={graphicsQuality}
@@ -3538,10 +4620,24 @@ export default function App() {
                     setMobileTab(null);
                   }}
                   onChangeTimeOfDay={handleChangeTimeOfDay}
+                  onToggleAutoDayNight={() => setAutoDayNight((v) => !v)}
                   onChangeWeather={handleChangeWeather}
                   onChangeTownTheme={handleChangeTownTheme}
                   onChangeGraphicsQuality={handleChangeGraphicsQuality}
                   onChangeTurnInterval={handleChangeTurnInterval}
+                  onTriggerTownEvent={() => {
+                    handleTriggerTownEvent();
+                    setMobileTab(null);
+                  }}
+                  onLaunchFestival={() => {
+                    handleSpendLaunchFestival(false);
+                    setMobileTab(null);
+                  }}
+                  onOpenCouncil={() => {
+                    setChronicleInitialTab('civic');
+                    setChronicleOpen(true);
+                    setMobileTab(null);
+                  }}
                   onResetTown={() => {
                     void handleResetTown();
                     setMobileTab(null);
@@ -3704,6 +4800,130 @@ export default function App() {
           setSettingsInitialTab('search');
           setSettingsOpen(true);
         }}
+      />
+
+      {/* Dynamic Town Event Decision Banner */}
+      {activeTownEvent && (
+        <div
+          role="dialog"
+          aria-label={activeTownEvent.title}
+          className="fixed top-20 left-1/2 z-40 w-[min(430px,calc(100vw-1.5rem))] -translate-x-1/2 rounded-2xl border border-amber-400/50 bg-slate-950/95 p-4 shadow-2xl"
+        >
+          <div className="mb-2 flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 shrink-0 text-amber-300" />
+              <div>
+                <p className="text-[10px] font-semibold tracking-wider text-amber-300 uppercase">
+                  Town Event · {activeTownEvent.category}
+                </p>
+                <h3 className="font-display text-sm font-bold text-white">
+                  {activeTownEvent.title}
+                </h3>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTownEvent(null)}
+              aria-label="Dismiss town event"
+              className="rounded-lg p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <p className="mb-3 text-xs leading-relaxed text-slate-300">
+            {activeTownEvent.summary}
+          </p>
+          <div className="grid grid-cols-1 gap-2">
+            {activeTownEvent.options.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => handleResolveTownEvent(opt)}
+                className="flex min-h-[44px] flex-col items-start rounded-xl border border-white/15 bg-slate-900 px-3 py-2 text-left transition-colors hover:border-amber-400/60 hover:bg-amber-500/15"
+              >
+                <span className="text-xs font-semibold text-white">{opt.label}</span>
+                <span className="mt-0.5 text-[11px] text-amber-200/90">{opt.effectSummary}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Milestone Achievement Unlock Banner */}
+      {milestoneToast && (
+        <div
+          role="status"
+          className="fixed bottom-20 left-1/2 z-45 flex max-w-[min(390px,calc(100vw-1.5rem))] -translate-x-1/2 items-center gap-2.5 rounded-2xl border border-amber-400/50 bg-slate-950/95 px-3.5 py-2.5 shadow-2xl md:bottom-6"
+        >
+          <Award className="h-5 w-5 shrink-0 text-amber-300" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-semibold tracking-wider text-amber-300 uppercase">
+              Town Milestone Unlocked
+            </div>
+            <div className="truncate text-xs font-bold text-white">
+              {milestoneToast.title} (+{milestoneToast.rewardGold}g)
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMilestoneToast(null)}
+            aria-label="Dismiss milestone notification"
+            className="rounded-lg p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* 1-on-1 Villager Chat Modal */}
+      <VillagerChatModal
+        agent={chatVillagerId ? agents.find((a) => a.id === chatVillagerId) ?? null : null}
+        agents={agents}
+        structures={structures}
+        relationships={relationships}
+        townName={townName}
+        weather={weather}
+        timeOfDay={timeOfDay}
+        providerConfig={providerConfig}
+        onClose={() => setChatVillagerId(null)}
+        onVillagerReplied={handleVillagerChatReply}
+      />
+
+      {/* Town Chronicle Modal (Gazette + Economy/Spend + Civic Council/Laws/Decor + Analytics/Milestones + Backup) */}
+      <TownChronicleModal
+        isOpen={chronicleOpen}
+        initialTab={chronicleInitialTab}
+        townName={townName}
+        gazette={gazette}
+        economy={economy}
+        resources={resources}
+        resourceRates={resourceRates}
+        activePolicies={activePolicies}
+        decorPacks={decorPacks}
+        councilProposals={councilProposals}
+        townRank={townRank}
+        milestones={milestoneEval.milestones}
+        history={history}
+        railSpurBuilt={railSpurBuilt}
+        hasBuildingInProgress={structures.some((s) => s.status === 'building')}
+        hasUpgradeableBuilding={structures.some((s) => s.status === 'complete' && s.tier < 3)}
+        lastPostcardDataUrl={lastPostcardDataUrl}
+        onClose={() => setChronicleOpen(false)}
+        onCapturePostcard={handleCapturePostcard}
+        onFocusPlot={(plotId) => {
+          setChronicleOpen(false);
+          handleSelectPlot(plotId);
+        }}
+        onSpendRushBuild={handleSpendRushBuild}
+        onSpendUpgradeBuilding={handleSpendUpgradeBuilding}
+        onSpendLaunchFestival={() => handleSpendLaunchFestival(true)}
+        onSpendTradeTrain={handleSpendTradeTrain}
+        onTogglePolicy={handleTogglePolicy}
+        onToggleDecorPack={handleToggleDecorPack}
+        onEnactCouncilProposal={handleEnactCouncilProposal}
+        onRefreshCouncilProposals={() => setCouncilRefreshNonce((n) => n + 1)}
+        onExportJson={handleExportTownJson}
+        onImportJson={handleImportTownJson}
       />
 
       {/* Help & AI Integration Guide Modal */}

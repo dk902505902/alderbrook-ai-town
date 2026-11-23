@@ -10,6 +10,8 @@ import {
   type AgentId,
   type AgentRecord,
   type BiomeId,
+  type CameraMode,
+  type DecorPackId,
   type GraphicsQuality,
   type HatStyle,
   type LocationId,
@@ -30,6 +32,7 @@ import {
   type WaterUniforms,
   type WindUniforms,
 } from './townEnvironment.ts';
+import { buildTownLifeAndDecor, type TownLifeHandle } from './townLife.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import {
   buildCompletedStructureMesh,
@@ -62,6 +65,7 @@ export interface AgentWorldCoord {
 export interface TownSceneCallbacks {
   onSelectAgent: (agentId: AgentId) => void;
   onToggleAgentPov?: (agentId: AgentId) => void;
+  onToggleTrainPov?: (seat: 'cab' | 'passenger') => void;
   onSelectLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
@@ -1585,6 +1589,8 @@ export class TownSceneController {
   private detailsHandle!: TownDetailsHandle;
   private expansionHandle!: TownExpansionHandle;
   private railwayHandle!: TownRailwayHandle;
+  private lifeHandle: TownLifeHandle | null = null;
+  private dogVillagerCoords: Array<{ x: number; z: number }> = [];
   private signalRelayHandle: SignalRelayHandle | null = null;
   private unlockedBiomes: BiomeId[] = [];
   private lastStructures: TownStructure[] = [];
@@ -1652,13 +1658,25 @@ export class TownSceneController {
   private followActive = false;
   private cameraTargetGoal: THREE.Vector3 | null = null;
 
-  // 1-Tap First-Person Character POV Camera Mode
+  // Unified Camera Modes (Orbit, Villager POV, Train Cab/Passenger POV, Free-Roam Walk, Scenic Tour)
+  private cameraMode: CameraMode = 'orbit';
   private povAgentId: AgentId | null = null;
   private savedOrbitPos = new THREE.Vector3(16, 13.5, 19.5);
   private savedOrbitTarget = new THREE.Vector3(0, 0.8, 0);
   private povHasSavedOrbit = false;
   private povReturnActive = false;
   private povCurrentLook = new THREE.Vector3();
+  private freeRoamPos = new THREE.Vector3(0, 1.65, 8.2);
+  private freeRoamYaw = Math.PI;
+  private freeRoamPitch = -0.05;
+  private freeRoamJoyX = 0;
+  private freeRoamJoyZ = 0;
+  private freeRoamBobPhase = 0;
+  private freeRoamKeys = new Set<string>();
+  private freeRoamDragActive = false;
+  private freeRoamLastPointer = { x: 0, y: 0 };
+  private tourProgress = 0;
+  private tourWaypoints: Array<{ eye: THREE.Vector3; look: THREE.Vector3 }> = [];
 
   // Dynamic Terrain & Camera Bounds Expansion
   private groundMesh!: THREE.Mesh;
@@ -1781,6 +1799,9 @@ export class TownSceneController {
     this.syncStructures([], null);
     this.buildAgents(initialAgents);
     this.buildParticlesAndArc();
+    this.lifeHandle = buildTownLifeAndDecor(this.sharedShadowTex);
+    this.scene.add(this.lifeHandle.group);
+    this.disposables.push(this.lifeHandle);
     this.setGraphicsQuality(initialQuality);
     this.setTheme(initialTheme);
 
@@ -1867,6 +1888,7 @@ export class TownSceneController {
     this.clickableObjects.push(
       this.railwayHandle.stationGroup,
       this.railwayHandle.outerStationGroup,
+      this.railwayHandle.trainGroup,
     );
     this.disposables.push(this.railwayHandle);
 
@@ -2370,8 +2392,47 @@ export class TownSceneController {
     }
   }
 
-  public setPovAgent(agentId: AgentId | null): void {
-    if (agentId === this.povAgentId) return;
+  private buildTourWaypoints(): void {
+    const pts: Array<{ eye: THREE.Vector3; look: THREE.Vector3 }> = [
+      { eye: new THREE.Vector3(14.5, 9.5, 15.5), look: new THREE.Vector3(0, 1.2, 0) },
+      { eye: new THREE.Vector3(0.5, 6.2, -1.8), look: new THREE.Vector3(0, 2.2, -10.5) },
+      { eye: new THREE.Vector3(-14.5, 7.8, -5.5), look: new THREE.Vector3(-9.5, 1.2, -0.5) },
+      { eye: new THREE.Vector3(0, 6.8, 17.8), look: new THREE.Vector3(0, 1.2, 9.5) },
+      { eye: new THREE.Vector3(17.5, 8.2, 7.5), look: new THREE.Vector3(10.5, 1.4, -0.5) },
+    ];
+    for (const s of this.lastStructures) {
+      if (s.status !== 'complete') continue;
+      const pm = PLOT_META[s.plotId];
+      if (!pm) continue;
+      const len = Math.hypot(pm.x, pm.z) || 1;
+      pts.push({
+        eye: new THREE.Vector3(pm.x + (pm.x / len) * 9.5, 7.4, pm.z + (pm.z / len) * 9.5),
+        look: new THREE.Vector3(pm.x, 1.4, pm.z),
+      });
+      if (pts.length >= 9) break;
+    }
+    if (this.railSpurBuilt && this.railwayHandle) {
+      const f = this.railwayHandle.frontierDepotFocusTarget;
+      pts.push({
+        eye: new THREE.Vector3(f.x + 9.5, 8.5, f.z + 9.5),
+        look: f.clone(),
+      });
+    }
+    for (const b of this.unlockedBiomes) {
+      const bm = BIOME_META[b];
+      if (bm) {
+        pts.push({
+          eye: new THREE.Vector3(bm.center.x * 0.72, 11.5, bm.center.z * 0.72),
+          look: new THREE.Vector3(bm.center.x, 1.5, bm.center.z),
+        });
+      }
+    }
+    this.tourWaypoints = pts;
+  }
+
+  public setCameraMode(mode: CameraMode, povAgentId?: AgentId | null): void {
+    const resolvedAgentId = mode === 'villager_pov' ? (povAgentId ?? null) : null;
+    if (mode === this.cameraMode && resolvedAgentId === this.povAgentId) return;
 
     // Restore previously hidden POV head mesh if any
     if (this.povAgentId) {
@@ -2381,42 +2442,105 @@ export class TownSceneController {
       }
     }
 
-    if (agentId) {
-      const targetRig = this.rigs.get(agentId);
-      if (!targetRig) {
+    // Save exact orbit pose before leaving orbit mode
+    if (this.cameraMode === 'orbit' && mode !== 'orbit' && !this.povReturnActive) {
+      this.savedOrbitPos.copy(this.camera.position);
+      this.savedOrbitTarget.copy(this.controls.target);
+      this.povHasSavedOrbit = true;
+    }
+
+    this.freeRoamJoyX = 0;
+    this.freeRoamJoyZ = 0;
+    this.freeRoamKeys.clear();
+    this.freeRoamDragActive = false;
+
+    if (mode === 'villager_pov') {
+      const targetRig = resolvedAgentId ? this.rigs.get(resolvedAgentId) : null;
+      if (!targetRig || !resolvedAgentId) {
+        this.cameraMode = 'orbit';
         this.povAgentId = null;
         this.controls.enabled = true;
         return;
       }
-
-      // Save the player's exact current orbit camera position/target before entering POV
-      if (!this.povAgentId && !this.povReturnActive) {
-        this.savedOrbitPos.copy(this.camera.position);
-        this.savedOrbitTarget.copy(this.controls.target);
-        this.povHasSavedOrbit = true;
-      }
-
-      this.povAgentId = agentId;
+      this.cameraMode = 'villager_pov';
+      this.povAgentId = resolvedAgentId;
       this.povReturnActive = false;
       this.followActive = false;
       this.cameraTargetGoal = null;
       this.controls.enabled = false;
-
-      // Hide this villager's own head locally so it never clips the first-person camera
       targetRig.headGroup.visible = false;
-
-      // Lower near clip plane for crisp close-up interior & street-level viewing
       if (this.camera.near !== 0.15) {
         this.camera.near = 0.15;
         this.camera.updateProjectionMatrix();
       }
-
-      // Seed look-at smoothly from current camera target so transition sweeps naturally into POV
       this.povCurrentLook.copy(this.controls.target);
       return;
     }
 
-    // Exiting POV -> smoothly restore exact previous overview position and target
+    if (mode === 'train_cab' || mode === 'train_passenger') {
+      if (this.railwayHandle && !this.railwayHandle.group.visible) {
+        this.railwayHandle.group.visible = true;
+      }
+      this.cameraMode = mode;
+      this.povAgentId = null;
+      this.povReturnActive = false;
+      this.followActive = false;
+      this.cameraTargetGoal = null;
+      this.controls.enabled = false;
+      if (this.camera.near !== 0.15) {
+        this.camera.near = 0.15;
+        this.camera.updateProjectionMatrix();
+      }
+      this.railwayHandle?.getTrainCameraPose(
+        mode === 'train_passenger' ? 'passenger' : 'cab',
+        _povEye,
+        _povLookTarget,
+      );
+      this.povCurrentLook.copy(_povLookTarget);
+      return;
+    }
+
+    if (mode === 'free_roam') {
+      this.cameraMode = 'free_roam';
+      this.povAgentId = null;
+      this.povReturnActive = false;
+      this.followActive = false;
+      this.cameraTargetGoal = null;
+      this.controls.enabled = false;
+      if (this.camera.near !== 0.15) {
+        this.camera.near = 0.15;
+        this.camera.updateProjectionMatrix();
+      }
+      // Spawn walker near plaza facing Town Hall (or near current orbit target clamped safely)
+      const startX = THREE.MathUtils.clamp(this.controls.target.x, -this.maxPanRadius * 0.75, this.maxPanRadius * 0.75);
+      const startZ = THREE.MathUtils.clamp(this.controls.target.z + 5.5, -this.maxPanRadius * 0.75, this.maxPanRadius * 0.75);
+      this.freeRoamPos.set(startX, 1.65, startZ);
+      this.freeRoamYaw = Math.atan2(-startX, -10.5 - startZ);
+      this.freeRoamPitch = -0.04;
+      this.freeRoamBobPhase = 0;
+      this.camera.position.copy(this.freeRoamPos);
+      return;
+    }
+
+    if (mode === 'tour') {
+      this.cameraMode = 'tour';
+      this.povAgentId = null;
+      this.povReturnActive = false;
+      this.followActive = false;
+      this.cameraTargetGoal = null;
+      this.controls.enabled = false;
+      this.tourProgress = 0;
+      this.buildTourWaypoints();
+      if (this.camera.near !== 0.5) {
+        this.camera.near = 0.5;
+        this.camera.updateProjectionMatrix();
+      }
+      this.povCurrentLook.copy(this.controls.target);
+      return;
+    }
+
+    // Returning to standard Orbit overview -> smoothly restore exact previous position and target
+    this.cameraMode = 'orbit';
     this.povAgentId = null;
     if (this.camera.near !== 0.5) {
       this.camera.near = 0.5;
@@ -2427,6 +2551,86 @@ export class TownSceneController {
       this.povReturnActive = true;
       this.cameraTargetGoal = null;
     }
+  }
+
+  public setPovAgent(agentId: AgentId | null): void {
+    this.setCameraMode(agentId ? 'villager_pov' : 'orbit', agentId);
+  }
+
+  public setFreeRoamInput(moveX: number, moveZ: number): void {
+    this.freeRoamJoyX = THREE.MathUtils.clamp(moveX, -1, 1);
+    this.freeRoamJoyZ = THREE.MathUtils.clamp(moveZ, -1, 1);
+  }
+
+  public captureSnapshotDataUrl(townName: string, subtitle?: string): string | null {
+    if (this.disposed) return null;
+    try {
+      // Render right before capturing so WebGL drawing buffer is always fresh
+      this.renderer.render(this.scene, this.camera);
+      const srcCanvas = this.renderer.domElement;
+      const w = Math.max(640, Math.min(1440, srcCanvas.width || 960));
+      const h = Math.round((w * (srcCanvas.height || 540)) / Math.max(1, srcCanvas.width || 960));
+
+      const out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      const ctx = out.getContext('2d');
+      if (!ctx) {
+        return srcCanvas.toDataURL('image/png');
+      }
+      ctx.drawImage(srcCanvas, 0, 0, w, h);
+
+      // Subtle postcard vignette & warm archival caption bar at bottom
+      const barH = Math.max(54, Math.round(h * 0.11));
+      const grad = ctx.createLinearGradient(0, h - barH * 1.5, 0, h);
+      grad.addColorStop(0, 'rgba(15, 23, 42, 0)');
+      grad.addColorStop(0.45, 'rgba(15, 23, 42, 0.72)');
+      grad.addColorStop(1, 'rgba(15, 23, 42, 0.92)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, h - barH * 1.5, w, barH * 1.5);
+
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.45)';
+      ctx.lineWidth = Math.max(2, Math.round(w * 0.0025));
+      ctx.strokeRect(12, 12, w - 24, h - 24);
+
+      const titleSize = Math.max(18, Math.round(w * 0.025));
+      const subSize = Math.max(12, Math.round(w * 0.014));
+      ctx.fillStyle = '#fef3c7';
+      ctx.font = `700 ${titleSize}px system-ui, -apple-system, sans-serif`;
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`Postcard from ${townName || 'Alderbrook'}`, 26, h - Math.round(barH * 0.44));
+
+      ctx.fillStyle = '#cbd5e1';
+      ctx.font = `500 ${subSize}px system-ui, -apple-system, sans-serif`;
+      ctx.fillText(
+        subtitle || `${this.weatherMode} · ${this.timeOfDay} · AI Town Chronicle`,
+        26,
+        h - Math.round(barH * 0.16),
+      );
+
+      return out.toDataURL('image/png');
+    } catch {
+      return null;
+    }
+  }
+
+  public refreshDailyRoutines(agents: AgentRecord[]): void {
+    const capped = agents.slice(0, MAX_TOWN_AGENTS);
+    capped.forEach((agent, index) => {
+      const rig = this.rigs.get(agent.id);
+      if (!rig) return;
+      const dest = this.computeAgentDestination(agent, index);
+      if (rig.homeAnchor.distanceTo(dest) > 1.2) {
+        const slot = getAgentSlotOffset(agent.id, index, _slotOffset);
+        const mid = new THREE.Vector3(
+          PLAZA_CENTER.x + slot.x * 0.45,
+          0,
+          PLAZA_CENTER.z + slot.z * 0.45,
+        );
+        rig.waypoints = [mid, dest];
+        rig.homeAnchor.copy(dest);
+      }
+    });
   }
 
   private applyMapExpansionBounds(): void {
@@ -2492,6 +2696,30 @@ export class TownSceneController {
 
   private computeAgentDestination(agent: AgentRecord, slotIndex: number): THREE.Vector3 {
     const slot = getAgentSlotOffset(agent.id, slotIndex, _slotOffset);
+    const isGuard =
+      agent.id === 'commander_vance' || /(guard|patrol|watch|commander)/i.test(agent.role);
+
+    // Nighttime routine: non-guard villagers rest near cozy residential cottages or Town Hall hearth
+    if (this.timeOfDay === 'night' && !isGuard) {
+      if (this.isCleanFrontier || agent.id === 'mayor_sterling' || slotIndex % 3 === 0) {
+        return new THREE.Vector3(slot.x * 0.52, 0, -9.85 + slot.z * 0.45);
+      }
+      const house = RESIDENTIAL_HOUSES[slotIndex % RESIDENTIAL_HOUSES.length];
+      return new THREE.Vector3(house.x + slot.x * 0.34, 0, house.z + slot.z * 0.34);
+    }
+
+    // Twilight / Evening social hour: villagers not actively building gather around Park & Plaza
+    if (
+      this.timeOfDay === 'twilight' &&
+      !isGuard &&
+      (!agent.activePlotId || this.completedPlots.has(agent.activePlotId))
+    ) {
+      if (!this.isCleanFrontier) {
+        const socialAngle = slotIndex * 1.15 + 0.35;
+        const r = 2.6 + (slotIndex % 3) * 0.75;
+        return new THREE.Vector3(Math.cos(socialAngle) * r, 0, 5.2 + Math.sin(socialAngle) * r * 0.65);
+      }
+    }
 
     if (agent.activePlotId && PLOT_META[agent.activePlotId]) {
       const pm = PLOT_META[agent.activePlotId];
@@ -2575,14 +2803,19 @@ export class TownSceneController {
       this.railwayHandle.group.visible = params.isMainTown || params.railSpurBuilt;
     }
 
-    // 3. Clear transient visual effects, POV state & cached cutaway/plot state
+    // 3. Clear transient visual effects, camera mode & cached cutaway/plot state
     if (this.povAgentId) {
       const prevPovRig = this.rigs.get(this.povAgentId);
       if (prevPovRig) prevPovRig.headGroup.visible = true;
     }
+    this.cameraMode = 'orbit';
     this.povAgentId = null;
     this.povReturnActive = false;
     this.povHasSavedOrbit = false;
+    this.freeRoamJoyX = 0;
+    this.freeRoamJoyZ = 0;
+    this.freeRoamKeys.clear();
+    this.freeRoamDragActive = false;
     this.controls.enabled = true;
     if (this.camera.near !== 0.5) {
       this.camera.near = 0.5;
@@ -2970,9 +3203,23 @@ export class TownSceneController {
 
     const onPointerDown = (e: PointerEvent) => {
       this.pointerDownPos = { x: e.clientX, y: e.clientY };
+      if (this.cameraMode === 'free_roam') {
+        this.freeRoamDragActive = true;
+        this.freeRoamLastPointer = { x: e.clientX, y: e.clientY };
+      }
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (this.cameraMode !== 'free_roam' || !this.freeRoamDragActive) return;
+      const dx = e.clientX - this.freeRoamLastPointer.x;
+      const dy = e.clientY - this.freeRoamLastPointer.y;
+      this.freeRoamLastPointer = { x: e.clientX, y: e.clientY };
+      this.freeRoamYaw -= dx * 0.0048;
+      this.freeRoamPitch = THREE.MathUtils.clamp(this.freeRoamPitch - dy * 0.0038, -0.58, 0.55);
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      this.freeRoamDragActive = false;
       const dx = e.clientX - this.pointerDownPos.x;
       const dy = e.clientY - this.pointerDownPos.y;
       if (Math.hypot(dx, dy) > 8) return;
@@ -3005,6 +3252,11 @@ export class TownSceneController {
           } else {
             this.callbacks.onSelectAgent(aid);
           }
+          return;
+        }
+        if (obj.userData?.trainCar) {
+          const seat = obj.userData.trainCar === 'passenger' ? 'passenger' : 'cab';
+          this.callbacks.onToggleTrainPov?.(seat);
           return;
         }
         if (obj.userData?.plotId) {
@@ -3053,6 +3305,20 @@ export class TownSceneController {
       }
     };
 
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (this.cameraMode !== 'free_roam') return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const k = e.key.toLowerCase();
+      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) {
+        this.freeRoamKeys.add(k);
+      }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      this.freeRoamKeys.delete(e.key.toLowerCase());
+    };
+
     const onContextLost = (e: Event) => {
       e.preventDefault();
       this.callbacks.onContextLost?.();
@@ -3063,16 +3329,24 @@ export class TownSceneController {
     };
 
     window.addEventListener('resize', onResize);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
     canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('webglcontextlost', onContextLost);
     canvas.addEventListener('webglcontextrestored', onContextRestored);
 
     this.disposables.push({
       dispose: () => {
         window.removeEventListener('resize', onResize);
+        window.removeEventListener('keydown', onKeyDown);
+        window.removeEventListener('keyup', onKeyUp);
         canvas.removeEventListener('pointerdown', onPointerDown);
+        canvas.removeEventListener('pointermove', onPointerMove);
         canvas.removeEventListener('pointerup', onPointerUp);
+        canvas.removeEventListener('pointercancel', onPointerUp);
         canvas.removeEventListener('webglcontextlost', onContextLost);
         canvas.removeEventListener('webglcontextrestored', onContextRestored);
       },
@@ -3207,8 +3481,11 @@ export class TownSceneController {
         this.waterJetMat.color.lerp(_targetColor, atmoLerp);
       }
 
-      // 2. Smooth camera tracking (First-Person POV, POV Overview Return, Follow Mode, or Focus Goal)
-      const povRig = this.povAgentId ? this.rigs.get(this.povAgentId) ?? null : null;
+      // 2. Smooth camera tracking (Villager POV, Train Ride POV, Free-Roam Walk, Scenic Tour, or Orbit)
+      const povRig =
+        this.cameraMode === 'villager_pov' && this.povAgentId
+          ? this.rigs.get(this.povAgentId) ?? null
+          : null;
       if (povRig) {
         // Dynamically track the villager's walking direction, head height & bob at eye level
         _povForward.set(0, 0, 1).applyQuaternion(povRig.root.quaternion).normalize();
@@ -3229,6 +3506,77 @@ export class TownSceneController {
         this.povCurrentLook.x = THREE.MathUtils.damp(this.povCurrentLook.x, _povLookTarget.x, 8, delta);
         this.povCurrentLook.y = THREE.MathUtils.damp(this.povCurrentLook.y, _povLookTarget.y, 8, delta);
         this.povCurrentLook.z = THREE.MathUtils.damp(this.povCurrentLook.z, _povLookTarget.z, 8, delta);
+        this.camera.lookAt(this.povCurrentLook);
+      } else if (
+        (this.cameraMode === 'train_cab' || this.cameraMode === 'train_passenger') &&
+        this.railwayHandle
+      ) {
+        const seat = this.cameraMode === 'train_passenger' ? 'passenger' : 'cab';
+        this.railwayHandle.getTrainCameraPose(seat, _povEye, _povLookTarget);
+        this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, _povEye.x, 12, delta);
+        this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, _povEye.y, 12, delta);
+        this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, _povEye.z, 12, delta);
+        this.povCurrentLook.x = THREE.MathUtils.damp(this.povCurrentLook.x, _povLookTarget.x, 10, delta);
+        this.povCurrentLook.y = THREE.MathUtils.damp(this.povCurrentLook.y, _povLookTarget.y, 10, delta);
+        this.povCurrentLook.z = THREE.MathUtils.damp(this.povCurrentLook.z, _povLookTarget.z, 10, delta);
+        this.camera.lookAt(this.povCurrentLook);
+      } else if (this.cameraMode === 'free_roam') {
+        const keyFwd =
+          (this.freeRoamKeys.has('w') || this.freeRoamKeys.has('arrowup') ? 1 : 0) -
+          (this.freeRoamKeys.has('s') || this.freeRoamKeys.has('arrowdown') ? 1 : 0);
+        const keyStrafe =
+          (this.freeRoamKeys.has('d') || this.freeRoamKeys.has('arrowright') ? 1 : 0) -
+          (this.freeRoamKeys.has('a') || this.freeRoamKeys.has('arrowleft') ? 1 : 0);
+        const moveFwd = THREE.MathUtils.clamp(keyFwd - this.freeRoamJoyZ, -1, 1);
+        const moveRight = THREE.MathUtils.clamp(keyStrafe + this.freeRoamJoyX, -1, 1);
+        const moveMag = Math.hypot(moveFwd, moveRight);
+        if (moveMag > 0.02) {
+          const normFwd = moveFwd / Math.max(1, moveMag);
+          const normRight = moveRight / Math.max(1, moveMag);
+          const fwdX = Math.sin(this.freeRoamYaw);
+          const fwdZ = Math.cos(this.freeRoamYaw);
+          const rightX = -fwdZ;
+          const rightZ = fwdX;
+          const roamSpeed = 6.2;
+          this.freeRoamPos.x += (fwdX * normFwd + rightX * normRight) * roamSpeed * delta;
+          this.freeRoamPos.z += (fwdZ * normFwd + rightZ * normRight) * roamSpeed * delta;
+          const roamDist = Math.hypot(this.freeRoamPos.x, this.freeRoamPos.z);
+          if (roamDist > this.maxPanRadius) {
+            const sc = this.maxPanRadius / roamDist;
+            this.freeRoamPos.x *= sc;
+            this.freeRoamPos.z *= sc;
+          }
+          this.freeRoamBobPhase += delta * 8.5;
+        }
+        const bobY = moveMag > 0.02 ? Math.sin(this.freeRoamBobPhase) * 0.045 : 0;
+        const eyeY = 1.65 + bobY;
+        this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, this.freeRoamPos.x, 12, delta);
+        this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, eyeY, 12, delta);
+        this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, this.freeRoamPos.z, 12, delta);
+        const cosP = Math.cos(this.freeRoamPitch);
+        _povLookTarget.set(
+          this.camera.position.x + Math.sin(this.freeRoamYaw) * cosP * 8,
+          this.camera.position.y + Math.sin(this.freeRoamPitch) * 8,
+          this.camera.position.z + Math.cos(this.freeRoamYaw) * cosP * 8,
+        );
+        this.camera.lookAt(_povLookTarget);
+      } else if (this.cameraMode === 'tour' && this.tourWaypoints.length >= 2) {
+        const count = this.tourWaypoints.length;
+        this.tourProgress = (this.tourProgress + delta * 0.14) % count;
+        const idxA = Math.floor(this.tourProgress) % count;
+        const idxB = (idxA + 1) % count;
+        const frac = this.tourProgress - Math.floor(this.tourProgress);
+        const smooth = 0.5 - 0.5 * Math.cos(frac * Math.PI);
+        const wpA = this.tourWaypoints[idxA];
+        const wpB = this.tourWaypoints[idxB];
+        _povEye.lerpVectors(wpA.eye, wpB.eye, smooth);
+        _povLookTarget.lerpVectors(wpA.look, wpB.look, smooth);
+        this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, _povEye.x, 3.2, delta);
+        this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, _povEye.y, 3.2, delta);
+        this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, _povEye.z, 3.2, delta);
+        this.povCurrentLook.x = THREE.MathUtils.damp(this.povCurrentLook.x, _povLookTarget.x, 3.2, delta);
+        this.povCurrentLook.y = THREE.MathUtils.damp(this.povCurrentLook.y, _povLookTarget.y, 3.2, delta);
+        this.povCurrentLook.z = THREE.MathUtils.damp(this.povCurrentLook.z, _povLookTarget.z, 3.2, delta);
         this.camera.lookAt(this.povCurrentLook);
       } else if (this.povReturnActive) {
         this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, this.savedOrbitPos.x, 7.5, delta);
@@ -3297,12 +3645,17 @@ export class TownSceneController {
       }
       this.expansionHandle?.update(elapsed);
 
-      // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom; solid roofs in POV)
+      // 3b. See-Inside Building Interiors (Smooth Roof Cutaway on Click/Focus or Close Zoom; solid roofs in eye-level modes)
+      const isEyeLevelMode =
+        this.cameraMode === 'villager_pov' ||
+        this.cameraMode === 'train_cab' ||
+        this.cameraMode === 'train_passenger' ||
+        this.cameraMode === 'free_roam';
       const updateCutaway = (entry: CutawayEntry, idx: number) => {
         const isFocused = this.focusedCutawayId === entry.id;
         const camDist = this.camera.position.distanceTo(entry.center);
         const isCloseZoom = camDist < entry.triggerRadius;
-        const targetOpacity = this.povAgentId ? 1.0 : isFocused || isCloseZoom ? 0.15 : 1.0;
+        const targetOpacity = isEyeLevelMode ? 1.0 : isFocused || isCloseZoom ? 0.15 : 1.0;
 
         entry.currentOpacity = THREE.MathUtils.damp(entry.currentOpacity, targetOpacity, 7.5, delta);
         const openCutaway = entry.currentOpacity < 0.985;
@@ -3587,6 +3940,21 @@ export class TownSceneController {
         this.callbacks.onMinimapUpdate?.(worldCoords);
       }
 
+      if (this.lifeHandle) {
+        let idx = 0;
+        this.rigs.forEach((rig) => {
+          if (idx >= this.dogVillagerCoords.length) {
+            this.dogVillagerCoords.push({ x: rig.root.position.x, z: rig.root.position.z });
+          } else {
+            this.dogVillagerCoords[idx].x = rig.root.position.x;
+            this.dogVillagerCoords[idx].z = rig.root.position.z;
+          }
+          idx++;
+        });
+        this.dogVillagerCoords.length = idx;
+        this.lifeHandle.update(delta, elapsed, this.timeOfDay, this.weatherMode, this.dogVillagerCoords);
+      }
+
       this.renderer.render(this.scene, this.camera);
 
       if (this.isSoftwareGl) {
@@ -3597,6 +3965,14 @@ export class TownSceneController {
     };
 
     this.frameId = window.requestAnimationFrame(tick);
+  }
+
+  public setDecorPacks(packs: DecorPackId[]): void {
+    this.lifeHandle?.setDecorPacks(packs);
+  }
+
+  public triggerCelebration(): void {
+    this.lifeHandle?.triggerCelebration();
   }
 
   public dispose(): void {

@@ -258,7 +258,8 @@ service cloud.firestore {
           && (
             incoming().diff(existing()).affectedKeys().hasOnly(['location', 'activePlotId', 'targetAgent', 'thought', 'dialogue', 'currentTask', 'userNote', 'updatedAt']) ||
             incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'updatedAt']) ||
-            incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'activePlotId', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['userNote', 'activePlotId', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['assignedPlotId', 'activePlotId', 'currentTask', 'updatedAt'])
           );
         allow delete: if isValidId(townId) && isValidAgentId(agentId) && isSignedIn() && existing().ownerId == request.auth.uid;
       }
@@ -288,7 +289,8 @@ service cloud.firestore {
           && !(existing().status == 'complete' && incoming().status == 'building')
           && (
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'progress', 'lastBuilder', 'updatedAt']) ||
-            incoming().diff(existing()).affectedKeys().hasOnly(['tier', 'lastBuilder', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['tier', 'lastBuilder', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['customLabel', 'updatedAt'])
           );
         allow delete: if isValidId(townId) && isValidId(plotId) && isSignedIn() && existing().ownerId == request.auth.uid;
       }

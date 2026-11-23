@@ -1,0 +1,1355 @@
+import {
+  ALL_BIOME_IDS,
+  ALL_PLOT_IDS,
+  ALL_STRUCTURE_TYPES,
+  createInitialAgents,
+  createInitialLogs,
+  DEFAULT_TOWN_METRICS,
+  getStructureDisplayLabel,
+  MAX_TOWN_AGENTS,
+  normalizeTownTheme,
+  normalizeWeatherMode,
+  PLOT_META,
+  STRUCTURE_META,
+  type AgentId,
+  type AgentRecord,
+  type BiomeId,
+  type BuildingEconomyRow,
+  type CouncilProposal,
+  type CustomBuildingStyle,
+  type DecorPackId,
+  type DecorPackMeta,
+  type LocationId,
+  type MilestoneId,
+  type PlotId,
+  type PolicyId,
+  type StructureType,
+  type TimeOfDay,
+  type TownEconomySummary,
+  type TownEvent,
+  type TownGazetteEdition,
+  type TownHistoryPoint,
+  type TownLogItem,
+  type TownMetrics,
+  type TownMilestone,
+  type TownPolicyMeta,
+  type TownRankInfo,
+  type TownRelationship,
+  type TownResourceRates,
+  type TownResources,
+  type TownStructure,
+  type TownTheme,
+  type WeatherMode,
+} from '../types/town.ts';
+
+export const DEFAULT_TREASURY_GOLD = 250;
+
+export const DEFAULT_TOWN_RESOURCES: TownResources = {
+  timber: 24,
+  stone: 20,
+  harvest: 18,
+  crystal: 4,
+};
+
+export const ALL_POLICY_IDS: PolicyId[] = [
+  'open_trade',
+  'night_shift',
+  'free_bread',
+  'green_charter',
+];
+
+export const TOWN_POLICIES: TownPolicyMeta[] = [
+  {
+    id: 'open_trade',
+    label: 'Open Trade Tariffs',
+    benefit: '+18g Steam Railway trade per turn',
+    tradeoff: '-1 Order on trade turns',
+  },
+  {
+    id: 'night_shift',
+    label: 'Night-Shift Builders',
+    benefit: '+35% faster construction progress',
+    tradeoff: '-2 Morale when building',
+  },
+  {
+    id: 'free_bread',
+    label: 'Free Bakery Bread',
+    benefit: '+3 Morale every turn',
+    tradeoff: '-10g civic upkeep per turn',
+  },
+  {
+    id: 'green_charter',
+    label: 'Green Charter',
+    benefit: '+50% Timber & Harvest · +15% Greenhouse/Windmill gold',
+    tradeoff: '-4g conservation stipend',
+  },
+];
+
+export const ALL_DECOR_PACK_IDS: DecorPackId[] = [
+  'lantern_boulevard',
+  'flower_gardens',
+  'market_bunting',
+  'fountain_statues',
+];
+
+export const DECOR_PACKS: DecorPackMeta[] = [
+  {
+    id: 'lantern_boulevard',
+    label: 'Lantern Boulevards',
+    costGold: 45,
+    moraleBonus: 3,
+    summary: '12 wrought-iron streetlamps lining the cardinal avenues of Town Square',
+  },
+  {
+    id: 'flower_gardens',
+    label: 'Flower Gardens',
+    costGold: 35,
+    moraleBonus: 3,
+    summary: '24 sunlit stone planters and seasonal blossoms framing the plaza',
+  },
+  {
+    id: 'market_bunting',
+    label: 'Market Bunting Banners',
+    costGold: 40,
+    moraleBonus: 2,
+    summary: 'Festive overhead pennant garlands across Market, Plaza, and Workshop',
+  },
+  {
+    id: 'fountain_statues',
+    label: 'Fountain Statues',
+    costGold: 60,
+    moraleBonus: 4,
+    summary: '4 sculpted bronze & limestone civic monuments guarding the square corners',
+  },
+];
+
+// ============================================================================
+// 1. Building Economy & Town Treasury Engine
+// ============================================================================
+
+const BASE_GOLD_PER_TURN: Record<StructureType, number> = {
+  bakery: 18,
+  watchtower: 8,
+  greenhouse: 16,
+  windmill: 24,
+  library: 14,
+  granary: 20,
+  pavilion: 12,
+  clock_tower: 16,
+  custom: 22,
+};
+
+export function getDemolishSalvageGold(structure: TownStructure): number {
+  const base = BASE_GOLD_PER_TURN[structure.structureType] ?? 16;
+  const tierFactor = structure.status === 'complete' ? structure.tier : 0.6;
+  return Math.round(base * 2.5 * tierFactor);
+}
+
+export function computeTownEconomy(
+  structures: TownStructure[],
+  agents: AgentRecord[],
+  weather: WeatherMode,
+  railSpurBuilt: boolean,
+  treasuryGold: number,
+  activePolicies: PolicyId[] = [],
+  decorPacks: DecorPackId[] = [],
+): TownEconomySummary {
+  const rows: BuildingEconomyRow[] = [];
+  let buildingRevenue = 0;
+  const hasGreenCharter = activePolicies.includes('green_charter');
+  const hasOpenTrade = activePolicies.includes('open_trade');
+  const hasFreeBread = activePolicies.includes('free_bread');
+
+  for (const s of structures) {
+    if (s.status !== 'complete') continue;
+    const base = BASE_GOLD_PER_TURN[s.structureType] ?? 16;
+    const tierBonus = 1 + (Math.max(1, s.tier) - 1) * 0.55;
+    let weatherMult = 1.0;
+    let note = `Tier ${s.tier}`;
+
+    if (weather === 'rain' && (s.structureType === 'greenhouse' || s.structureType === 'granary')) {
+      weatherMult = 1.25;
+      note = `Tier ${s.tier} · Rain +25%`;
+    } else if (weather === 'summer' && s.structureType === 'windmill') {
+      weatherMult = 1.35;
+      note = `Tier ${s.tier} · Summer +35%`;
+    } else if (weather === 'winter' && s.structureType === 'bakery') {
+      weatherMult = 1.3;
+      note = `Tier ${s.tier} · Winter warmth +30%`;
+    }
+
+    if (hasGreenCharter && (s.structureType === 'greenhouse' || s.structureType === 'windmill')) {
+      weatherMult *= 1.15;
+      note += ' · Charter +15%';
+    }
+
+    const staffed = agents.some(
+      (a) => a.assignedPlotId === s.plotId || a.activePlotId === s.plotId,
+    );
+    const staffMult = staffed ? 1.2 : 1.0;
+    if (staffed) {
+      note += ' · Staffed +20%';
+    }
+
+    const goldPerTurn = Math.round(base * tierBonus * weatherMult * staffMult);
+    buildingRevenue += goldPerTurn;
+    rows.push({
+      plotId: s.plotId,
+      label: getStructureDisplayLabel(s),
+      district: PLOT_META[s.plotId]?.label ?? 'Town Plot',
+      tier: s.tier,
+      goldPerTurn,
+      staffed,
+      note,
+    });
+  }
+
+  rows.sort((a, b) => b.goldPerTurn - a.goldPerTurn);
+
+  // Civic baseline tax + Steam Railway trade bonus + Decor tourism bump
+  const decorTourism = decorPacks.length * 3;
+  const civicBaseTax = 14 + Math.min(20, Math.round(agents.length * 1.5)) + decorTourism;
+  const railwayBonus = (railSpurBuilt ? 28 : 10) + (hasOpenTrade ? 18 : 0);
+  const grossIncome = civicBaseTax + railwayBonus + buildingRevenue;
+  const policyUpkeep = (hasFreeBread ? 10 : 0) + (hasGreenCharter ? 4 : 0);
+  const workerUpkeep = Math.max(0, agents.length - 5) * 4 + 8 + policyUpkeep;
+  const netPerTurn = grossIncome - workerUpkeep;
+
+  return {
+    treasuryGold,
+    civicBaseTax,
+    railwayBonus,
+    buildingRevenue,
+    workerUpkeep,
+    netPerTurn,
+    topBuildings: rows,
+  };
+}
+
+// ============================================================================
+// 1b. 4-Resource Supply Chain (Timber, Stone, Harvest, Crystal)
+// ============================================================================
+
+export function computeResourceRates(
+  structures: TownStructure[],
+  unlockedBiomes: BiomeId[],
+  activePolicies: PolicyId[],
+): TownResourceRates {
+  let timber = 3 + (unlockedBiomes.includes('forest') ? 6 : 0);
+  let stone = 3 + (unlockedBiomes.includes('desert') ? 4 : 0) + (unlockedBiomes.includes('cave') ? 3 : 0);
+  let harvest = 3;
+  let crystal = unlockedBiomes.includes('cave') ? 4 : 0;
+
+  for (const s of structures) {
+    if (s.status !== 'complete') continue;
+    const t = Math.max(1, s.tier);
+    if (s.structureType === 'bakery' || s.structureType === 'windmill' || s.structureType === 'granary' || s.structureType === 'greenhouse') {
+      harvest += 3 * t;
+    }
+    if (s.structureType === 'watchtower' || s.structureType === 'clock_tower' || s.structureType === 'library') {
+      stone += 2 * t;
+    }
+    if (s.structureType === 'pavilion' || s.structureType === 'granary') {
+      timber += 2 * t;
+    }
+    if (s.structureType === 'custom') {
+      if (s.customStyle === 'lab' || s.customStyle === 'observatory') {
+        crystal += 2 * t;
+      } else if (s.customStyle === 'forge' || s.customStyle === 'tower') {
+        stone += 3 * t;
+      } else {
+        timber += 2 * t;
+        harvest += 1 * t;
+      }
+    }
+  }
+
+  if (activePolicies.includes('green_charter')) {
+    timber = Math.round(timber * 1.5);
+    harvest = Math.round(harvest * 1.5);
+  }
+
+  return { timber, stone, harvest, crystal };
+}
+
+export function computeTradeTrainPayout(
+  resources: TownResources,
+  railSpurBuilt: boolean,
+): { goldEarned: number; shipped: TownResources } {
+  const shipped: TownResources = {
+    timber: Math.min(resources.timber, 18),
+    stone: Math.min(resources.stone, 16),
+    harvest: Math.min(resources.harvest, 18),
+    crystal: Math.min(resources.crystal, 10),
+  };
+  const baseValue =
+    shipped.timber * 1.4 +
+    shipped.stone * 1.8 +
+    shipped.harvest * 1.6 +
+    shipped.crystal * 5.2;
+  const loopBonus = railSpurBuilt ? 1.35 : 1.0;
+  const goldEarned = Math.max(55, Math.round(baseValue * loopBonus + 28));
+  return { goldEarned, shipped };
+}
+
+// ============================================================================
+// 1c. Town Milestones, Badges & Civic Rank Progression
+// ============================================================================
+
+export function computeTownRank(params: {
+  structures: TownStructure[];
+  agents: AgentRecord[];
+  unlockedBiomes: BiomeId[];
+  railSpurBuilt: boolean;
+  treasuryGold: number;
+}): TownRankInfo {
+  const completed = params.structures.filter((s) => s.status === 'complete').length;
+  const score =
+    completed * 18 +
+    Math.max(0, params.agents.length - 5) * 14 +
+    params.unlockedBiomes.length * 32 +
+    (params.railSpurBuilt ? 30 : 0) +
+    Math.min(40, Math.floor(params.treasuryGold / 40));
+
+  const tiers: Array<{ level: number; title: string; minScore: number; req: string }> = [
+    { level: 1, title: 'Hamlet', minScore: 0, req: 'Complete 2 buildings or recruit a villager' },
+    { level: 2, title: 'Village', minScore: 36, req: 'Build 4 structures & grow your treasury' },
+    { level: 3, title: 'Market Town', minScore: 90, req: 'Unlock an outer biome or extend the rail loop' },
+    { level: 4, title: 'Rail Hub', minScore: 165, req: 'Unlock 3 biomes, rail loop & 8+ buildings' },
+    { level: 5, title: 'Frontier Metropolis', minScore: 260, req: 'Highest civic rank achieved!' },
+  ];
+
+  let current = tiers[0];
+  let next: (typeof tiers)[number] | null = tiers[1];
+  for (let i = 0; i < tiers.length; i++) {
+    if (score >= tiers[i].minScore) {
+      current = tiers[i];
+      next = tiers[i + 1] ?? null;
+    }
+  }
+
+  const progressPct = next
+    ? Math.max(
+        4,
+        Math.min(
+          100,
+          Math.round(((score - current.minScore) / (next.minScore - current.minScore)) * 100),
+        ),
+      )
+    : 100;
+
+  return {
+    level: current.level,
+    title: current.title,
+    nextTitle: next ? next.title : null,
+    progressPct,
+    nextRequirement: current.req,
+  };
+}
+
+export function evaluateTownMilestones(params: {
+  structures: TownStructure[];
+  agents: AgentRecord[];
+  unlockedBiomes: BiomeId[];
+  railSpurBuilt: boolean;
+  treasuryGold: number;
+  relationships: TownRelationship[];
+  alreadyUnlocked: MilestoneId[];
+}): { milestones: TownMilestone[]; newlyUnlocked: TownMilestone[] } {
+  const completed = params.structures.filter((s) => s.status === 'complete');
+  const hasTier3 = completed.some((s) => s.tier >= 3);
+  const maxBond = params.relationships.reduce((mx, r) => Math.max(mx, r.score), 0);
+
+  const defs: Array<{
+    id: MilestoneId;
+    title: string;
+    description: string;
+    rewardGold: number;
+    met: boolean;
+  }> = [
+    {
+      id: 'first_building',
+      title: 'First Cornerstone',
+      description: 'Complete your first civic structure on any town plot.',
+      rewardGold: 50,
+      met: completed.length >= 1,
+    },
+    {
+      id: 'masterwork_t3',
+      title: 'Tier 3 Masterwork',
+      description: 'Upgrade any building to prestigious Tier 3.',
+      rewardGold: 90,
+      met: hasTier3,
+    },
+    {
+      id: 'frontier_biome',
+      title: 'Frontier Explorer',
+      description: 'Expand map borders into Forest, Desert, or Crystal Cave.',
+      rewardGold: 75,
+      met: params.unlockedBiomes.length >= 1,
+    },
+    {
+      id: 'all_biomes',
+      title: 'Tri-Biome Dominion',
+      description: 'Unlock all 3 outer frontier biomes around town.',
+      rewardGold: 150,
+      met: params.unlockedBiomes.length >= 3,
+    },
+    {
+      id: 'steam_loop',
+      title: 'Steam Express Pioneer',
+      description: 'Build the connected Outer Railway Loop & Frontier Station.',
+      rewardGold: 100,
+      met: params.railSpurBuilt,
+    },
+    {
+      id: 'treasury_1000',
+      title: 'Golden Vault',
+      description: 'Accumulate 1,000g or more in the Town Treasury.',
+      rewardGold: 120,
+      met: params.treasuryGold >= 1000,
+    },
+    {
+      id: 'bustling_council',
+      title: 'Bustling Town Roster',
+      description: 'Grow your community to 8 or more active villagers.',
+      rewardGold: 80,
+      met: params.agents.length >= 8,
+    },
+    {
+      id: 'trusted_partners',
+      title: 'Trusted Partners',
+      description: 'Deepen any villager friendship bond to 85/100 or higher.',
+      rewardGold: 65,
+      met: maxBond >= 85,
+    },
+  ];
+
+  const unlockedSet = new Set<MilestoneId>(params.alreadyUnlocked);
+  const newlyUnlocked: TownMilestone[] = [];
+  const milestones: TownMilestone[] = defs.map((d) => {
+    const isUnlocked = unlockedSet.has(d.id) || d.met;
+    const item: TownMilestone = {
+      id: d.id,
+      title: d.title,
+      description: d.description,
+      rewardGold: d.rewardGold,
+      unlocked: isUnlocked,
+    };
+    if (d.met && !unlockedSet.has(d.id)) {
+      newlyUnlocked.push(item);
+    }
+    return item;
+  });
+
+  return { milestones, newlyUnlocked };
+}
+
+// ============================================================================
+// 1d. Town Council Proposals & Voting Board
+// ============================================================================
+
+export function generateCouncilProposals(params: {
+  agents: AgentRecord[];
+  structures: TownStructure[];
+  unlockedBiomes: BiomeId[];
+  railSpurBuilt: boolean;
+  turnCount: number;
+}): CouncilProposal[] {
+  const proposals: CouncilProposal[] = [];
+  const lyra = params.agents.find((a) => a.id === 'architect_lyra') ?? params.agents[0];
+  const vance = params.agents.find((a) => a.id === 'commander_vance') ?? params.agents[0];
+  const pip =
+    params.agents.find((a) => a.isHired) ??
+    params.agents.find((a) => a.id === 'worker_pip') ??
+    params.agents[0];
+
+  const builtTypes = new Set(params.structures.map((s) => s.structureType));
+  const nextLockedBiome = ALL_BIOME_IDS.find((b) => !params.unlockedBiomes.includes(b));
+  const upgradable = params.structures.find((s) => s.status === 'complete' && s.tier < 3);
+
+  // Proposal 1 (Architect Lyra): Build high-value landmark or upgrade
+  if (!builtTypes.has('greenhouse')) {
+    proposals.push({
+      id: `prop_greenhouse_${params.turnCount}`,
+      proposerId: lyra.id,
+      proposerName: lyra.name,
+      proposerRole: lyra.role,
+      title: 'Construct Glass Greenhouse',
+      summary: 'Boosts botanical Morale (+4) and Harvest output every turn, with +25% rain yield.',
+      actionType: 'build',
+      structureType: 'greenhouse',
+      costGold: 55,
+      votes: 3,
+      supporters: [lyra.name, 'Worker Pip', 'Mayor Sterling'],
+    });
+  } else if (!builtTypes.has('bakery')) {
+    proposals.push({
+      id: `prop_bakery_${params.turnCount}`,
+      proposerId: lyra.id,
+      proposerName: lyra.name,
+      proposerRole: lyra.role,
+      title: 'Open Artisan Bakery',
+      summary: 'Warms town Morale in winter and adds +18g/turn steady revenue.',
+      actionType: 'build',
+      structureType: 'bakery',
+      costGold: 50,
+      votes: 3,
+      supporters: [lyra.name, 'Worker Pip', 'Mayor Sterling'],
+    });
+  } else if (upgradable) {
+    const lbl = getStructureDisplayLabel(upgradable);
+    proposals.push({
+      id: `prop_upgrade_${upgradable.plotId}_${params.turnCount}`,
+      proposerId: lyra.id,
+      proposerName: lyra.name,
+      proposerRole: lyra.role,
+      title: `Elevate ${lbl} to Tier ${upgradable.tier + 1}`,
+      summary: `Multiplies ${lbl}'s gold & resource yield by +55% and raises civic prestige.`,
+      actionType: 'upgrade',
+      structureType: upgradable.structureType,
+      customLabel: upgradable.customLabel,
+      costGold: 75,
+      votes: 3,
+      supporters: [lyra.name, 'Mayor Sterling', 'Worker Pip'],
+    });
+  } else {
+    proposals.push({
+      id: `prop_lab_${params.turnCount}`,
+      proposerId: lyra.id,
+      proposerName: lyra.name,
+      proposerRole: lyra.role,
+      title: 'Build Civic Research Lab',
+      summary: 'Custom science wing generating Crystal resources and +22g/turn base output.',
+      actionType: 'build',
+      structureType: 'custom',
+      customLabel: 'Research Lab',
+      costGold: 65,
+      votes: 3,
+      supporters: [lyra.name, 'Mayor Sterling'],
+    });
+  }
+
+  // Proposal 2 (Commander Vance): Outer Rail Loop, Watchtower, or Frontier Biome
+  if (!params.railSpurBuilt) {
+    proposals.push({
+      id: `prop_rail_${params.turnCount}`,
+      proposerId: vance.id,
+      proposerName: vance.name,
+      proposerRole: vance.role,
+      title: 'Extend Outer Railway Loop',
+      summary: 'Adds Outer Frontier Station, increases train trade by +18g/turn and boosts cargo payouts +35%.',
+      actionType: 'extend_rail',
+      costGold: 80,
+      votes: 2,
+      supporters: [vance.name, 'Worker Kai'],
+    });
+  } else if (nextLockedBiome) {
+    const bLabel =
+      nextLockedBiome === 'forest'
+        ? 'Dense Forest'
+        : nextLockedBiome === 'desert'
+          ? 'Desert Dunes'
+          : 'Crystal Mountain Cave';
+    proposals.push({
+      id: `prop_biome_${nextLockedBiome}_${params.turnCount}`,
+      proposerId: vance.id,
+      proposerName: vance.name,
+      proposerRole: vance.role,
+      title: `Expedition to ${bLabel}`,
+      summary: `Opens 6 new frontier build plots, widens map bounds, and adds biome resource streams.`,
+      actionType: 'expand_biome',
+      biome: nextLockedBiome,
+      costGold: 70,
+      votes: 2,
+      supporters: [vance.name, 'Worker Kai'],
+    });
+  } else {
+    proposals.push({
+      id: `prop_watchtower_${params.turnCount}`,
+      proposerId: vance.id,
+      proposerName: vance.name,
+      proposerRole: vance.role,
+      title: 'Commission Guard Watchtower',
+      summary: 'Shields winter builders, reinforces Civic Order (+5), and supplies Quarry Stone.',
+      actionType: 'build',
+      structureType: 'watchtower',
+      costGold: 55,
+      votes: 2,
+      supporters: [vance.name, 'Worker Kai'],
+    });
+  }
+
+  // Proposal 3 (Worker Pip / Hired Specialist): Plaza Sky Lantern Festival or Cafe
+  proposals.push({
+    id: `prop_festival_${params.turnCount}`,
+    proposerId: pip.id,
+    proposerName: pip.name,
+    proposerRole: pip.role,
+    title: 'Host Plaza Sky Lantern Festival',
+    summary: 'Launches live 3D sky lanterns & fireworks over Town Square, boosting +10 Morale & friendships!',
+    actionType: 'festival',
+    costGold: 45,
+    votes: params.agents.length >= 6 ? 3 : 2,
+    supporters: [pip.name, ...params.agents.slice(5, 7).map((a) => a.name)],
+  });
+
+  return proposals;
+}
+
+// ============================================================================
+// 1e. Town Growth Analytics History
+// ============================================================================
+
+export function createStarterHistory(
+  treasuryGold: number,
+  metrics: TownMetrics,
+  population: number,
+  buildings: number,
+  turn = 0,
+): TownHistoryPoint[] {
+  return [
+    {
+      turn,
+      treasuryGold,
+      prosperity: metrics.prosperity,
+      orderLevel: metrics.orderLevel,
+      morale: metrics.morale,
+      population,
+      buildings,
+    },
+  ];
+}
+
+export function appendHistoryPoint(
+  history: TownHistoryPoint[],
+  point: TownHistoryPoint,
+): TownHistoryPoint[] {
+  const last = history[history.length - 1];
+  if (last && last.turn === point.turn) {
+    return [...history.slice(0, -1), point].slice(-30);
+  }
+  return [...history, point].slice(-30);
+}
+
+// ============================================================================
+// 2. Villager Relationships & Social Memory Engine
+// ============================================================================
+
+export function makeRelationshipPairKey(a: AgentId, b: AgentId): string {
+  return a < b ? `${a}::${b}` : `${b}::${a}`;
+}
+
+export function getRelationshipTierLabel(score: number): string {
+  if (score >= 80) return 'Trusted Partner';
+  if (score >= 58) return 'Close Friend';
+  if (score >= 35) return 'Teammate';
+  return 'Acquaintance';
+}
+
+export function createStarterRelationships(): TownRelationship[] {
+  const now = Date.now();
+  return [
+    {
+      pairKey: makeRelationshipPairKey('mayor_sterling', 'architect_lyra'),
+      agentA: 'mayor_sterling',
+      agentB: 'architect_lyra',
+      score: 64,
+      interactions: 3,
+      lastNote: 'Co-planning town expansion',
+      updatedAtMs: now,
+    },
+    {
+      pairKey: makeRelationshipPairKey('architect_lyra', 'worker_pip'),
+      agentA: 'architect_lyra',
+      agentB: 'worker_pip',
+      score: 72,
+      interactions: 4,
+      lastNote: 'Trusted building partners',
+      updatedAtMs: now,
+    },
+    {
+      pairKey: makeRelationshipPairKey('commander_vance', 'worker_kai'),
+      agentA: 'commander_vance',
+      agentB: 'worker_kai',
+      score: 68,
+      interactions: 3,
+      lastNote: 'Supply & patrol squad',
+      updatedAtMs: now,
+    },
+  ];
+}
+
+export function recordSocialInteraction(
+  relationships: TownRelationship[],
+  agentA: AgentId,
+  agentB: AgentId,
+  delta: number,
+  note: string,
+): TownRelationship[] {
+  if (!agentA || !agentB || agentA === agentB) return relationships;
+  const pairKey = makeRelationshipPairKey(agentA, agentB);
+  const now = Date.now();
+  const idx = relationships.findIndex((r) => r.pairKey === pairKey);
+
+  if (idx === -1) {
+    const next: TownRelationship = {
+      pairKey,
+      agentA: agentA < agentB ? agentA : agentB,
+      agentB: agentA < agentB ? agentB : agentA,
+      score: Math.max(10, Math.min(100, 28 + delta)),
+      interactions: 1,
+      lastNote: note.slice(0, 80),
+      updatedAtMs: now,
+    };
+    return [next, ...relationships].slice(0, 60);
+  }
+
+  return relationships.map((r, i) =>
+    i === idx
+      ? {
+          ...r,
+          score: Math.max(5, Math.min(100, r.score + delta)),
+          interactions: r.interactions + 1,
+          lastNote: note.slice(0, 80) || r.lastNote,
+          updatedAtMs: now,
+        }
+      : r,
+  );
+}
+
+export function getAgentTopBonds(
+  agentId: AgentId,
+  relationships: TownRelationship[],
+  agents: AgentRecord[],
+  maxCount = 3,
+): Array<{ partnerId: AgentId; partnerName: string; score: number; tier: string; lastNote: string }> {
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const matched: Array<{
+    partnerId: AgentId;
+    partnerName: string;
+    score: number;
+    tier: string;
+    lastNote: string;
+  }> = [];
+
+  for (const rel of relationships) {
+    if (rel.agentA !== agentId && rel.agentB !== agentId) continue;
+    const partnerId = rel.agentA === agentId ? rel.agentB : rel.agentA;
+    const partner = byId.get(partnerId);
+    if (!partner) continue;
+    matched.push({
+      partnerId,
+      partnerName: partner.name,
+      score: rel.score,
+      tier: getRelationshipTierLabel(rel.score),
+      lastNote: rel.lastNote,
+    });
+  }
+
+  matched.sort((a, b) => b.score - a.score);
+  return matched.slice(0, maxCount);
+}
+
+export function formatAgentBondsForPrompt(
+  agentId: AgentId,
+  relationships: TownRelationship[],
+  agents: AgentRecord[],
+): string {
+  const bonds = getAgentTopBonds(agentId, relationships, agents, 3);
+  if (bonds.length === 0) return '';
+  return bonds.map((b) => `${b.partnerName} (${b.tier}, ${b.score}/100)`).join(', ');
+}
+
+// ============================================================================
+// 3. Dynamic Town Events & Visiting Trade Train
+// ============================================================================
+
+export function pickTownEvent(
+  townName: string,
+  turnCount: number,
+  unlockedBiomes: BiomeId[],
+  railSpurBuilt: boolean,
+  recentEventIds: string[],
+): TownEvent {
+  const candidates: TownEvent[] = [
+    {
+      id: 'visiting_trade_train',
+      title: 'Visiting Steam Trade Caravan',
+      summary: `A merchant express just whistled outside ${townName} carrying exotic timber, spices, and blueprints.`,
+      category: 'trade',
+      options: [
+        {
+          id: 'open_market_fair',
+          label: 'Host Station Market Fair',
+          effectSummary: '+85g Treasury · +5 Prosperity · Summon Train',
+          goldDelta: 85,
+          metricsDelta: { prosperity: 5, orderLevel: 1, morale: 4 },
+          triggerTrain: true,
+          logOutcome: 'Hosted a bustling station trade fair with the visiting Steam Express!',
+        },
+        {
+          id: 'buy_civic_supplies',
+          label: 'Purchase Surplus Stone (-35g)',
+          effectSummary: '-35g · +6 Order · +4 Prosperity',
+          goldDelta: -35,
+          metricsDelta: { prosperity: 4, orderLevel: 6, morale: 2 },
+          triggerTrain: true,
+          logOutcome: 'Acquired premium merchant stone and timber off the Steam Express.',
+        },
+      ],
+    },
+    {
+      id: 'harvest_festival',
+      title: 'Town Square Harvest Festival',
+      summary: `Villagers want to hang warm lanterns across ${townName} Square for an evening music and pastry celebration.`,
+      category: 'festival',
+      options: [
+        {
+          id: 'sponsor_feast',
+          label: 'Sponsor Lantern Feast (-40g)',
+          effectSummary: '-40g · +10 Morale · Deepen Friendships',
+          goldDelta: -40,
+          metricsDelta: { prosperity: 2, orderLevel: 2, morale: 10 },
+          boostAllBonds: 6,
+          logOutcome: 'Lanterns lit the square as villagers celebrated and grew closer together!',
+        },
+        {
+          id: 'potluck_gathering',
+          label: 'Community Potluck (Free)',
+          effectSummary: '+25g Donations · +5 Morale',
+          goldDelta: 25,
+          metricsDelta: { prosperity: 1, orderLevel: 1, morale: 5 },
+          boostAllBonds: 3,
+          logOutcome: 'Villagers shared homemade pastries around the fountain in warm spirits.',
+        },
+      ],
+    },
+    {
+      id: 'guild_grant',
+      title: 'Regional Architecture Grant',
+      summary: `Envoys from the valley guild are impressed by ${townName}'s growth and offer funding for civic upgrades.`,
+      category: 'civic',
+      options: [
+        {
+          id: 'accept_treasury_grant',
+          label: 'Deposit Into Town Treasury',
+          effectSummary: '+110g Treasury · +4 Prosperity',
+          goldDelta: 110,
+          metricsDelta: { prosperity: 4, orderLevel: 2, morale: 1 },
+          logOutcome: 'Accepted the regional architecture grant directly into the town treasury.',
+        },
+        {
+          id: 'fund_worker_bonuses',
+          label: 'Share Bonus With Villagers',
+          effectSummary: '+45g Treasury · +8 Morale · +4 Order',
+          goldDelta: 45,
+          metricsDelta: { prosperity: 2, orderLevel: 4, morale: 8 },
+          boostAllBonds: 5,
+          logOutcome: 'Shared the civic grant as bonuses across every hardworking villager!',
+        },
+      ],
+    },
+    {
+      id: 'storm_repair',
+      title: 'Gusty Valley Squall Alert',
+      summary: `High winds rattled several roof shingles and lantern brackets around ${townName}. Commander Vance awaits your call.`,
+      category: 'weather',
+      options: [
+        {
+          id: 'emergency_crew',
+          label: 'Deploy Rapid Repair Crew (-25g)',
+          effectSummary: '-25g · +7 Order · +4 Morale',
+          goldDelta: -25,
+          metricsDelta: { prosperity: 1, orderLevel: 7, morale: 4 },
+          boostAllBonds: 4,
+          logOutcome: 'Repair teams secured every shingle before dusk with zero damage.',
+        },
+        {
+          id: 'volunteer_watch',
+          label: 'Organize Neighbor Watch (Free)',
+          effectSummary: '+3 Order · +2 Morale',
+          goldDelta: 0,
+          metricsDelta: { prosperity: 0, orderLevel: 3, morale: 2 },
+          logOutcome: 'Neighbors pitched in together to tie down awnings and clear branches.',
+        },
+      ],
+    },
+    {
+      id: 'frontier_survey',
+      title: unlockedBiomes.includes('cave')
+        ? 'Luminous Crystal Vein Discovered'
+        : 'Frontier Scout Report',
+      summary: unlockedBiomes.includes('cave')
+        ? `Scouts inside Crystal Mountain Cave uncovered a shimmering quartz vein glowing under the arch!`
+        : `Scouts returned from the outer ridges beyond ${townName} with mineral samples and trail maps.`,
+      category: 'discovery',
+      options: [
+        {
+          id: 'export_crystals',
+          label: railSpurBuilt ? 'Ship via Outer Frontier Rail' : 'Auction Samples at Market',
+          effectSummary: railSpurBuilt
+            ? '+135g Treasury · +6 Prosperity · Summon Train'
+            : '+90g Treasury · +5 Prosperity',
+          goldDelta: railSpurBuilt ? 135 : 90,
+          metricsDelta: { prosperity: railSpurBuilt ? 6 : 5, orderLevel: 2, morale: 3 },
+          triggerTrain: railSpurBuilt,
+          logOutcome: railSpurBuilt
+            ? 'Loaded glowing frontier samples onto the Outer Frontier Express for record revenue!'
+            : 'Sold frontier mineral samples at Alderbrook Market for a healthy profit.',
+        },
+        {
+          id: 'study_specimens',
+          label: 'Archive for Research & Lanterns',
+          effectSummary: '+35g · +5 Order · +6 Morale',
+          goldDelta: 35,
+          metricsDelta: { prosperity: 2, orderLevel: 5, morale: 6 },
+          logOutcome: 'Catalogued the luminous frontier specimens to brighten town lanterns.',
+        },
+      ],
+    },
+    {
+      id: 'traveling_bards',
+      title: 'Traveling Acoustic Ensemble',
+      summary: `A cheerful quartet of wandering musicians arrived at the Park fountain offering an evening concert.`,
+      category: 'festival',
+      options: [
+        {
+          id: 'book_concert',
+          label: 'Book Square Concert (-20g)',
+          effectSummary: '-20g · +9 Morale · +5 Bonds',
+          goldDelta: -20,
+          metricsDelta: { prosperity: 2, orderLevel: 1, morale: 9 },
+          boostAllBonds: 5,
+          logOutcome: 'Warm folk melodies echoed through the square as villagers cheered.',
+        },
+        {
+          id: 'pass_the_hat',
+          label: 'Open-Tip Busking Stage',
+          effectSummary: '+30g Local Trade · +4 Morale',
+          goldDelta: 30,
+          metricsDelta: { prosperity: 3, orderLevel: 0, morale: 4 },
+          logOutcome: 'Busking music drew lively foot traffic to nearby shops and bakeries.',
+        },
+      ],
+    },
+  ];
+
+  const freshPool = candidates.filter((e) => !recentEventIds.includes(e.id));
+  const pool = freshPool.length > 0 ? freshPool : candidates;
+  const pick = pool[(turnCount + Math.floor(Math.random() * pool.length)) % pool.length];
+  return { ...pick, triggeredAtMs: Date.now() };
+}
+
+// ============================================================================
+// 4. Town Gazette Digest Compiler
+// ============================================================================
+
+export function compileTownGazette(params: {
+  townName: string;
+  turnCount: number;
+  weather: WeatherMode;
+  timeOfDay: TimeOfDay;
+  metrics: TownMetrics;
+  economy: TownEconomySummary;
+  structures: TownStructure[];
+  agents: AgentRecord[];
+  relationships: TownRelationship[];
+  unlockedBiomes: BiomeId[];
+  railSpurBuilt: boolean;
+  logs: TownLogItem[];
+}): TownGazetteEdition {
+  const completed = params.structures.filter((s) => s.status === 'complete');
+  const latestLog = params.logs[0];
+  const topBuilding = params.economy.topBuildings[0];
+  const strongestRel = [...params.relationships].sort((a, b) => b.score - a.score)[0];
+  const agentById = new Map(params.agents.map((a) => [a.id, a]));
+
+  const headline =
+    completed.length >= 6
+      ? `${params.townName} Booms Into a Thriving ${completed.length}-District Hub`
+      : params.railSpurBuilt
+        ? `Steam Express Connects ${params.townName} to Outer Frontier Station`
+        : completed.length > 0
+          ? `${getStructureDisplayLabel(completed[0])} Anchors Growth in ${params.townName}`
+          : `${params.townName} Council Prepares New Frontier Blueprints`;
+
+  const subheadline = `Edition #${Math.max(1, Math.floor(params.turnCount / 2) + 1)} · ${params.agents.length} Citizens · Treasury ${params.economy.treasuryGold}g (${params.economy.netPerTurn >= 0 ? '+' : ''}${params.economy.netPerTurn}g/turn)`;
+
+  const stories: Array<{ title: string; body: string; meta: string }> = [];
+
+  if (latestLog) {
+    stories.push({
+      title: `Latest Dispatch from ${latestLog.agentName}`,
+      body: latestLog.dialogue || latestLog.thought,
+      meta: `Turn ${latestLog.turnNumber} · ${latestLog.newTask || 'Town Business'}`,
+    });
+  }
+
+  if (topBuilding) {
+    stories.push({
+      title: `Economic Spotlight: ${topBuilding.label}`,
+      body: `${topBuilding.label} in ${topBuilding.district} leads local production at +${topBuilding.goldPerTurn}g per turn (${topBuilding.note}).`,
+      meta: `${completed.length} Completed Buildings · ${params.economy.buildingRevenue}g/turn Total Output`,
+    });
+  } else {
+    stories.push({
+      title: 'Open Plots Await Civic Builders',
+      body: `Treasury holds ${params.economy.treasuryGold}g in startup reserves. Construct Bakeries, Windmills, or Research Labs to multiply per-turn gold.`,
+      meta: `${params.unlockedBiomes.length}/3 Outer Biomes Unlocked`,
+    });
+  }
+
+  if (strongestRel) {
+    const a = agentById.get(strongestRel.agentA);
+    const b = agentById.get(strongestRel.agentB);
+    if (a && b) {
+      stories.push({
+        title: `Community Ties: ${a.name} & ${b.name}`,
+        body: `Townspeople note the ${getRelationshipTierLabel(strongestRel.score).toLowerCase()} bond between ${a.name} and ${b.name} (${strongestRel.score}/100): ${strongestRel.lastNote}.`,
+        meta: `${params.relationships.length} Tracked Villager Bonds`,
+      });
+    }
+  }
+
+  const notableLogs = params.logs.slice(1, 4).map((l) => ({
+    title: `${l.agentName} · Turn ${l.turnNumber}`,
+    body: l.dialogue || l.thought,
+    meta: l.newTask || 'Civic Update',
+  }));
+
+  return {
+    editionNumber: Math.max(1, Math.floor(params.turnCount / 2) + 1),
+    townName: params.townName,
+    headline,
+    subheadline,
+    weatherSummary: `${params.weather.charAt(0).toUpperCase() + params.weather.slice(1)} skies · ${params.timeOfDay}`,
+    stories: [...stories, ...notableLogs].slice(0, 5),
+  };
+}
+
+// ============================================================================
+// 5. Activity / Work Icon Classifier for 3D Floating Villager Badges
+// ============================================================================
+
+export type AgentActivityIcon =
+  | 'build'
+  | 'research'
+  | 'harvest'
+  | 'cafe'
+  | 'guard'
+  | 'council'
+  | 'rest'
+  | 'chat';
+
+export function classifyAgentActivity(
+  agent: AgentRecord,
+  timeOfDay: TimeOfDay,
+  structures: TownStructure[],
+): { icon: AgentActivityIcon; shortLabel: string } {
+  if (timeOfDay === 'night' && agent.id !== 'commander_vance' && !/watch|guard|patrol/i.test(agent.role)) {
+    return { icon: 'rest', shortLabel: 'Resting' };
+  }
+
+  const assignedStruct = agent.activePlotId
+    ? structures.find((s) => s.plotId === agent.activePlotId)
+    : null;
+  if (assignedStruct?.status === 'building') {
+    return { icon: 'build', shortLabel: `Building ${assignedStruct.progress}%` };
+  }
+
+  const hay = `${agent.role} ${agent.currentTask} ${assignedStruct ? getStructureDisplayLabel(assignedStruct) : ''}`.toLowerCase();
+
+  if (/(research|lab|observatory|science|archive|library|study)/i.test(hay)) {
+    return { icon: 'research', shortLabel: 'Researching' };
+  }
+  if (/(bakery|cafe|coffee|barista|tavern|pastry|bake|brew)/i.test(hay)) {
+    return { icon: 'cafe', shortLabel: 'Serving' };
+  }
+  if (/(build|construct|hammer|blueprint|mason|architect|upgrade|scaffold|road|rail)/i.test(hay)) {
+    return { icon: 'build', shortLabel: 'Building' };
+  }
+  if (/(farm|greenhouse|windmill|granary|harvest|gather|stone|timber|haul)/i.test(hay)) {
+    return { icon: 'harvest', shortLabel: 'Gathering' };
+  }
+  if (/(guard|patrol|watch|security|commander|secure|shield)/i.test(hay)) {
+    return { icon: 'guard', shortLabel: 'Patrolling' };
+  }
+  if (agent.rank === 1 || /(mayor|decree|council|charter|survey)/i.test(hay)) {
+    return { icon: 'council', shortLabel: 'Leading' };
+  }
+  return { icon: 'chat', shortLabel: 'Active' };
+}
+
+// ============================================================================
+// 6. Export / Import Town Save File (.json)
+// ============================================================================
+
+export interface ExportedTownFile {
+  format: 'alderbrook_town_backup_v1';
+  exportedAtIso: string;
+  townName: string;
+  turnCount: number;
+  activeAgentIndex: number;
+  activeDecree: string;
+  metrics: TownMetrics;
+  treasuryGold: number;
+  autoDayNight: boolean;
+  timeOfDay: TimeOfDay;
+  weather: WeatherMode;
+  theme: TownTheme;
+  unlockedBiomes: BiomeId[];
+  roads: string[];
+  railSpurBuilt: boolean;
+  autoMode: boolean;
+  agents: AgentRecord[];
+  structures: TownStructure[];
+  relationships: TownRelationship[];
+  resources?: TownResources;
+  activePolicies?: PolicyId[];
+  decorPacks?: DecorPackId[];
+  unlockedMilestones?: MilestoneId[];
+  history?: TownHistoryPoint[];
+  logs: TownLogItem[];
+}
+
+const VALID_PLOT_SET = new Set<string>(ALL_PLOT_IDS);
+const VALID_BIOME_SET = new Set<string>(ALL_BIOME_IDS);
+const VALID_STRUCT_SET = new Set<string>([...ALL_STRUCTURE_TYPES, 'custom']);
+const VALID_CUSTOM_STYLES = new Set<CustomBuildingStyle>([
+  'lab',
+  'observatory',
+  'cafe',
+  'tavern',
+  'forge',
+  'guild',
+  'cabin',
+  'tower',
+]);
+const VALID_LOCATIONS = new Set<LocationId>(['town_hall', 'workshop', 'market', 'park']);
+const VALID_TOD = new Set<TimeOfDay>(['dawn', 'day', 'twilight', 'night']);
+
+export function serializeTownExport(payload: Omit<ExportedTownFile, 'format' | 'exportedAtIso'>): string {
+  const doc: ExportedTownFile = {
+    format: 'alderbrook_town_backup_v1',
+    exportedAtIso: new Date().toISOString(),
+    ...payload,
+  };
+  return JSON.stringify(doc, null, 2);
+}
+
+export function parseTownImport(
+  rawJson: string,
+): { ok: true; data: Omit<ExportedTownFile, 'format' | 'exportedAtIso'> } | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(rawJson) as Partial<ExportedTownFile>;
+    if (!parsed || typeof parsed !== 'object') {
+      return { ok: false, error: 'File does not contain a valid JSON town object.' };
+    }
+    const townName =
+      typeof parsed.townName === 'string' && parsed.townName.trim()
+        ? parsed.townName.trim().slice(0, 60)
+        : 'Imported Town';
+
+    const clampMetric = (v: unknown, fb: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : fb;
+    };
+
+    const rawAgents = Array.isArray(parsed.agents) && parsed.agents.length >= 5
+      ? parsed.agents
+      : createInitialAgents();
+    const agents: AgentRecord[] = rawAgents.slice(0, MAX_TOWN_AGENTS).map((a, idx) => ({
+      id: typeof a.id === 'string' && a.id.trim() ? a.id.slice(0, 40) : `villager_${idx}`,
+      name: typeof a.name === 'string' && a.name.trim() ? a.name.slice(0, 60) : `Villager ${idx + 1}`,
+      rank: (a.rank === 1 || a.rank === 2 || a.rank === 3 ? a.rank : 3) as 1 | 2 | 3,
+      role: typeof a.role === 'string' ? a.role.slice(0, 60) : 'Specialist',
+      department: typeof a.department === 'string' ? a.department.slice(0, 60) : 'Civic Works',
+      supervisor: typeof a.supervisor === 'string' ? a.supervisor.slice(0, 60) : null,
+      subordinates: Array.isArray(a.subordinates) ? a.subordinates.map(String).slice(0, 10) : [],
+      accentColor: typeof a.accentColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(a.accentColor)
+        ? a.accentColor
+        : '#14b8a6',
+      personality: typeof a.personality === 'string' ? a.personality.slice(0, 160) : undefined,
+      assignedPlotId:
+        typeof a.assignedPlotId === 'string' && VALID_PLOT_SET.has(a.assignedPlotId)
+          ? (a.assignedPlotId as PlotId)
+          : null,
+      hatStyle: a.hatStyle,
+      outfitColors: a.outfitColors,
+      isHired: Boolean(a.isHired),
+      location: VALID_LOCATIONS.has(a.location as LocationId) ? (a.location as LocationId) : 'town_hall',
+      activePlotId:
+        typeof a.activePlotId === 'string' && VALID_PLOT_SET.has(a.activePlotId)
+          ? (a.activePlotId as PlotId)
+          : null,
+      targetAgent: typeof a.targetAgent === 'string' ? a.targetAgent.slice(0, 60) : null,
+      thought: typeof a.thought === 'string' ? a.thought.slice(0, 500) : '',
+      dialogue: typeof a.dialogue === 'string' ? a.dialogue.slice(0, 240) : '',
+      currentTask: typeof a.currentTask === 'string' ? a.currentTask.slice(0, 240) : '',
+      userNote: typeof a.userNote === 'string' ? a.userNote.slice(0, 200) : '',
+      updatedAtMs: Number(a.updatedAtMs) || Date.now(),
+    }));
+
+    const structures: TownStructure[] = Array.isArray(parsed.structures)
+      ? parsed.structures
+          .filter(
+            (s) =>
+              s &&
+              typeof s.plotId === 'string' &&
+              VALID_PLOT_SET.has(s.plotId) &&
+              typeof s.structureType === 'string' &&
+              VALID_STRUCT_SET.has(s.structureType),
+          )
+          .map((s) => ({
+            plotId: s.plotId as PlotId,
+            structureType: s.structureType as StructureType,
+            status: s.status === 'complete' ? 'complete' : 'building',
+            progress: clampMetric(s.progress, s.status === 'complete' ? 100 : 0),
+            tier: Math.max(1, Math.min(3, Math.round(Number(s.tier ?? 1)))),
+            proposedBy: typeof s.proposedBy === 'string' ? s.proposedBy.slice(0, 60) : 'Architect Lyra',
+            lastBuilder: typeof s.lastBuilder === 'string' ? s.lastBuilder.slice(0, 60) : '',
+            updatedAtMs: Number(s.updatedAtMs) || Date.now(),
+            customLabel:
+              typeof s.customLabel === 'string' && s.customLabel.trim()
+                ? s.customLabel.trim().slice(0, 40)
+                : undefined,
+            customStyle:
+              typeof s.customStyle === 'string' && VALID_CUSTOM_STYLES.has(s.customStyle as CustomBuildingStyle)
+                ? (s.customStyle as CustomBuildingStyle)
+                : undefined,
+          }))
+      : [];
+
+    const unlockedBiomes: BiomeId[] = Array.isArray(parsed.unlockedBiomes)
+      ? Array.from(
+          new Set(
+            parsed.unlockedBiomes.filter(
+              (b): b is BiomeId => typeof b === 'string' && VALID_BIOME_SET.has(b),
+            ),
+          ),
+        ).slice(0, 3)
+      : [];
+
+    const roads: string[] = Array.isArray(parsed.roads)
+      ? Array.from(
+          new Set(
+            parsed.roads
+              .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+              .map((r) => r.trim().slice(0, 48)),
+          ),
+        ).slice(0, 40)
+      : [];
+
+    const relationships: TownRelationship[] = Array.isArray(parsed.relationships)
+      ? parsed.relationships
+          .filter((r) => r && typeof r.agentA === 'string' && typeof r.agentB === 'string')
+          .slice(0, 60)
+          .map((r) => ({
+            pairKey: makeRelationshipPairKey(r.agentA, r.agentB),
+            agentA: r.agentA.slice(0, 40),
+            agentB: r.agentB.slice(0, 40),
+            score: clampMetric(r.score, 40),
+            interactions: Math.max(1, Math.round(Number(r.interactions ?? 1))),
+            lastNote: typeof r.lastNote === 'string' ? r.lastNote.slice(0, 80) : 'Town acquaintance',
+            updatedAtMs: Number(r.updatedAtMs) || Date.now(),
+          }))
+      : createStarterRelationships();
+
+    const logs: TownLogItem[] =
+      Array.isArray(parsed.logs) && parsed.logs.length > 0
+        ? parsed.logs.slice(0, 50)
+        : createInitialLogs();
+
+    const treasuryGold = Number.isFinite(Number(parsed.treasuryGold))
+      ? Math.max(0, Math.min(999999, Math.round(Number(parsed.treasuryGold))))
+      : DEFAULT_TREASURY_GOLD;
+
+    const validPolicies = new Set<string>(ALL_POLICY_IDS);
+    const activePolicies: PolicyId[] = Array.isArray(parsed.activePolicies)
+      ? Array.from(
+          new Set(
+            parsed.activePolicies.filter(
+              (p): p is PolicyId => typeof p === 'string' && validPolicies.has(p),
+            ),
+          ),
+        )
+      : [];
+
+    const validDecors = new Set<string>(ALL_DECOR_PACK_IDS);
+    const decorPacks: DecorPackId[] = Array.isArray(parsed.decorPacks)
+      ? Array.from(
+          new Set(
+            parsed.decorPacks.filter(
+              (d): d is DecorPackId => typeof d === 'string' && validDecors.has(d),
+            ),
+          ),
+        )
+      : [];
+
+    const resources: TownResources = {
+      timber: Math.max(0, Math.round(Number(parsed.resources?.timber ?? DEFAULT_TOWN_RESOURCES.timber))),
+      stone: Math.max(0, Math.round(Number(parsed.resources?.stone ?? DEFAULT_TOWN_RESOURCES.stone))),
+      harvest: Math.max(0, Math.round(Number(parsed.resources?.harvest ?? DEFAULT_TOWN_RESOURCES.harvest))),
+      crystal: Math.max(0, Math.round(Number(parsed.resources?.crystal ?? DEFAULT_TOWN_RESOURCES.crystal))),
+    };
+
+    const metrics: TownMetrics = {
+      prosperity: clampMetric(parsed.metrics?.prosperity, DEFAULT_TOWN_METRICS.prosperity),
+      orderLevel: clampMetric(parsed.metrics?.orderLevel, DEFAULT_TOWN_METRICS.orderLevel),
+      morale: clampMetric(parsed.metrics?.morale, DEFAULT_TOWN_METRICS.morale),
+    };
+
+    const turnCount = Math.max(0, Math.round(Number(parsed.turnCount ?? 0)));
+    const history: TownHistoryPoint[] =
+      Array.isArray(parsed.history) && parsed.history.length > 0
+        ? parsed.history.slice(-30).map((h) => ({
+            turn: Math.max(0, Math.round(Number(h.turn ?? 0))),
+            treasuryGold: Math.max(0, Math.round(Number(h.treasuryGold ?? treasuryGold))),
+            prosperity: clampMetric(h.prosperity, metrics.prosperity),
+            orderLevel: clampMetric(h.orderLevel, metrics.orderLevel),
+            morale: clampMetric(h.morale, metrics.morale),
+            population: Math.max(1, Math.round(Number(h.population ?? agents.length))),
+            buildings: Math.max(0, Math.round(Number(h.buildings ?? structures.length))),
+          }))
+        : createStarterHistory(treasuryGold, metrics, agents.length, structures.length, turnCount);
+
+    const unlockedMilestones: MilestoneId[] = Array.isArray(parsed.unlockedMilestones)
+      ? (parsed.unlockedMilestones.filter((m): m is MilestoneId => typeof m === 'string') as MilestoneId[])
+      : [];
+
+    return {
+      ok: true,
+      data: {
+        townName,
+        turnCount,
+        activeAgentIndex: Math.max(0, Math.round(Number(parsed.activeAgentIndex ?? 0))) % agents.length,
+        activeDecree: typeof parsed.activeDecree === 'string' ? parsed.activeDecree.slice(0, 300) : '',
+        metrics,
+        treasuryGold,
+        autoDayNight: Boolean(parsed.autoDayNight),
+        timeOfDay: VALID_TOD.has(parsed.timeOfDay as TimeOfDay) ? (parsed.timeOfDay as TimeOfDay) : 'day',
+        weather: normalizeWeatherMode(parsed.weather),
+        theme: normalizeTownTheme(parsed.theme),
+        unlockedBiomes,
+        roads,
+        railSpurBuilt: Boolean(parsed.railSpurBuilt),
+        autoMode: Boolean(parsed.autoMode),
+        agents,
+        structures,
+        relationships,
+        resources,
+        activePolicies,
+        decorPacks,
+        unlockedMilestones,
+        history,
+        logs,
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? `Invalid JSON file: ${err.message}` : 'Could not parse save file.',
+    };
+  }
+}

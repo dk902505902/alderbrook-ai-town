@@ -1,5 +1,20 @@
 import { useState } from 'react';
-import { CloudRain, Clock, Gauge, Moon, Palette, RotateCcw, Send, Snowflake, Sun, Sunrise, Sunset } from 'lucide-react';
+import {
+  CloudRain,
+  Clock,
+  Gauge,
+  Moon,
+  Palette,
+  PartyPopper,
+  RotateCcw,
+  Send,
+  Snowflake,
+  Sparkles,
+  Sun,
+  Sunrise,
+  Sunset,
+  Vote,
+} from 'lucide-react';
 import {
   ALL_TOWN_THEMES,
   TOWN_THEME_META,
@@ -12,16 +27,21 @@ import {
 interface DecreePanelProps {
   activeDecree: string;
   timeOfDay: TimeOfDay;
+  autoDayNight: boolean;
   weather: WeatherMode;
   townTheme: TownTheme;
   graphicsQuality: GraphicsQuality;
   turnIntervalSeconds: number;
   onIssueDecree: (text: string) => void;
   onChangeTimeOfDay: (tod: TimeOfDay) => void;
+  onToggleAutoDayNight: () => void;
   onChangeWeather: (w: WeatherMode) => void;
   onChangeTownTheme: (theme: TownTheme) => void;
   onChangeGraphicsQuality: (q: GraphicsQuality) => void;
   onChangeTurnInterval: (seconds: number) => void;
+  onTriggerTownEvent?: () => void;
+  onLaunchFestival?: () => void;
+  onOpenCouncil?: () => void;
   onResetTown: () => void;
 }
 
@@ -55,16 +75,21 @@ const QUALITY_OPTIONS: Array<{ id: GraphicsQuality; label: string; summary: stri
 export function DecreePanel({
   activeDecree,
   timeOfDay,
+  autoDayNight,
   weather,
   townTheme,
   graphicsQuality,
   turnIntervalSeconds,
   onIssueDecree,
   onChangeTimeOfDay,
+  onToggleAutoDayNight,
   onChangeWeather,
   onChangeTownTheme,
   onChangeGraphicsQuality,
   onChangeTurnInterval,
+  onTriggerTownEvent,
+  onLaunchFestival,
+  onOpenCouncil,
   onResetTown,
 }: DecreePanelProps) {
   const [text, setText] = useState('');
@@ -174,7 +199,23 @@ export function DecreePanel({
         </div>
 
         <div>
-          <span className="block text-[11px] font-medium text-slate-400">Time of Day</span>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-slate-400">
+              Time of Day · Daily Routines
+            </span>
+            <button
+              type="button"
+              onClick={onToggleAutoDayNight}
+              aria-pressed={autoDayNight}
+              className={`rounded-md border px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                autoDayNight
+                  ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
+                  : 'border-white/10 bg-slate-900 text-slate-400 hover:text-white'
+              }`}
+            >
+              Auto Cycle: {autoDayNight ? 'ON' : 'OFF'}
+            </button>
+          </div>
           <div className="mt-1 grid grid-cols-4 gap-1">
             {TIME_OPTIONS.map(({ id, label, Icon }) => (
               <button
@@ -279,7 +320,41 @@ export function DecreePanel({
         </div>
       </div>
 
-      <div className="border-t border-white/10 pt-2">
+      <div className="space-y-2 border-t border-white/10 pt-2">
+        {(onLaunchFestival || onOpenCouncil) && (
+          <div className="grid grid-cols-2 gap-1.5">
+            {onLaunchFestival && (
+              <button
+                type="button"
+                onClick={onLaunchFestival}
+                className="inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-500/12 px-2.5 text-xs font-semibold text-rose-200 transition-colors hover:bg-rose-500/22"
+              >
+                <PartyPopper className="h-3.5 w-3.5 shrink-0" />
+                <span>3D Festival</span>
+              </button>
+            )}
+            {onOpenCouncil && (
+              <button
+                type="button"
+                onClick={onOpenCouncil}
+                className="inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl border border-sky-400/35 bg-sky-500/12 px-2.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-500/22"
+              >
+                <Vote className="h-3.5 w-3.5 shrink-0" />
+                <span>Council Vote</span>
+              </button>
+            )}
+          </div>
+        )}
+        {onTriggerTownEvent && (
+          <button
+            type="button"
+            onClick={onTriggerTownEvent}
+            className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-amber-400/35 bg-amber-500/12 px-3 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/22"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            <span>Trigger Town Event</span>
+          </button>
+        )}
         <button
           type="button"
           onClick={onResetTown}

@@ -93,6 +93,7 @@ interface TurnRequestBody {
     orderLevel?: number;
     morale?: number;
   };
+  socialBonds?: string;
 }
 
 interface HireRequestBody {
@@ -1794,6 +1795,9 @@ async function createServer() {
       activeAgent.userNote?.trim()
         ? `Direct Whisper to ${activeAgent.name}: "${activeAgent.userNote.trim()}"`
         : '',
+      typeof body.socialBonds === 'string' && body.socialBonds.trim()
+        ? `Your Closest Town Friendships & Bonds: ${body.socialBonds.trim().slice(0, 220)}`
+        : '',
       '',
       'Town Plots & Self-Building Status:',
       plotsSummaryText,
@@ -2250,6 +2254,110 @@ async function createServer() {
       summary,
       message: `Signal accepted for ${rawAction} from ${agentName}.`,
     });
+  });
+
+  app.post('/api/town/villager-chat', async (req: Request, res: Response) => {
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
+      res.status(400).json({
+        error: 'Missing AI API key.',
+        code: 'MISSING_API_KEY',
+      });
+      return;
+    }
+
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+      villager?: {
+        name?: string;
+        role?: string;
+        department?: string;
+        personality?: string;
+        currentTask?: string;
+        location?: string;
+      };
+      message?: string;
+      history?: Array<{ role?: string; text?: string }>;
+      townName?: string;
+      weather?: string;
+      timeOfDay?: string;
+      friends?: string[];
+      workplace?: string;
+    };
+
+    const userMsg = String(body.message ?? '').trim().slice(0, 400);
+    if (!userMsg || !body.villager?.name) {
+      res.status(400).json({ error: 'Villager details and message are required.' });
+      return;
+    }
+
+    const vName = String(body.villager.name).slice(0, 60);
+    const vRole = String(body.villager.role || 'Town Villager').slice(0, 60);
+    const vDept = String(body.villager.department || 'Civic Guild').slice(0, 60);
+    const vPers = String(body.villager.personality || 'Warm, dedicated, and observant.').slice(0, 180);
+    const vTask = String(body.villager.currentTask || 'Helping around town').slice(0, 160);
+    const townName = String(body.townName || 'Alderbrook').slice(0, 60);
+    const friendsLine =
+      Array.isArray(body.friends) && body.friends.length > 0
+        ? body.friends.slice(0, 3).join(', ')
+        : 'Mayor Sterling and town neighbors';
+    const workplaceLine = body.workplace ? String(body.workplace).slice(0, 60) : String(body.villager.location || 'plaza');
+
+    const systemPrompt = [
+      `You are ${vName}, ${vRole} (${vDept}) living in the cozy 3D town of ${townName}.`,
+      `Personality: ${vPers}`,
+      `Current task: ${vTask}. Current workplace/spot: ${workplaceLine}.`,
+      `Close friends in town: ${friendsLine}. Weather: ${body.weather || 'summer'}, Time: ${body.timeOfDay || 'day'}.`,
+      `Reply directly to the town player in character in 1-2 warm, natural sentences (under 42 words). Mention your craft, friends, or current task naturally. Never break character or mention AI.`,
+    ].join(' ');
+
+    const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: systemPrompt },
+    ];
+
+    if (Array.isArray(body.history)) {
+      for (const h of body.history.slice(-4)) {
+        if (!h || typeof h.text !== 'string' || !h.text.trim()) continue;
+        chatMessages.push({
+          role: h.role === 'villager' ? 'assistant' : 'user',
+          content: h.text.trim().slice(0, 220),
+        });
+      }
+    }
+    chatMessages.push({ role: 'user', content: userMsg });
+
+    try {
+      const result = await callChatCompletionsWithKeyPool(
+        baseUrl,
+        apiKeys,
+        {
+          model: modelName,
+          messages: chatMessages,
+          temperature: 0.78,
+          max_tokens: 120,
+        },
+        false,
+      );
+
+      if ('errorText' in result && result.errorText) {
+        res.status(result.status >= 400 ? result.status : 502).json({
+          error: `Provider returned HTTP ${result.status}: ${result.errorText}`,
+        });
+        return;
+      }
+
+      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
+      const rawReply = choices?.[0]?.message?.content?.trim() || '';
+      const cleanReply = rawReply.replace(/^["']|["']$/g, '').slice(0, 240);
+      res.json({
+        reply: cleanReply || `Good to see you in ${townName}! I'm right in the middle of ${vTask.toLowerCase()}.`,
+        modelUsed: result.modelUsed || modelName,
+        keyAttemptIndex: result.keyAttemptIndex,
+      });
+    } catch (error) {
+      res.status(502).json({
+        error: error instanceof Error ? error.message : 'Failed to reach AI provider.',
+      });
+    }
   });
 
   if (process.env.NODE_ENV !== 'production') {

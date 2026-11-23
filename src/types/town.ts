@@ -180,10 +180,166 @@ export interface TownStructure {
   proposedBy: string;
   lastBuilder: string;
   updatedAtMs: number;
-  /** Optional custom procedural building nameplate (e.g. "Research Lab", "Cafe Shop") */
+  /** Optional custom nameplate (works for both custom and renamed preset buildings) */
   customLabel?: string;
   /** Visual architecture preset for custom procedural buildings */
   customStyle?: CustomBuildingStyle;
+}
+
+export type CameraMode =
+  | 'orbit'
+  | 'villager_pov'
+  | 'train_cab'
+  | 'train_passenger'
+  | 'free_roam'
+  | 'tour';
+
+export interface TownRelationship {
+  pairKey: string;
+  agentA: AgentId;
+  agentB: AgentId;
+  score: number; // 0-100
+  interactions: number;
+  lastNote: string;
+  updatedAtMs: number;
+}
+
+export interface BuildingEconomyRow {
+  plotId: PlotId;
+  label: string;
+  district: string;
+  tier: number;
+  goldPerTurn: number;
+  staffed: boolean;
+  note: string;
+}
+
+export interface TownEconomySummary {
+  treasuryGold: number;
+  civicBaseTax: number;
+  railwayBonus: number;
+  buildingRevenue: number;
+  workerUpkeep: number;
+  netPerTurn: number;
+  topBuildings: BuildingEconomyRow[];
+}
+
+export interface TownEventOption {
+  id: string;
+  label: string;
+  effectSummary: string;
+  goldDelta: number;
+  metricsDelta: Partial<TownMetrics>;
+  triggerTrain?: boolean;
+  boostAllBonds?: number;
+  logOutcome: string;
+}
+
+export interface TownEvent {
+  id: string;
+  title: string;
+  summary: string;
+  category: 'trade' | 'festival' | 'civic' | 'weather' | 'discovery';
+  options: TownEventOption[];
+  triggeredAtMs?: number;
+}
+
+export interface TownGazetteEdition {
+  editionNumber: number;
+  townName: string;
+  headline: string;
+  subheadline: string;
+  weatherSummary: string;
+  stories: Array<{ title: string; body: string; meta: string }>;
+}
+
+export interface TownResources {
+  timber: number;
+  stone: number;
+  harvest: number;
+  crystal: number;
+}
+
+export interface TownResourceRates {
+  timber: number;
+  stone: number;
+  harvest: number;
+  crystal: number;
+}
+
+export type PolicyId = 'open_trade' | 'night_shift' | 'free_bread' | 'green_charter';
+
+export interface TownPolicyMeta {
+  id: PolicyId;
+  label: string;
+  benefit: string;
+  tradeoff: string;
+}
+
+export type DecorPackId =
+  | 'lantern_boulevard'
+  | 'flower_gardens'
+  | 'market_bunting'
+  | 'fountain_statues';
+
+export interface DecorPackMeta {
+  id: DecorPackId;
+  label: string;
+  costGold: number;
+  moraleBonus: number;
+  summary: string;
+}
+
+export type MilestoneId =
+  | 'first_building'
+  | 'masterwork_t3'
+  | 'frontier_biome'
+  | 'all_biomes'
+  | 'steam_loop'
+  | 'treasury_1000'
+  | 'bustling_council'
+  | 'trusted_partners';
+
+export interface TownMilestone {
+  id: MilestoneId;
+  title: string;
+  description: string;
+  rewardGold: number;
+  unlocked: boolean;
+}
+
+export interface TownRankInfo {
+  level: number;
+  title: string;
+  nextTitle: string | null;
+  progressPct: number;
+  nextRequirement: string;
+}
+
+export interface CouncilProposal {
+  id: string;
+  proposerId: AgentId;
+  proposerName: string;
+  proposerRole: string;
+  title: string;
+  summary: string;
+  actionType: 'build' | 'upgrade' | 'expand_biome' | 'extend_rail' | 'festival';
+  structureType?: StructureType;
+  customLabel?: string;
+  biome?: BiomeId;
+  costGold: number;
+  votes: number;
+  supporters: string[];
+}
+
+export interface TownHistoryPoint {
+  turn: number;
+  treasuryGold: number;
+  prosperity: number;
+  orderLevel: number;
+  morale: number;
+  population: number;
+  buildings: number;
 }
 
 export interface TownSummary {
@@ -636,7 +792,7 @@ export const CUSTOM_STYLE_COLORS: Record<CustomBuildingStyle, string> = {
 export function getStructureDisplayLabel(
   structure: Pick<TownStructure, 'structureType' | 'customLabel'>,
 ): string {
-  if (structure.structureType === 'custom' && structure.customLabel?.trim()) {
+  if (structure.customLabel?.trim()) {
     return structure.customLabel.trim();
   }
   return STRUCTURE_META[structure.structureType]?.label ?? 'Civic Structure';

@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -16,6 +17,15 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from './firebase.ts';
 import {
+  ALL_DECOR_PACK_IDS,
+  ALL_POLICY_IDS,
+  createStarterHistory,
+  createStarterRelationships,
+  DEFAULT_TOWN_RESOURCES,
+  DEFAULT_TREASURY_GOLD,
+  type ExportedTownFile,
+} from './townSystems.ts';
+import {
   ALL_BIOME_IDS,
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
@@ -30,16 +40,22 @@ import {
   type AgentRecord,
   type BiomeId,
   type CustomBuildingStyle,
+  type DecorPackId,
   type HatStyle,
   type LocationId,
+  type MilestoneId,
   type PlotId,
+  type PolicyId,
   type RemoteCommandRecord,
   type RemoteCommandType,
   type StructureStatus,
   type StructureType,
   type TimeOfDay,
+  type TownHistoryPoint,
   type TownLogItem,
   type TownMetrics,
+  type TownRelationship,
+  type TownResources,
   type TownStructure,
   type TownSummary,
   type TownTheme,
@@ -53,6 +69,13 @@ export interface LoadedTownState {
   activeAgentIndex: number;
   activeDecree: string;
   metrics: TownMetrics;
+  treasuryGold: number;
+  resources: TownResources;
+  activePolicies: PolicyId[];
+  decorPacks: DecorPackId[];
+  unlockedMilestones: MilestoneId[];
+  history: TownHistoryPoint[];
+  autoDayNight: boolean;
   timeOfDay: TimeOfDay;
   weather: WeatherMode;
   theme: TownTheme;
@@ -62,6 +85,7 @@ export interface LoadedTownState {
   autoMode: boolean;
   agents: AgentRecord[];
   structures: TownStructure[];
+  relationships: TownRelationship[];
   logs: TownLogItem[];
 }
 
@@ -149,6 +173,77 @@ function sanitizeRoads(val: unknown): string[] {
     }
   }
   return out.slice(0, 40);
+}
+
+const VALID_POLICY_SET = new Set<string>(ALL_POLICY_IDS);
+const VALID_DECOR_SET = new Set<string>(ALL_DECOR_PACK_IDS);
+
+function sanitizeResources(val: unknown): TownResources {
+  const r = val && typeof val === 'object' ? (val as Partial<TownResources>) : {};
+  return {
+    timber: Number.isFinite(Number(r.timber))
+      ? Math.max(0, Math.round(Number(r.timber)))
+      : DEFAULT_TOWN_RESOURCES.timber,
+    stone: Number.isFinite(Number(r.stone))
+      ? Math.max(0, Math.round(Number(r.stone)))
+      : DEFAULT_TOWN_RESOURCES.stone,
+    harvest: Number.isFinite(Number(r.harvest))
+      ? Math.max(0, Math.round(Number(r.harvest)))
+      : DEFAULT_TOWN_RESOURCES.harvest,
+    crystal: Number.isFinite(Number(r.crystal))
+      ? Math.max(0, Math.round(Number(r.crystal)))
+      : DEFAULT_TOWN_RESOURCES.crystal,
+  };
+}
+
+function sanitizePolicies(val: unknown): PolicyId[] {
+  if (!Array.isArray(val)) return [];
+  return Array.from(
+    new Set(val.filter((p): p is PolicyId => typeof p === 'string' && VALID_POLICY_SET.has(p))),
+  );
+}
+
+function sanitizeDecorPacks(val: unknown): DecorPackId[] {
+  if (!Array.isArray(val)) return [];
+  return Array.from(
+    new Set(val.filter((d): d is DecorPackId => typeof d === 'string' && VALID_DECOR_SET.has(d))),
+  );
+}
+
+function sanitizeMilestones(val: unknown): MilestoneId[] {
+  if (!Array.isArray(val)) return [];
+  return Array.from(
+    new Set(val.filter((m): m is MilestoneId => typeof m === 'string' && m.length > 0 && m.length < 40)),
+  ).slice(0, 20);
+}
+
+function sanitizeHistory(
+  val: unknown,
+  fallbackGold: number,
+  fallbackMetrics: TownMetrics,
+  fallbackPop: number,
+  fallbackBuildings: number,
+): TownHistoryPoint[] {
+  if (!Array.isArray(val) || val.length === 0) {
+    return createStarterHistory(fallbackGold, fallbackMetrics, fallbackPop, fallbackBuildings);
+  }
+  const out: TownHistoryPoint[] = [];
+  for (const pt of val.slice(-30)) {
+    if (!pt || typeof pt !== 'object') continue;
+    const p = pt as Partial<TownHistoryPoint>;
+    out.push({
+      turn: Math.max(0, Math.round(Number(p.turn ?? 0))),
+      treasuryGold: Math.max(0, Math.round(Number(p.treasuryGold ?? fallbackGold))),
+      prosperity: clampScore(p.prosperity, fallbackMetrics.prosperity),
+      orderLevel: clampScore(p.orderLevel, fallbackMetrics.orderLevel),
+      morale: clampScore(p.morale, fallbackMetrics.morale),
+      population: Math.max(1, Math.round(Number(p.population ?? fallbackPop))),
+      buildings: Math.max(0, Math.round(Number(p.buildings ?? fallbackBuildings))),
+    });
+  }
+  return out.length > 0
+    ? out
+    : createStarterHistory(fallbackGold, fallbackMetrics, fallbackPop, fallbackBuildings);
 }
 
 function slugifyTownName(name: string): string {
@@ -290,6 +385,13 @@ export function createFreshTownState(
     activeAgentIndex: 0,
     activeDecree: '',
     metrics: { ...DEFAULT_TOWN_METRICS },
+    treasuryGold: DEFAULT_TREASURY_GOLD,
+    resources: { ...DEFAULT_TOWN_RESOURCES },
+    activePolicies: [],
+    decorPacks: [],
+    unlockedMilestones: [],
+    history: createStarterHistory(DEFAULT_TREASURY_GOLD, DEFAULT_TOWN_METRICS, agents.length, 0),
+    autoDayNight: false,
     timeOfDay: 'day',
     weather: 'summer',
     theme: 'meadow',
@@ -299,6 +401,7 @@ export function createFreshTownState(
     autoMode: false,
     agents,
     structures: [],
+    relationships: createStarterRelationships(),
     logs,
   };
 }
@@ -399,17 +502,29 @@ export function loadLocalTown(townId: string): LoadedTownState | null {
       : [];
     const logs = Array.isArray(d.logs) && d.logs.length > 0 ? d.logs : createInitialLogs();
 
+    const metrics: TownMetrics = {
+      prosperity: clampScore(d.metrics?.prosperity, DEFAULT_TOWN_METRICS.prosperity),
+      orderLevel: clampScore(d.metrics?.orderLevel, DEFAULT_TOWN_METRICS.orderLevel),
+      morale: clampScore(d.metrics?.morale, DEFAULT_TOWN_METRICS.morale),
+    };
+    const treasuryGold = Number.isFinite(Number(d.treasuryGold))
+      ? Math.max(0, Math.round(Number(d.treasuryGold)))
+      : DEFAULT_TREASURY_GOLD;
+
     return {
       townId,
       townName: typeof d.townName === 'string' && d.townName.trim() ? clampStr(d.townName.trim(), 60) : fallbackName,
       turnCount: Number(d.turnCount ?? 0),
       activeAgentIndex: Number(d.activeAgentIndex ?? 0) % agents.length,
       activeDecree: typeof d.activeDecree === 'string' ? d.activeDecree : '',
-      metrics: {
-        prosperity: clampScore(d.metrics?.prosperity, DEFAULT_TOWN_METRICS.prosperity),
-        orderLevel: clampScore(d.metrics?.orderLevel, DEFAULT_TOWN_METRICS.orderLevel),
-        morale: clampScore(d.metrics?.morale, DEFAULT_TOWN_METRICS.morale),
-      },
+      metrics,
+      treasuryGold,
+      resources: sanitizeResources(d.resources),
+      activePolicies: sanitizePolicies(d.activePolicies),
+      decorPacks: sanitizeDecorPacks(d.decorPacks),
+      unlockedMilestones: sanitizeMilestones(d.unlockedMilestones),
+      history: sanitizeHistory(d.history, treasuryGold, metrics, agents.length, structures.length),
+      autoDayNight: Boolean(d.autoDayNight),
       timeOfDay: (d.timeOfDay as TimeOfDay) || 'day',
       weather: normalizeWeatherMode(d.weather),
       theme: normalizeTownTheme(d.theme),
@@ -419,6 +534,10 @@ export function loadLocalTown(townId: string): LoadedTownState | null {
       autoMode: Boolean(d.autoMode),
       agents,
       structures,
+      relationships:
+        Array.isArray(d.relationships) && d.relationships.length > 0
+          ? d.relationships
+          : createStarterRelationships(),
       logs,
     };
   } catch {
@@ -459,6 +578,33 @@ export function createNewLocalTown(townName: string): LoadedTownState {
   const fresh = createFreshTownState(newId, cleanName, false);
   saveLocalTown(fresh);
   return fresh;
+}
+
+export function importTownToLocalSlot(
+  imported: Omit<ExportedTownFile, 'format' | 'exportedAtIso'>,
+): LoadedTownState {
+  const cleanName = clampStr(imported.townName.trim(), 60) || 'Imported Town';
+  const slug = slugifyTownName(cleanName);
+  const rand = Math.random().toString(36).slice(2, 6);
+  const newId = `local_imp_${slug}_${rand}`;
+  const state: LoadedTownState = {
+    ...imported,
+    townId: newId,
+    townName: cleanName,
+    resources: sanitizeResources(imported.resources),
+    activePolicies: sanitizePolicies(imported.activePolicies),
+    decorPacks: sanitizeDecorPacks(imported.decorPacks),
+    unlockedMilestones: sanitizeMilestones(imported.unlockedMilestones),
+    history: sanitizeHistory(
+      imported.history,
+      imported.treasuryGold,
+      imported.metrics,
+      imported.agents.length,
+      imported.structures.length,
+    ),
+  };
+  saveLocalTown(state);
+  return state;
 }
 
 // ============================================================================
@@ -817,17 +963,35 @@ export async function loadOrInitializeTown(
         ? 'Alderbrook'
         : 'Frontier Town';
 
+  const resolvedMetrics: TownMetrics = {
+    prosperity: clampScore(townData.prosperity, DEFAULT_TOWN_METRICS.prosperity),
+    orderLevel: clampScore(townData.orderLevel, DEFAULT_TOWN_METRICS.orderLevel),
+    morale: clampScore(townData.morale, DEFAULT_TOWN_METRICS.morale),
+  };
+  const resolvedGold = Number.isFinite(Number(townData.treasuryGold))
+    ? Math.max(0, Math.round(Number(townData.treasuryGold)))
+    : DEFAULT_TREASURY_GOLD;
+
   return {
     townId,
     townName: resolvedTownName,
     turnCount: Number(townData.turnCount ?? 0),
     activeAgentIndex: Number(townData.activeAgentIndex ?? 0) % orderedAgents.length,
     activeDecree: typeof townData.activeDecree === 'string' ? townData.activeDecree : '',
-    metrics: {
-      prosperity: clampScore(townData.prosperity, DEFAULT_TOWN_METRICS.prosperity),
-      orderLevel: clampScore(townData.orderLevel, DEFAULT_TOWN_METRICS.orderLevel),
-      morale: clampScore(townData.morale, DEFAULT_TOWN_METRICS.morale),
-    },
+    metrics: resolvedMetrics,
+    treasuryGold: resolvedGold,
+    resources: sanitizeResources(townData.resources),
+    activePolicies: sanitizePolicies(townData.activePolicies),
+    decorPacks: sanitizeDecorPacks(townData.decorPacks),
+    unlockedMilestones: sanitizeMilestones(townData.unlockedMilestones),
+    history: sanitizeHistory(
+      townData.history,
+      resolvedGold,
+      resolvedMetrics,
+      orderedAgents.length,
+      structures.length,
+    ),
+    autoDayNight: Boolean(townData.autoDayNight),
     timeOfDay: (townData.timeOfDay as TimeOfDay) || 'day',
     weather: normalizeWeatherMode(townData.weather),
     theme: normalizeTownTheme(townData.theme),
@@ -837,6 +1001,7 @@ export async function loadOrInitializeTown(
     autoMode: Boolean(townData.autoMode),
     agents: orderedAgents,
     structures,
+    relationships: createStarterRelationships(),
     logs: logs.length > 0 ? logs : createInitialLogs(),
   };
 }
@@ -1284,6 +1449,59 @@ export async function persistRemoteStructureAction(
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, structPath);
+  }
+}
+
+export async function persistStructureRename(
+  uid: string,
+  plotId: PlotId,
+  customLabel: string,
+  townId: string = uid,
+): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
+  const structPath = `towns/${townId}/structures/${plotId}`;
+  try {
+    await updateDoc(doc(db, 'towns', townId, 'structures', plotId), {
+      customLabel: clampStr(customLabel.trim(), 40),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, structPath);
+  }
+}
+
+export async function persistStructureDelete(
+  uid: string,
+  plotId: PlotId,
+  townId: string = uid,
+): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
+  const structPath = `towns/${townId}/structures/${plotId}`;
+  try {
+    await deleteDoc(doc(db, 'towns', townId, 'structures', plotId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, structPath);
+  }
+}
+
+export async function persistWorkerAssignment(
+  uid: string,
+  agentId: AgentId,
+  plotId: PlotId | null,
+  currentTask: string,
+  townId: string = uid,
+): Promise<void> {
+  if (!townId || townId.startsWith('local_')) return;
+  const agentPath = `towns/${townId}/agents/${agentId}`;
+  try {
+    await updateDoc(doc(db, 'towns', townId, 'agents', agentId), {
+      assignedPlotId: plotId ?? '',
+      activePlotId: plotId ?? '',
+      currentTask: clampStr(currentTask, 240),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, agentPath);
   }
 }
 

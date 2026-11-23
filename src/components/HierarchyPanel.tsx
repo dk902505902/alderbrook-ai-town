@@ -1,6 +1,27 @@
 import { useState } from 'react';
-import { CloudRain, Compass, Cpu, Eye, EyeOff, MapPin, Radio, Send, Snowflake, Sun, UserPlus } from 'lucide-react';
+import {
+  Award,
+  CloudRain,
+  Coins,
+  Compass,
+  Cpu,
+  Eye,
+  EyeOff,
+  Gem,
+  HeartHandshake,
+  MapPin,
+  MessageCircle,
+  Mountain,
+  Radio,
+  Send,
+  Snowflake,
+  Sun,
+  Trees,
+  UserPlus,
+  Wheat,
+} from 'lucide-react';
 import { formatCompactModelName, resolveInferenceConfig } from '../lib/aiRouting.ts';
+import { getAgentTopBonds } from '../lib/townSystems.ts';
 import {
   getStructureDisplayLabel,
   getWeatherSeasonEffect,
@@ -12,15 +33,26 @@ import {
   type AIProviderConfig,
   type LocationId,
   type PlotId,
+  type TownEconomySummary,
   type TownMetrics,
+  type TownRankInfo,
+  type TownRelationship,
+  type TownResourceRates,
+  type TownResources,
   type TownStructure,
   type WeatherMode,
 } from '../types/town.ts';
+import type { ChronicleTab } from './TownChronicleModal.tsx';
 
 interface HierarchyPanelProps {
   agents: AgentRecord[];
   structures: TownStructure[];
   metrics: TownMetrics;
+  economy: TownEconomySummary;
+  resources: TownResources;
+  resourceRates: TownResourceRates;
+  townRank: TownRankInfo;
+  relationships: TownRelationship[];
   weather: WeatherMode;
   providerConfig: AIProviderConfig;
   activeAgentId: AgentId | null;
@@ -29,11 +61,13 @@ interface HierarchyPanelProps {
   isHiring: boolean;
   onSelectAgent: (agentId: AgentId) => void;
   onTogglePovAgent?: (agentId: AgentId) => void;
+  onChatVillager?: (agentId: AgentId) => void;
   onSendAgentNote: (agentId: AgentId, note: string) => void;
   onHireWorker: (prompt: string) => void;
   onFocusLocation: (locationId: LocationId) => void;
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
+  onOpenChronicle?: (tab: ChronicleTab) => void;
   onResetCamera: () => void;
 }
 
@@ -60,6 +94,11 @@ export function HierarchyPanel({
   agents,
   structures,
   metrics,
+  economy,
+  resources,
+  resourceRates,
+  townRank,
+  relationships,
   weather,
   providerConfig,
   activeAgentId,
@@ -68,11 +107,13 @@ export function HierarchyPanel({
   isHiring,
   onSelectAgent,
   onTogglePovAgent,
+  onChatVillager,
   onSendAgentNote,
   onHireWorker,
   onFocusLocation,
   onSelectPlot,
   onSelectSignalRelay,
+  onOpenChronicle,
   onResetCamera,
 }: HierarchyPanelProps) {
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
@@ -110,9 +151,19 @@ export function HierarchyPanel({
       {/* Town Pulse Metrics Strip + Weather Effect Badge + Expansion Summary */}
       <div className="shrink-0 space-y-2 border-b border-white/10 px-3.5 py-2.5">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] font-medium text-slate-400">Town Pulse</span>
+          <button
+            type="button"
+            onClick={() => onOpenChronicle?.('stats')}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/20"
+            title="View Civic Rank, Analytics & Milestones"
+          >
+            <Award className="h-3 w-3 shrink-0 text-amber-300" />
+            <span>
+              R{townRank.level} · {townRank.title}
+            </span>
+          </button>
           <span
-            className={`inline-flex max-w-[205px] items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${weatherBadgeClass}`}
+            className={`inline-flex max-w-[175px] items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${weatherBadgeClass}`}
             title={weatherEffect.shiftDetail}
           >
             <WeatherIcon className="h-3 w-3 shrink-0" />
@@ -151,6 +202,62 @@ export function HierarchyPanel({
             >
               Building {getStructureDisplayLabel(activeSites[0])} ({activeSites[0].progress}%)
             </button>
+          )}
+        </div>
+
+        {/* 4-Resource Compact Stockpile Strip */}
+        <div className="grid grid-cols-4 gap-1 border-t border-white/10 pt-1.5 font-mono-tabular text-[10px] text-slate-300">
+          <span className="inline-flex items-center gap-1" title={`Timber (+${resourceRates.timber}/turn)`}>
+            <Trees className="h-3 w-3 shrink-0 text-emerald-300" />
+            <span>{resources.timber}</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title={`Stone (+${resourceRates.stone}/turn)`}>
+            <Mountain className="h-3 w-3 shrink-0 text-slate-300" />
+            <span>{resources.stone}</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title={`Harvest (+${resourceRates.harvest}/turn)`}>
+            <Wheat className="h-3 w-3 shrink-0 text-amber-300" />
+            <span>{resources.harvest}</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title={`Crystal (+${resourceRates.crystal}/turn)`}>
+            <Gem className="h-3 w-3 shrink-0 text-cyan-300" />
+            <span>{resources.crystal}</span>
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-1.5 text-[11px]">
+          <span className="inline-flex items-center gap-1.5 text-slate-300">
+            <Coins className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+            <span className="font-mono-tabular font-semibold text-amber-200">
+              {economy.treasuryGold}g
+            </span>
+            <span aria-hidden="true" className="text-slate-600">·</span>
+            <span
+              className={`font-mono-tabular font-medium ${
+                economy.netPerTurn >= 0 ? 'text-emerald-300' : 'text-rose-300'
+              }`}
+            >
+              {economy.netPerTurn >= 0 ? '+' : ''}
+              {economy.netPerTurn}g/t
+            </span>
+          </span>
+          {onOpenChronicle && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onOpenChronicle('civic')}
+                className="shrink-0 font-semibold text-sky-300 hover:underline"
+              >
+                Council
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenChronicle('economy')}
+                className="shrink-0 font-semibold text-amber-300 hover:underline"
+              >
+                Spend Gold
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -363,30 +470,68 @@ export function HierarchyPanel({
                     </p>
                   )}
 
-                  {/* 1-Tap First-Person Character POV Camera Button */}
-                  {onTogglePovAgent && (
-                    <button
-                      type="button"
-                      onClick={() => onTogglePovAgent(agent.id)}
-                      className={`mt-2.5 inline-flex min-h-[38px] w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors ${
-                        povVillagerId === agent.id
-                          ? 'border-amber-400 bg-amber-500 text-slate-950 hover:bg-amber-400'
-                          : 'border-amber-400/35 bg-amber-500/12 text-amber-200 hover:bg-amber-500/22'
-                      }`}
-                    >
-                      {povVillagerId === agent.id ? (
-                        <>
-                          <EyeOff className="h-3.5 w-3.5" />
-                          <span>Exit First-Person View</span>
-                        </>
-                      ) : (
-                        <>
-                          <Eye className="h-3.5 w-3.5" />
-                          <span>First-Person View</span>
-                        </>
-                      )}
-                    </button>
-                  )}
+                  {(() => {
+                    const bonds = getAgentTopBonds(agent.id, relationships, agents, 3);
+                    if (bonds.length === 0) return null;
+                    return (
+                      <div className="mt-2 border-t border-white/10 pt-2">
+                        <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-slate-400">
+                          <HeartHandshake className="h-3 w-3 text-emerald-300" />
+                          <span>Villager Bonds</span>
+                        </div>
+                        <div className="space-y-0.5 text-[11px]">
+                          {bonds.map((b) => (
+                            <div
+                              key={b.partnerId}
+                              className="flex items-center justify-between gap-2 text-slate-300"
+                            >
+                              <span className="truncate">{b.partnerName}</span>
+                              <span className="shrink-0 font-mono-tabular text-emerald-300">
+                                {b.tier} · {b.score}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 1-Tap First-Person POV & Talk 1-on-1 Buttons */}
+                  <div className="mt-2.5 flex items-center gap-1.5">
+                    {onChatVillager && (
+                      <button
+                        type="button"
+                        onClick={() => onChatVillager(agent.id)}
+                        className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-sky-400/35 bg-sky-500/12 px-2.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-500/22"
+                      >
+                        <MessageCircle className="h-3.5 w-3.5" />
+                        <span>Talk 1-on-1</span>
+                      </button>
+                    )}
+                    {onTogglePovAgent && (
+                      <button
+                        type="button"
+                        onClick={() => onTogglePovAgent(agent.id)}
+                        className={`inline-flex min-h-[38px] flex-1 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors ${
+                          povVillagerId === agent.id
+                            ? 'border-amber-400 bg-amber-500 text-slate-950 hover:bg-amber-400'
+                            : 'border-amber-400/35 bg-amber-500/12 text-amber-200 hover:bg-amber-500/22'
+                        }`}
+                      >
+                        {povVillagerId === agent.id ? (
+                          <>
+                            <EyeOff className="h-3.5 w-3.5" />
+                            <span>Exit POV</span>
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>First-Person</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
 
                   {/* Direct Agent Whisper Form */}
                   <form

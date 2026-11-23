@@ -6,9 +6,16 @@ export interface TownRailwayHandle {
   group: THREE.Group;
   stationGroup: THREE.Group;
   outerStationGroup: THREE.Group;
+  trainGroup: THREE.Group;
   stationFocusTarget: THREE.Vector3;
   frontierDepotFocusTarget: THREE.Vector3;
   isNearTrackOrStation: (x: number, z: number, pad?: number) => boolean;
+  getTrainCameraPose: (
+    seat: 'cab' | 'passenger',
+    outEye: THREE.Vector3,
+    outLook: THREE.Vector3,
+  ) => void;
+  getTrainStatus: () => { stoppedAt: 'alderbrook' | 'frontier' | null; isExtended: boolean };
   triggerTrainNow: () => void;
   setRailSpurBuilt: (enabled: boolean) => void;
   update: (delta: number, elapsed: number) => void;
@@ -300,6 +307,7 @@ function buildLocomotiveAndCarriages(
   // --- 1. STEAM LOCOMOTIVE (local +Z = forward travel direction) ---
   const loco = new THREE.Group();
   loco.name = 'railway:locomotive';
+  loco.userData = { trainCar: 'cab' };
 
   // Chassis bed
   const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.12, 0.22, 2.55), ironMat);
@@ -374,6 +382,7 @@ function buildLocomotiveAndCarriages(
   for (let c = 0; c < 2; c++) {
     const car = new THREE.Group();
     car.name = `railway:carriage_${c + 1}`;
+    car.userData = { trainCar: 'passenger' };
 
     const deck = new THREE.Mesh(new THREE.BoxGeometry(1.08, 0.18, 2.28), timberMat);
     deck.position.set(0, 0.36, 0);
@@ -941,6 +950,7 @@ export function buildTownRailway(
   let activeTheme: TownTheme = initialTheme;
   let railSpurEnabled = false;
   let triggerToggle = false;
+  let lastStoppedAt: 'alderbrook' | 'frontier' | null = null;
 
   const placeCarOnCurve = (
     curve: THREE.CatmullRomCurve3,
@@ -997,8 +1007,30 @@ export function buildTownRailway(
     group: root,
     stationGroup,
     outerStationGroup,
+    trainGroup,
     stationFocusTarget,
     frontierDepotFocusTarget,
+    getTrainCameraPose: (
+      seat: 'cab' | 'passenger',
+      outEye: THREE.Vector3,
+      outLook: THREE.Vector3,
+    ) => {
+      if (seat === 'passenger' && consist.carriages[0]) {
+        const coach = consist.carriages[0];
+        coach.updateMatrixWorld();
+        outEye.set(0.86, 1.24, 0.05).applyMatrix4(coach.matrixWorld);
+        outLook.set(4.8, 1.0, 5.8).applyMatrix4(coach.matrixWorld);
+      } else {
+        const locoObj = consist.locomotive;
+        locoObj.updateMatrixWorld();
+        outEye.set(0, 1.94, -0.32).applyMatrix4(locoObj.matrixWorld);
+        outLook.set(0, 1.38, 10.5).applyMatrix4(locoObj.matrixWorld);
+      }
+    },
+    getTrainStatus: () => ({
+      stoppedAt: lastStoppedAt,
+      isExtended: railSpurEnabled,
+    }),
     isNearTrackOrStation: (x: number, z: number, pad = 2.6) => {
       if (Math.hypot(x - stationPos.x, z - stationPos.z) < 4.5 + pad * 0.5) {
         return true;
@@ -1109,6 +1141,7 @@ export function buildTownRailway(
       }
 
       const isStoppedAny = isStoppedAtMain || isStoppedAtFrontier;
+      lastStoppedAt = isStoppedAtMain ? 'alderbrook' : isStoppedAtFrontier ? 'frontier' : null;
 
       // 1. Place locomotive and 2 carriages smoothly along the active curve (inner or extended loop)
       placeCarOnCurve(activeCurve, consist.locomotive, headU);
