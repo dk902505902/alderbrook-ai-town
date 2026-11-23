@@ -1174,28 +1174,63 @@ export function MayorChatModal({
       aria-modal="true"
       aria-labelledby="mayor-chat-title"
     >
-      <div className="flex h-[88dvh] max-h-[740px] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-amber-400/30 bg-slate-900 shadow-2xl">
-        {/* Header Bar with Auto Mode + Web Search + Pause/Play */}
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/90 px-3.5 py-2.5">
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-amber-400/40 bg-amber-500/15 text-amber-300">
-              <Crown className="h-4 w-4" />
-            </div>
-            <div className="min-w-0">
-              <h2
-                id="mayor-chat-title"
-                className="truncate font-display text-sm font-semibold text-white"
-              >
-                Mayor Sterling
-              </h2>
-              <div className="flex items-center gap-1 text-[10px] text-slate-400">
-                <Cpu className="h-3 w-3 shrink-0 text-amber-300/80" />
-                <span className="truncate font-mono">{modelBadgeLabel}</span>
+      <div className="mx-auto flex h-[88dvh] max-h-[740px] w-[calc(100vw-1rem)] max-w-md flex-col overflow-hidden rounded-2xl border border-amber-400/30 bg-slate-900 shadow-2xl sm:max-w-lg">
+        {/* Header Bar: Title + Pinned Close Row, followed by 2x2 Mobile Toggle Grid */}
+        <div className="shrink-0 space-y-2 border-b border-white/10 bg-slate-950/90 px-3 py-2.5">
+          {/* Top Title Row with Pinned Close Button */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-amber-400/40 bg-amber-500/15 text-amber-300">
+                <Crown className="h-4 w-4" />
               </div>
+              <div className="min-w-0 flex-1">
+                <h2
+                  id="mayor-chat-title"
+                  className="truncate font-display text-sm font-semibold text-white"
+                >
+                  Mayor Sterling
+                </h2>
+                <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                  <Cpu className="h-3 w-3 shrink-0 text-amber-300/80" />
+                  <span className="truncate font-mono">{modelBadgeLabel}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1">
+              {speechOutputSupported && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !voiceReadout;
+                    setVoiceReadout(next);
+                    if (!next) window.speechSynthesis.cancel();
+                  }}
+                  title={voiceReadout ? 'Mute Mayor voice readout' : 'Read Mayor replies aloud'}
+                  aria-label={voiceReadout ? 'Mute Mayor voice' : 'Enable Mayor voice'}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors ${
+                    voiceReadout
+                      ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
+                      : 'border-white/10 bg-slate-900 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {voiceReadout ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close Mayor chat"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-slate-900/90 text-slate-300 transition-colors hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
           </div>
 
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          {/* 2x2 Mobile Grid / Desktop Flex Row for Raids, Auto, Web & Play/Pause */}
+          <div className="grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
             {/* Enemy Raids ON/OFF Toggle */}
             <button
               type="button"
@@ -1206,10 +1241,10 @@ export function MayorChatModal({
                   ? 'Enemy Raids are ON — Click to return to Peaceful Mode'
                   : 'Enemy Raids are OFF — Click to activate Raider AI & Town Defense'
               }
-              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2 text-[11px] font-semibold transition-colors ${
+              className={`inline-flex min-h-[34px] items-center justify-center gap-1 rounded-xl border px-2 py-1.5 text-[11px] font-semibold whitespace-nowrap transition-colors sm:flex-1 ${
                 raidState.enabled
                   ? 'border-rose-400/65 bg-rose-500/25 text-rose-100 hover:bg-rose-500/35'
-                  : 'border-white/10 bg-slate-900 text-slate-400 hover:border-rose-400/40 hover:text-rose-200'
+                  : 'border-white/10 bg-slate-900 text-slate-300 hover:border-rose-400/40 hover:text-rose-200'
               }`}
             >
               <Swords className="h-3.5 w-3.5 shrink-0" />
@@ -1226,10 +1261,10 @@ export function MayorChatModal({
                   ? 'Automatic City-Builder is ON — Mayor autonomously builds, expands & hires'
                   : 'Turn ON Automatic City-Builder mode'
               }
-              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2 text-[11px] font-semibold transition-colors ${
+              className={`inline-flex min-h-[34px] items-center justify-center gap-1 rounded-xl border px-2 py-1.5 text-[11px] font-semibold whitespace-nowrap transition-colors sm:flex-1 ${
                 autoMode
                   ? 'border-violet-400/60 bg-violet-500/25 text-violet-100 hover:bg-violet-500/35'
-                  : 'border-white/10 bg-slate-900 text-slate-400 hover:border-white/25 hover:text-slate-200'
+                  : 'border-white/10 bg-slate-900 text-slate-300 hover:border-white/25 hover:text-slate-200'
               }`}
             >
               <Zap className="h-3.5 w-3.5 shrink-0" />
@@ -1246,10 +1281,10 @@ export function MayorChatModal({
                   ? 'Web Search is ON — Mayor can look up live internet news'
                   : 'Web Search is OFF — tap to enable live internet search'
               }
-              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2 text-[11px] font-semibold transition-colors ${
+              className={`inline-flex min-h-[34px] items-center justify-center gap-1 rounded-xl border px-2 py-1.5 text-[11px] font-semibold whitespace-nowrap transition-colors sm:flex-1 ${
                 webSearchEnabled
                   ? 'border-cyan-400/50 bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30'
-                  : 'border-white/10 bg-slate-900 text-slate-400 hover:border-white/25 hover:text-slate-200'
+                  : 'border-white/10 bg-slate-900 text-slate-300 hover:border-white/25 hover:text-slate-200'
               }`}
             >
               <Globe className="h-3.5 w-3.5 shrink-0" />
@@ -1261,49 +1296,20 @@ export function MayorChatModal({
               type="button"
               onClick={onTogglePlay}
               aria-label={isPlaying ? 'Pause town simulation' : 'Play town simulation'}
-              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl px-2.5 text-[11px] font-semibold transition-colors ${
+              className={`inline-flex min-h-[34px] items-center justify-center gap-1 rounded-xl px-2 py-1.5 text-[11px] font-semibold whitespace-nowrap transition-colors sm:flex-1 ${
                 isPlaying
                   ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
                   : 'border border-emerald-400/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
               }`}
             >
-              {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+              {isPlaying ? <Pause className="h-3.5 w-3.5 shrink-0" /> : <Play className="h-3.5 w-3.5 shrink-0" />}
               <span>{isPlaying ? 'Pause' : 'Play'}</span>
-            </button>
-
-            {speechOutputSupported && (
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !voiceReadout;
-                  setVoiceReadout(next);
-                  if (!next) window.speechSynthesis.cancel();
-                }}
-                title={voiceReadout ? 'Mute Mayor voice readout' : 'Read Mayor replies aloud'}
-                aria-label={voiceReadout ? 'Mute Mayor voice' : 'Enable Mayor voice'}
-                className={`flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl border transition-colors ${
-                  voiceReadout
-                    ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-                    : 'border-white/10 bg-slate-900 text-slate-400 hover:text-white'
-                }`}
-              >
-                {voiceReadout ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close Mayor chat"
-              className="flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
-            >
-              <X className="h-5 w-5" />
             </button>
           </div>
         </div>
 
         {/* Compact Non-Destructive Town Switcher Bar */}
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-slate-950/60 px-3.5 py-2">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-slate-950/60 px-3 py-2">
           {!creatingTownInline ? (
             <>
               <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -1319,7 +1325,7 @@ export function MayorChatModal({
                     }
                     void onSwitchTown(nextId);
                   }}
-                  className="min-h-[32px] min-w-0 flex-1 truncate rounded-lg border border-white/10 bg-slate-900 px-2 text-xs font-medium text-slate-100 focus:border-amber-400 focus:outline-none"
+                  className="min-h-[34px] w-full min-w-0 flex-1 truncate rounded-lg border border-white/10 bg-slate-900 px-2 text-xs font-medium text-slate-100 focus:border-amber-400 focus:outline-none"
                 >
                   {savedTowns.map((t) => (
                     <option key={t.id} value={t.id}>
@@ -1332,9 +1338,9 @@ export function MayorChatModal({
               <button
                 type="button"
                 onClick={() => setCreatingTownInline(true)}
-                className="inline-flex min-h-[32px] shrink-0 items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/20"
+                className="inline-flex min-h-[34px] shrink-0 items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap text-amber-200 hover:bg-amber-500/20"
               >
-                <Plus className="h-3.5 w-3.5" />
+                <Plus className="h-3.5 w-3.5 shrink-0" />
                 <span>New Town</span>
               </button>
             </>
@@ -1344,7 +1350,7 @@ export function MayorChatModal({
                 e.preventDefault();
                 void handleCreateTownInlineSubmit();
               }}
-              className="flex flex-1 items-center gap-1.5"
+              className="flex min-w-0 flex-1 items-center gap-1.5"
             >
               <input
                 type="text"
@@ -1358,7 +1364,7 @@ export function MayorChatModal({
               <button
                 type="submit"
                 disabled={!newTownDraft.trim()}
-                className="min-h-[34px] rounded-lg bg-amber-500 px-2.5 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-40"
+                className="min-h-[34px] shrink-0 rounded-lg bg-amber-500 px-2.5 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-40"
               >
                 Create
               </button>
@@ -1368,7 +1374,7 @@ export function MayorChatModal({
                   setCreatingTownInline(false);
                   setNewTownDraft('');
                 }}
-                className="min-h-[34px] rounded-lg px-2 text-xs text-slate-400 hover:text-white"
+                className="min-h-[34px] shrink-0 rounded-lg px-2 text-xs text-slate-400 hover:text-white"
               >
                 Cancel
               </button>
@@ -1377,7 +1383,7 @@ export function MayorChatModal({
         </div>
 
         {/* Live Back-and-Forth Chat Feed */}
-        <div className="hud-scroll flex-1 space-y-3 overflow-y-auto px-3.5 py-3.5">
+        <div className="hud-scroll flex-1 space-y-3 overflow-y-auto px-3 py-3">
           {messages.map((msg) => {
             const isPlayer = msg.sender === 'player';
             return (
@@ -1386,7 +1392,7 @@ export function MayorChatModal({
                 className={`flex flex-col ${isPlayer ? 'items-end' : 'items-start'}`}
               >
                 <div
-                  className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
+                  className={`max-w-[92%] break-words rounded-2xl px-3 py-2 text-xs leading-relaxed sm:text-sm ${
                     isPlayer
                       ? 'rounded-br-sm bg-amber-500 font-medium text-slate-950'
                       : 'rounded-bl-sm border border-white/10 bg-slate-950/90 text-slate-100'
@@ -1395,7 +1401,7 @@ export function MayorChatModal({
                   <p className="whitespace-pre-line">{msg.text}</p>
 
                   {msg.badge && (
-                    <div className="mt-2 inline-flex items-center rounded-lg border border-emerald-400/35 bg-emerald-500/12 px-2 py-1 text-[11px] font-semibold text-emerald-200">
+                    <div className="mt-2 inline-flex max-w-full items-center rounded-lg border border-emerald-400/35 bg-emerald-500/12 px-2 py-1 text-[11px] font-semibold text-emerald-200">
                       {msg.badge}
                     </div>
                   )}
@@ -1450,7 +1456,7 @@ export function MayorChatModal({
 
           {isSending && (
             <div className="flex items-start">
-              <div className="rounded-2xl rounded-bl-sm border border-white/10 bg-slate-950/80 px-3.5 py-2 text-xs text-amber-200">
+              <div className="rounded-2xl rounded-bl-sm border border-white/10 bg-slate-950/80 px-3 py-2 text-xs text-amber-200">
                 {statusNotice}
               </div>
             </div>
@@ -1458,9 +1464,9 @@ export function MayorChatModal({
           <div ref={feedEndRef} />
         </div>
 
-        {/* Starter Chips + Input Bar */}
-        <div className="shrink-0 space-y-2 border-t border-white/10 bg-slate-950/95 px-3.5 py-3">
-          <div className="flex flex-wrap gap-1.5">
+        {/* Compact Starter Chips + Bottom Input Bar */}
+        <div className="shrink-0 space-y-2 border-t border-white/10 bg-slate-950/95 px-3 py-2.5">
+          <div className="flex flex-wrap gap-1">
             {starterChips.map((chip) => {
               const isWebChip = chip.startsWith('🌐');
               return (
@@ -1469,7 +1475,7 @@ export function MayorChatModal({
                   type="button"
                   disabled={isSending}
                   onClick={() => void handleSend(chip)}
-                  className={`min-h-[32px] rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                  className={`min-h-[30px] rounded-lg border px-2.5 py-1 text-[11px] font-medium whitespace-nowrap transition-colors disabled:opacity-40 ${
                     isWebChip
                       ? 'border-cyan-400/45 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25'
                       : 'border-white/10 bg-slate-900 text-slate-200 hover:border-amber-400/50 hover:text-amber-200'
@@ -1494,7 +1500,7 @@ export function MayorChatModal({
                 onClick={handleToggleMic}
                 disabled={isSending}
                 aria-label={isListening ? 'Stop voice input' : 'Speak to Mayor Sterling'}
-                className={`flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl border transition-colors ${
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors ${
                   isListening
                     ? 'border-rose-400 bg-rose-500/20 text-rose-200'
                     : 'border-white/15 bg-slate-900 text-slate-300 hover:border-amber-400/50 hover:text-amber-200'
@@ -1514,17 +1520,17 @@ export function MayorChatModal({
                 isListening
                   ? 'Listening… speak to Mayor Sterling'
                   : webSearchEnabled
-                    ? 'Build Research Lab, expand Cave, or search live news…'
-                    : 'Build Research Lab, expand Cave, pave roads, or go auto…'
+                    ? 'Ask Mayor or search live news…'
+                    : 'Ask Mayor Sterling to build, expand, or defend…'
               }
-              className="min-h-[44px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-900 px-3 text-base text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none disabled:opacity-50"
+              className="min-h-[40px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none disabled:opacity-50 sm:text-sm"
             />
 
             <button
               type="submit"
               disabled={!input.trim() || isSending}
               aria-label="Send message to Mayor Sterling"
-              className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl bg-amber-500 text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-40"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-40"
             >
               <Send className="h-4 w-4" />
             </button>

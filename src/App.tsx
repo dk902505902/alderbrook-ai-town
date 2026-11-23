@@ -4633,11 +4633,11 @@ export default function App() {
       )}
 
       {/* Compact Floating Top Bar */}
-      <header className="pointer-events-none fixed top-2.5 right-2.5 left-2.5 z-30 flex items-center justify-between gap-2 md:top-4 md:right-4 md:left-4">
-        <div className="pointer-events-auto flex min-h-[48px] max-w-full flex-1 items-center justify-between gap-2 rounded-2xl border border-white/10 bg-slate-950/90 px-3 py-1.5 shadow-xl md:gap-3 md:px-4">
+      <header className="pointer-events-none fixed top-2 right-1.5 left-1.5 z-30 flex items-center justify-between gap-1 sm:top-2.5 sm:right-2.5 sm:left-2.5 sm:gap-2 md:top-4 md:right-4 md:left-4">
+        <div className="pointer-events-auto flex min-h-[44px] w-full max-w-full flex-1 items-center justify-between gap-1 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/90 px-1.5 py-1 shadow-xl sm:min-h-[48px] sm:gap-2 sm:px-3 sm:py-1.5 md:gap-3 md:px-4">
           {/* Town Switcher & Unboxed Status Metadata */}
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 flex-1 items-center gap-1 sm:gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1 sm:flex-initial">
               <Building2 className="hidden h-4 w-4 shrink-0 text-amber-300 sm:block" />
               <select
                 aria-label="Switch active town"
@@ -4650,7 +4650,7 @@ export default function App() {
                   }
                   void handleSwitchTown(val);
                 }}
-                className="min-h-[36px] max-w-[132px] truncate rounded-xl border border-white/10 bg-slate-900/90 px-2 font-display text-sm font-bold text-white focus:border-amber-400 focus:outline-none sm:max-w-[175px] md:text-base"
+                className="min-h-[36px] w-full min-w-0 max-w-[116px] truncate rounded-xl border border-white/10 bg-slate-900/90 px-1.5 font-display text-xs font-bold text-white focus:border-amber-400 focus:outline-none sm:max-w-[175px] sm:px-2 sm:text-sm md:text-base"
               >
                 {savedTowns.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -4664,7 +4664,7 @@ export default function App() {
                 onClick={() => setTopBarNewTownOpen((v) => !v)}
                 title="Create a brand-new saved town"
                 aria-label="Create new town"
-                className="hidden min-h-[36px] min-w-[34px] items-center justify-center rounded-xl border border-white/10 bg-slate-900 text-amber-300 transition-colors hover:bg-slate-800 sm:inline-flex"
+                className="hidden min-h-[36px] min-w-[34px] shrink-0 items-center justify-center rounded-xl border border-white/10 bg-slate-900 text-amber-300 transition-colors hover:bg-slate-800 sm:inline-flex"
               >
                 <Plus className="h-3.5 w-3.5" />
               </button>
@@ -4674,7 +4674,7 @@ export default function App() {
                 type="button"
                 onClick={() => handleToggleAutoMode(false)}
                 title="Automatic City-Builder is ON (click to disable)"
-                className="hidden min-h-[30px] items-center gap-1 rounded-lg border border-violet-400/50 bg-violet-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-violet-100 hover:bg-violet-500/30 lg:inline-flex"
+                className="hidden min-h-[30px] shrink-0 items-center gap-1 rounded-lg border border-violet-400/50 bg-violet-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-violet-100 hover:bg-violet-500/30 lg:inline-flex"
               >
                 <Zap className="h-3 w-3" />
                 <span>Auto</span>
@@ -4693,7 +4693,7 @@ export default function App() {
                     ? 'Active Raider Wave — click to view Raider Camp'
                     : 'Enemy Raids are ON — click to switch to Peaceful Mode'
                 }
-                className="hidden min-h-[30px] items-center gap-1 rounded-lg border border-rose-400/55 bg-rose-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-rose-100 hover:bg-rose-500/30 lg:inline-flex"
+                className="hidden min-h-[30px] shrink-0 items-center gap-1 rounded-lg border border-rose-400/55 bg-rose-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-rose-100 hover:bg-rose-500/30 lg:inline-flex"
               >
                 <Swords className="h-3 w-3" />
                 <span>{raidState.active ? `Raid W${raidState.waveNumber}` : 'Raids ON'}</span>
@@ -4713,7 +4713,7 @@ export default function App() {
           </div>
 
           {/* Primary Action Controls */}
-          <div className="flex shrink-0 items-center gap-1.5 md:gap-2">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-1.5 md:gap-2">
             <button
               type="button"
               onClick={() => {
@@ -4721,13 +4721,13 @@ export default function App() {
                 setIsPlaying((p) => !p);
               }}
               aria-label={isPlaying ? 'Pause simulation' : 'Play simulation'}
-              className={`inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold whitespace-nowrap transition-colors md:px-3.5 md:text-sm ${
+              className={`inline-flex min-h-[36px] min-w-[34px] items-center justify-center gap-1 rounded-xl px-2 text-xs font-semibold whitespace-nowrap transition-colors sm:min-h-[42px] sm:gap-1.5 sm:px-3 md:min-h-[44px] md:px-3.5 md:text-sm ${
                 isPlaying
                   ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
                   : 'border border-white/15 bg-slate-900 text-white hover:bg-slate-800'
               }`}
             >
-              {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              {isPlaying ? <Pause className="h-4 w-4 shrink-0" /> : <Play className="h-4 w-4 shrink-0" />}
               <span className="hidden sm:inline">{isPlaying ? 'Pause' : 'Play'}</span>
             </button>
 
@@ -4739,9 +4739,9 @@ export default function App() {
               }}
               disabled={isThinking}
               aria-label="Next Turn"
-              className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-900 px-3 text-xs font-semibold whitespace-nowrap text-white transition-colors hover:bg-slate-800 disabled:opacity-50 md:px-3.5 md:text-sm"
+              className="inline-flex min-h-[36px] min-w-[34px] items-center justify-center gap-1 rounded-xl border border-white/15 bg-slate-900 px-2 text-xs font-semibold whitespace-nowrap text-white transition-colors hover:bg-slate-800 disabled:opacity-50 sm:min-h-[42px] sm:gap-1.5 sm:px-3 md:min-h-[44px] md:px-3.5 md:text-sm"
             >
-              <FastForward className="h-4 w-4" />
+              <FastForward className="h-4 w-4 shrink-0" />
               <span className="hidden sm:inline">
                 {isThinking ? 'Thinking...' : 'Next Turn'}
               </span>
@@ -4780,13 +4780,13 @@ export default function App() {
               onClick={handleToggleSound}
               title={soundEnabled ? 'Mute town audio' : 'Enable town chimes & breeze'}
               aria-label={soundEnabled ? 'Mute town audio' : 'Enable town audio'}
-              className={`inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border transition-colors ${
+              className={`inline-flex min-h-[36px] min-w-[34px] items-center justify-center rounded-xl border transition-colors sm:min-h-[42px] sm:min-w-[42px] md:min-h-[44px] md:min-w-[44px] ${
                 soundEnabled
                   ? 'border-amber-400/60 bg-amber-500/15 text-amber-200'
                   : 'border-white/10 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white'
               }`}
             >
-              {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+              {soundEnabled ? <Volume2 className="h-4 w-4 shrink-0" /> : <VolumeX className="h-4 w-4 shrink-0" />}
             </button>
 
             <button
@@ -4806,10 +4806,10 @@ export default function App() {
               onClick={() => setBridgeOpen(true)}
               title="Remote Bridge (Firestore Listener, Webhook & Telegram Alerts)"
               aria-label="Remote Bridge Settings"
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs font-medium whitespace-nowrap text-slate-200 transition-colors hover:bg-slate-800 hover:text-white md:px-3"
+              className="inline-flex min-h-[36px] min-w-[34px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-900 px-1.5 text-xs font-medium whitespace-nowrap text-slate-200 transition-colors hover:bg-slate-800 hover:text-white sm:min-h-[42px] sm:min-w-[42px] sm:px-2.5 md:min-h-[44px] md:min-w-[44px] md:px-3"
             >
               <Radio
-                className={`h-4 w-4 ${
+                className={`h-4 w-4 shrink-0 ${
                   user || remoteBridgeConfig.webhookUrl || remoteBridgeConfig.telegramBotToken
                     ? 'text-emerald-400'
                     : 'text-slate-300'
@@ -4822,9 +4822,9 @@ export default function App() {
               type="button"
               onClick={() => setSettingsOpen(true)}
               aria-label="AI Providers Settings"
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs font-medium whitespace-nowrap text-slate-200 transition-colors hover:bg-slate-800 hover:text-white md:px-3"
+              className="inline-flex min-h-[36px] min-w-[34px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-900 px-1.5 text-xs font-medium whitespace-nowrap text-slate-200 transition-colors hover:bg-slate-800 hover:text-white sm:min-h-[42px] sm:min-w-[42px] sm:px-2.5 md:min-h-[44px] md:min-w-[44px] md:px-3"
             >
-              <Settings className="h-4 w-4" />
+              <Settings className="h-4 w-4 shrink-0" />
               <span className="hidden lg:inline">AI Providers</span>
             </button>
 
@@ -4833,9 +4833,9 @@ export default function App() {
               onClick={() => setHelpOpen(true)}
               title="Help & AI Integration Guide"
               aria-label="Help & AI Integration Guide"
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-white/15 bg-slate-900 text-amber-300 transition-colors hover:bg-slate-800 hover:text-amber-200"
+              className="inline-flex min-h-[36px] min-w-[34px] items-center justify-center rounded-xl border border-white/15 bg-slate-900 text-amber-300 transition-colors hover:bg-slate-800 hover:text-amber-200 sm:min-h-[42px] sm:min-w-[42px] md:min-h-[44px] md:min-w-[44px]"
             >
-              <HelpCircle className="h-4 w-4" />
+              <HelpCircle className="h-4 w-4 shrink-0" />
             </button>
           </div>
         </div>
