@@ -297,10 +297,24 @@ function buildAgentDocPayload(uid: string, agent: AgentRecord): Record<string, u
 }
 
 function buildStructureCreatePayload(uid: string, structure: TownStructure): Record<string, unknown> {
+  const isHospital = structure.structureType === 'hospital';
+  const isDefenseWall = structure.structureType === 'defense_wall';
+  const remoteStructureType = isHospital || isDefenseWall ? 'custom' : structure.structureType;
+  const remoteCustomLabel = isHospital
+    ? structure.customLabel?.trim() || 'Town Hospital'
+    : isDefenseWall
+      ? structure.customLabel?.trim() || 'Defense Wall & Turret'
+      : structure.customLabel?.trim() || '';
+  const remoteCustomStyle: CustomBuildingStyle | undefined = isHospital
+    ? 'lab'
+    : isDefenseWall
+      ? 'tower'
+      : structure.customStyle;
+
   const payload: Record<string, unknown> = {
     ownerId: uid,
     plotId: structure.plotId,
-    structureType: structure.structureType,
+    structureType: remoteStructureType,
     status: structure.status,
     progress: clampScore(structure.progress, 0),
     tier: Math.max(1, Math.min(3, structure.tier)),
@@ -309,11 +323,11 @@ function buildStructureCreatePayload(uid: string, structure: TownStructure): Rec
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
-  if (structure.customLabel?.trim()) {
-    payload.customLabel = clampStr(structure.customLabel.trim(), 40);
+  if (remoteCustomLabel) {
+    payload.customLabel = clampStr(remoteCustomLabel, 40);
   }
-  if (structure.customStyle && VALID_CUSTOM_STYLES.has(structure.customStyle)) {
-    payload.customStyle = structure.customStyle;
+  if (remoteCustomStyle && VALID_CUSTOM_STYLES.has(remoteCustomStyle)) {
+    payload.customStyle = remoteCustomStyle;
   }
   return payload;
 }
@@ -909,17 +923,25 @@ export async function loadOrInitializeTown(
   structuresSnap.forEach((docSnap) => {
     const d = docSnap.data();
     const plotId = sanitizeOptionalPlot(d.plotId);
-    const structureType =
+    const rawStructureType =
       typeof d.structureType === 'string' && VALID_STRUCTURE_SET.has(d.structureType)
         ? (d.structureType as StructureType)
         : null;
-    if (!plotId || !structureType) return;
+    if (!plotId || !rawStructureType) return;
     const status: StructureStatus = d.status === 'complete' ? 'complete' : 'building';
     const customLabel =
       typeof d.customLabel === 'string' && d.customLabel.trim()
         ? clampStr(d.customLabel.trim(), 40)
         : undefined;
     const customStyle = sanitizeCustomStyle(d.customStyle);
+    let structureType: StructureType = rawStructureType;
+    if (rawStructureType === 'custom' && customLabel) {
+      if (/\b(hospital|clinic|infirmary)\b/i.test(customLabel)) {
+        structureType = 'hospital';
+      } else if (/\b(defense wall|palisade|cannon turret|bastion)\b/i.test(customLabel)) {
+        structureType = 'defense_wall';
+      }
+    }
     structures.push({
       plotId,
       structureType,

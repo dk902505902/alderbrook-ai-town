@@ -4,7 +4,10 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ALL_PLOT_IDS,
   BIOME_META,
+  createDefaultEnemyRaidState,
   getAvailablePlotIds,
+  isDefenseStructure,
+  isHospitalStructure,
   MAX_TOWN_AGENTS,
   PLOT_META,
   type AgentId,
@@ -12,6 +15,7 @@ import {
   type BiomeId,
   type CameraMode,
   type DecorPackId,
+  type EnemyRaidState,
   type GraphicsQuality,
   type HatStyle,
   type LocationId,
@@ -33,6 +37,12 @@ import {
   type WindUniforms,
 } from './townEnvironment.ts';
 import { buildTownLifeAndDecor, type TownLifeHandle } from './townLife.ts';
+import {
+  buildTownRaidersSystem,
+  RAIDER_CAMP_POS,
+  type DefenseTowerAnchor,
+  type TownRaidersHandle,
+} from './townRaiders.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import {
   buildCompletedStructureMesh,
@@ -74,6 +84,8 @@ export interface TownSceneCallbacks {
   onLabelUpdate?: (positions: Record<AgentId, ProjectedLabel>) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
   onUserOrbitStart?: () => void;
+  onRaiderImpact?: (x: number, z: number) => void;
+  onDefenseHitCamp?: (damage: number) => void;
 }
 
 interface LandmarkConfig {
@@ -162,6 +174,8 @@ interface CharacterRig {
   rightLegPivot: THREE.Group;
   selectionRing: THREE.Mesh;
   activeRing: THREE.Mesh;
+  injuredBadgeGroup: THREE.Group;
+  isInjured: boolean;
   ownedMaterials: THREE.Material[];
   waypoints: THREE.Vector3[];
   homeAnchor: THREE.Vector3;
@@ -195,11 +209,16 @@ interface SharedRigAssets {
   beretGeo: THREE.CylinderGeometry;
   hoodGeo: THREE.BoxGeometry;
   apronGeo: THREE.BoxGeometry;
+  crossBadgeBgGeo: THREE.CylinderGeometry;
+  crossBarHGeo: THREE.BoxGeometry;
+  crossBarVGeo: THREE.BoxGeometry;
   skinMat: THREE.MeshStandardMaterial;
   bootMat: THREE.MeshStandardMaterial;
   eyeMat: THREE.MeshStandardMaterial;
   metalMat: THREE.MeshStandardMaterial;
   defaultPantsMat: THREE.MeshStandardMaterial;
+  crossWhiteMat: THREE.MeshBasicMaterial;
+  crossRedMat: THREE.MeshBasicMaterial;
   dispose: () => void;
 }
 
@@ -237,12 +256,17 @@ function createSharedRigAssets(shadowTex: THREE.CanvasTexture): SharedRigAssets 
   const beretGeo = new THREE.CylinderGeometry(0.27, 0.21, 0.11, 10);
   const hoodGeo = new THREE.BoxGeometry(0.48, 0.44, 0.48);
   const apronGeo = new THREE.BoxGeometry(0.5, 0.44, 0.04);
+  const crossBadgeBgGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.05, 10);
+  const crossBarHGeo = new THREE.BoxGeometry(0.26, 0.08, 0.07);
+  const crossBarVGeo = new THREE.BoxGeometry(0.08, 0.26, 0.07);
 
   const skinMat = new THREE.MeshStandardMaterial({ color: 0xfde2c8, roughness: 0.62, metalness: 0.02 });
   const bootMat = new THREE.MeshStandardMaterial({ color: 0x451a03, roughness: 0.55, metalness: 0.1 });
   const eyeMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.2 });
   const metalMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.24, metalness: 0.88 });
   const defaultPantsMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.75, metalness: 0.05 });
+  const crossWhiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const crossRedMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
 
   const geometries = [
     shadowPlaneGeo,
@@ -263,8 +287,21 @@ function createSharedRigAssets(shadowTex: THREE.CanvasTexture): SharedRigAssets 
     beretGeo,
     hoodGeo,
     apronGeo,
+    crossBadgeBgGeo,
+    crossBarHGeo,
+    crossBarVGeo,
   ];
-  const materials = [shadowMat, selectionMat, skinMat, bootMat, eyeMat, metalMat, defaultPantsMat];
+  const materials = [
+    shadowMat,
+    selectionMat,
+    skinMat,
+    bootMat,
+    eyeMat,
+    metalMat,
+    defaultPantsMat,
+    crossWhiteMat,
+    crossRedMat,
+  ];
 
   return {
     shadowPlaneGeo,
@@ -287,11 +324,16 @@ function createSharedRigAssets(shadowTex: THREE.CanvasTexture): SharedRigAssets 
     beretGeo,
     hoodGeo,
     apronGeo,
+    crossBadgeBgGeo,
+    crossBarHGeo,
+    crossBarVGeo,
     skinMat,
     bootMat,
     eyeMat,
     metalMat,
     defaultPantsMat,
+    crossWhiteMat,
+    crossRedMat,
     dispose: () => {
       for (const g of geometries) g.dispose();
       for (const m of materials) m.dispose();
@@ -312,6 +354,7 @@ const _slotOffset = new THREE.Vector3();
 const _povForward = new THREE.Vector3();
 const _povEye = new THREE.Vector3();
 const _povLookTarget = new THREE.Vector3();
+const _turretWorldPos = new THREE.Vector3();
 
 function detectSoftwareWebGL(): boolean {
   try {
@@ -1522,6 +1565,17 @@ function buildCharacter(
     root.position.copy(finalPos);
   }
 
+  // Floating cartoon Red-Cross / Bandage badge (hidden unless injured)
+  const injuredBadgeGroup = new THREE.Group();
+  injuredBadgeGroup.position.set(0, 2.08, 0);
+  const badgeDisc = new THREE.Mesh(assets.crossBadgeBgGeo, assets.crossWhiteMat);
+  badgeDisc.rotation.x = Math.PI / 2;
+  const crossH = new THREE.Mesh(assets.crossBarHGeo, assets.crossRedMat);
+  const crossV = new THREE.Mesh(assets.crossBarVGeo, assets.crossRedMat);
+  injuredBadgeGroup.add(badgeDisc, crossH, crossV);
+  injuredBadgeGroup.visible = agent.healthStatus === 'injured';
+  root.add(injuredBadgeGroup);
+
   return {
     id: agent.id,
     name: agent.name,
@@ -1535,6 +1589,8 @@ function buildCharacter(
     rightLegPivot,
     selectionRing,
     activeRing,
+    injuredBadgeGroup,
+    isInjured: agent.healthStatus === 'injured',
     ownedMaterials,
     waypoints,
     homeAnchor: finalPos.clone(),
@@ -1591,6 +1647,12 @@ export class TownSceneController {
   private railwayHandle!: TownRailwayHandle;
   private lifeHandle: TownLifeHandle | null = null;
   private dogVillagerCoords: Array<{ x: number; z: number }> = [];
+  private raiderHandle: TownRaidersHandle | null = null;
+  private raidState: EnemyRaidState = createDefaultEnemyRaidState(false);
+  private defenseTurrets: THREE.Group[] = [];
+  private defenseTowers: DefenseTowerAnchor[] = [];
+  private raiderVillagerCoords: Array<{ id: string; x: number; z: number; injured: boolean }> = [];
+  private completedHospitalPlotId: PlotId | null = null;
   private signalRelayHandle: SignalRelayHandle | null = null;
   private unlockedBiomes: BiomeId[] = [];
   private lastStructures: TownStructure[] = [];
@@ -1802,6 +1864,9 @@ export class TownSceneController {
     this.lifeHandle = buildTownLifeAndDecor(this.sharedShadowTex);
     this.scene.add(this.lifeHandle.group);
     this.disposables.push(this.lifeHandle);
+    this.raiderHandle = buildTownRaidersSystem(this.sharedShadowTex);
+    this.scene.add(this.raiderHandle.group);
+    this.disposables.push(this.raiderHandle);
     this.setGraphicsQuality(initialQuality);
     this.setTheme(initialTheme);
 
@@ -2320,6 +2385,7 @@ export class TownSceneController {
     this.expansionHandle?.setGraphicsQuality(quality);
     this.railwayHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
+    this.raiderHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
     this.updateFireflyState();
   }
@@ -2830,6 +2896,9 @@ export class TownSceneController {
     this.bakeryChimneys = [];
     if (this.bakerySmokePoints) this.bakerySmokePoints.visible = false;
     this.windmillRotors = [];
+    this.defenseTurrets = [];
+    this.defenseTowers = [];
+    this.completedHospitalPlotId = null;
     this.plotCutaways.clear();
     this.completedPlots.clear();
 
@@ -3002,6 +3071,7 @@ export class TownSceneController {
 
     if (rebuiltAny) {
       const rotors: THREE.Group[] = [];
+      const turrets: THREE.Group[] = [];
       const prevOpacities = new Map<PlotId, number>();
       this.plotCutaways.forEach((entry, pid) => {
         prevOpacities.set(pid, entry.currentOpacity);
@@ -3012,6 +3082,9 @@ export class TownSceneController {
       this.plotGroups.forEach((grp, plotId) => {
         if (grp.userData.windmillRotor) {
           rotors.push(grp.userData.windmillRotor as THREE.Group);
+        }
+        if (grp.userData.defenseTurret) {
+          turrets.push(grp.userData.defenseTurret as THREE.Group);
         }
         const roofMats = grp.userData.cutawayRoofMaterials as THREE.MeshStandardMaterial[] | undefined;
         if (roofMats && roofMats.length > 0) {
@@ -3028,19 +3101,37 @@ export class TownSceneController {
         }
       });
       this.windmillRotors = rotors;
+      this.defenseTurrets = turrets;
 
+      const towers: DefenseTowerAnchor[] = [];
+      let foundHospital: PlotId | null = null;
       const chimneys: THREE.Vector3[] = [];
       for (const s of structures) {
-        if (s.status === 'complete' && s.structureType === 'bakery') {
-          const meta = PLOT_META[s.plotId];
+        if (s.status !== 'complete') continue;
+        const meta = PLOT_META[s.plotId];
+        if (!meta) continue;
+        if (s.structureType === 'bakery') {
           const rotY = Math.atan2(-meta.x, -meta.z);
           const pos = new THREE.Vector3(0.78, 3.05, -0.55)
             .applyAxisAngle(_yAxis, rotY)
             .add(new THREE.Vector3(meta.x, 0, meta.z));
           chimneys.push(pos);
         }
+        if (isHospitalStructure(s) && !foundHospital) {
+          foundHospital = s.plotId;
+        }
+        if (isDefenseStructure(s)) {
+          towers.push({
+            x: meta.x,
+            y: s.structureType === 'watchtower' ? 3.5 : 2.9,
+            z: meta.z,
+            power: s.structureType === 'defense_wall' ? 15 + s.tier * 4 : 10 + s.tier * 3,
+          });
+        }
       }
       this.bakeryChimneys = chimneys;
+      this.defenseTowers = towers;
+      this.completedHospitalPlotId = foundHospital;
 
       // Guide any villager already stationed at a newly completed plot into its interior
       this.rigs.forEach((rig) => {
@@ -3100,16 +3191,34 @@ export class TownSceneController {
 
       rig.selectionRing.visible = agent.id === this.selectedAgentId;
       rig.activeRing.visible = agent.id === this.activeAgentId;
+      const nowInjured = agent.healthStatus === 'injured';
+      const injuryChanged = rig.isInjured !== nowInjured;
+      rig.isInjured = nowInjured;
+      rig.injuredBadgeGroup.visible = nowInjured;
 
-      if (rig.currentLocation !== agent.location || rig.currentPlotId !== agent.activePlotId) {
+      if (
+        rig.currentLocation !== agent.location ||
+        rig.currentPlotId !== agent.activePlotId ||
+        injuryChanged
+      ) {
         const slot = getAgentSlotOffset(agent.id, rig.slotIndex, _slotOffset);
-        const finalPos = this.computeAgentDestination(agent, rig.slotIndex);
+        let finalPos: THREE.Vector3;
+        if (nowInjured) {
+          if (this.completedHospitalPlotId && PLOT_META[this.completedHospitalPlotId]) {
+            const hm = PLOT_META[this.completedHospitalPlotId];
+            finalPos = new THREE.Vector3(hm.x + slot.x * 0.28, 0, hm.z + slot.z * 0.28);
+          } else {
+            finalPos = new THREE.Vector3(slot.x * 0.55, 0, -6.2 + slot.z * 0.55);
+          }
+        } else {
+          finalPos = this.computeAgentDestination(agent, rig.slotIndex);
+        }
         const midPoint = new THREE.Vector3(
           PLAZA_CENTER.x + slot.x * 0.45,
           0,
           PLAZA_CENTER.z + slot.z * 0.45,
         );
-        rig.waypoints = [midPoint, finalPos];
+        rig.waypoints = nowInjured ? [finalPos] : [midPoint, finalPos];
         rig.homeAnchor.copy(finalPos);
         rig.currentLocation = agent.location;
         rig.currentPlotId = agent.activePlotId;
@@ -3158,6 +3267,12 @@ export class TownSceneController {
     this.followActive = false;
     this.focusedCutawayId = 'landmark:signal_relay';
     this.cameraTargetGoal = SIGNAL_RELAY_POS.clone().setY(1.4);
+  }
+
+  public focusRaiderCamp(): void {
+    this.followActive = false;
+    this.focusedCutawayId = null;
+    this.cameraTargetGoal = RAIDER_CAMP_POS.clone().setY(1.2);
   }
 
   public focusBiome(biomeId: BiomeId): void {
@@ -3637,6 +3752,23 @@ export class TownSceneController {
       for (const rotor of this.windmillRotors) {
         rotor.rotation.z -= delta * rotorSpeed;
       }
+      if (this.defenseTurrets.length > 0 && this.raidState.active) {
+        for (let t = 0; t < this.defenseTurrets.length; t++) {
+          const turret = this.defenseTurrets[t];
+          const parentRot = turret.parent ? turret.parent.rotation.y : 0;
+          turret.getWorldPosition(_turretWorldPos);
+          const worldAngle = Math.atan2(
+            RAIDER_CAMP_POS.x - _turretWorldPos.x,
+            RAIDER_CAMP_POS.z - _turretWorldPos.z,
+          );
+          const localDesired = worldAngle - parentRot;
+          const diff = Math.atan2(
+            Math.sin(localDesired - turret.rotation.y),
+            Math.cos(localDesired - turret.rotation.y),
+          );
+          turret.rotation.y += diff * Math.min(1, delta * 4.5);
+        }
+      }
       if (this.railwayHandle?.group.visible) {
         this.railwayHandle.update(delta, elapsed);
       }
@@ -3812,7 +3944,8 @@ export class TownSceneController {
           } else {
             rig.isMoving = true;
             _moveVec.normalize();
-            const step = Math.min(dist, walkSpeed * delta);
+            const agentSpeed = rig.isInjured ? walkSpeed * 0.45 : walkSpeed;
+            const step = Math.min(dist, agentSpeed * delta);
             rig.root.position.addScaledVector(_moveVec, step);
 
             rig.facingAngle = Math.atan2(_moveVec.x, _moveVec.z);
@@ -3890,6 +4023,10 @@ export class TownSceneController {
           const s = 1 + Math.sin(elapsed * 4) * 0.08;
           rig.activeRing.scale.set(s, s, 1);
         }
+        if (rig.injuredBadgeGroup.visible) {
+          rig.injuredBadgeGroup.position.y = 2.08 + Math.sin(elapsed * 4.5 + rig.slotIndex) * 0.07;
+          rig.injuredBadgeGroup.rotation.y = elapsed * 1.6;
+        }
 
         _projVec.set(rig.root.position.x, 2.38, rig.root.position.z);
         _projVec.project(this.camera);
@@ -3955,6 +4092,42 @@ export class TownSceneController {
         this.lifeHandle.update(delta, elapsed, this.timeOfDay, this.weatherMode, this.dogVillagerCoords);
       }
 
+      if (this.raiderHandle) {
+        let rIdx = 0;
+        this.rigs.forEach((rig) => {
+          if (rIdx >= this.raiderVillagerCoords.length) {
+            this.raiderVillagerCoords.push({
+              id: rig.id,
+              x: rig.root.position.x,
+              z: rig.root.position.z,
+              injured: rig.isInjured,
+            });
+          } else {
+            const slot = this.raiderVillagerCoords[rIdx];
+            slot.id = rig.id;
+            slot.x = rig.root.position.x;
+            slot.z = rig.root.position.z;
+            slot.injured = rig.isInjured;
+          }
+          rIdx++;
+        });
+        this.raiderVillagerCoords.length = rIdx;
+        const vanceRig = this.rigs.get('commander_vance');
+        const vanceDefending = Boolean(vanceRig && !vanceRig.isInjured);
+        this.raiderHandle.update({
+          delta,
+          elapsed,
+          active: this.raidState.active,
+          tactic: this.raidState.tactic,
+          campHpRatio: this.raidState.campHp / Math.max(1, this.raidState.campMaxHp),
+          villagerCoords: this.raiderVillagerCoords,
+          defenseTowers: this.defenseTowers,
+          vanceDefending,
+          onRaiderImpact: (x, z) => this.callbacks.onRaiderImpact?.(x, z),
+          onDefenseHitCamp: (dmg) => this.callbacks.onDefenseHitCamp?.(dmg),
+        });
+      }
+
       this.renderer.render(this.scene, this.camera);
 
       if (this.isSoftwareGl) {
@@ -3965,6 +4138,18 @@ export class TownSceneController {
     };
 
     this.frameId = window.requestAnimationFrame(tick);
+  }
+
+  public syncRaidState(next: EnemyRaidState): void {
+    const wasActive = this.raidState.active;
+    this.raidState = next;
+    if (wasActive && !next.active && next.campHp <= 0) {
+      this.raiderHandle?.triggerCampVictoryBurst();
+    }
+  }
+
+  public triggerRaidVictoryBurst(): void {
+    this.raiderHandle?.triggerCampVictoryBurst();
   }
 
   public setDecorPacks(packs: DecorPackId[]): void {

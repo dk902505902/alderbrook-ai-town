@@ -1248,17 +1248,19 @@ async function createServer() {
         : [
             `You are Mayor Sterling, the warm, decisive Rank 1 leader of ${townName} AI Town.`,
             'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-            'Valid action.type values: "none", "build", "hire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "toggle_auto".',
-            '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave") if a biome was specified.',
-            '- Use "hire" to recruit workers (e.g. researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
+            'Valid action.type values: "none", "build", "hire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "toggle_auto", "trigger_raid", "toggle_raids".',
+            '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Town Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave") if a biome was specified.',
+            '- Use "hire" to recruit workers (e.g. medic, researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
             '- Use "decree" for town-wide announcements, festivals, or civic orders. Set action.decree.',
             '- Use "create_town" when the player asks to create/start a NEW saved town or city (never overwrites existing towns). Set action.townName to the new town name.',
             '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest" for Dense Forest, "desert" for Desert Dunes, "cave" for Crystal Mountain Cave). Set action.biome.',
             '- Use "build_road" when asked to build/lay cobblestone roads to a building, plot, or outer biome. Set action.roadTarget.',
             '- Use "extend_rail" when asked to extend the train track, railway spur, or outer Frontier Depot stop.',
             '- Use "toggle_auto" when asked to turn Automatic City-Builder mode ON or OFF (e.g., "Mayor go automatic", "Stop automatic"). Set action.autoEnabled (boolean).',
+            '- Use "trigger_raid" when asked to trigger/start an enemy raider attack wave.',
+            '- Use "toggle_raids" when asked to turn Enemy Raids ON or OFF / switch to peaceful mode. Set action.raidsEnabled (boolean).',
             '- Otherwise set action.type to "none".',
-            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree|create_town|expand_biome|build_road|extend_rail|toggle_auto","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true}}',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|decree|create_town|expand_biome|build_road|extend_rail|toggle_auto|trigger_raid|toggle_raids","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
           ].join('\n');
 
     const webResultsBlock =
@@ -1355,6 +1357,8 @@ async function createServer() {
         'build_road',
         'extend_rail',
         'toggle_auto',
+        'trigger_raid',
+        'toggle_raids',
       ]);
       const actionType = allowedTypes.has(rawType) ? rawType : 'none';
       const rawBiome = typeof rawAction.biome === 'string' ? rawAction.biome.trim().toLowerCase() : '';
@@ -1388,6 +1392,8 @@ async function createServer() {
               : undefined,
           autoEnabled:
             typeof rawAction.autoEnabled === 'boolean' ? rawAction.autoEnabled : undefined,
+          raidsEnabled:
+            typeof rawAction.raidsEnabled === 'boolean' ? rawAction.raidsEnabled : undefined,
         },
         modelUsed: result.modelUsed || modelName,
         keyAttemptIndex: result.keyAttemptIndex,
@@ -1395,6 +1401,93 @@ async function createServer() {
     } catch (error) {
       res.status(502).json({
         error: error instanceof Error ? error.message : 'Failed to reach Mayor AI.',
+      });
+    }
+  });
+
+  app.post('/api/town/raider-tactic', async (req: Request, res: Response) => {
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
+      res.status(400).json({
+        error: 'No AI API key configured for Enemy Raider Commander.',
+        code: 'MISSING_API_KEY',
+      });
+      return;
+    }
+
+    const body = (req.body ?? {}) as {
+      townName?: unknown;
+      waveNumber?: unknown;
+      campHp?: unknown;
+      campMaxHp?: unknown;
+      defenseCount?: unknown;
+      hasHospital?: unknown;
+      injuredCount?: unknown;
+      population?: unknown;
+    };
+
+    const townName = String(body.townName ?? 'Alderbrook').trim().slice(0, 48) || 'Alderbrook';
+    const waveNumber = Math.max(1, Math.min(99, Number(body.waveNumber ?? 1) || 1));
+    const campHp = Math.max(0, Math.min(500, Number(body.campHp ?? 100) || 100));
+    const campMaxHp = Math.max(1, Math.min(500, Number(body.campMaxHp ?? 100) || 100));
+    const defenseCount = Math.max(0, Math.min(20, Number(body.defenseCount ?? 0) || 0));
+    const hasHospital = Boolean(body.hasHospital);
+    const injuredCount = Math.max(0, Math.min(15, Number(body.injuredCount ?? 0) || 0));
+    const population = Math.max(1, Math.min(15, Number(body.population ?? 5) || 5));
+
+    const systemPrompt = [
+      'You are Captain Ironjaw, the playful, dramatic cartoon Raider Commander camping outside a cozy low-poly town.',
+      'Keep everything lighthearted, cartoon, and non-graphic (your iron cannon fires bouncy spark cannonballs to test the town defenses — never lethal or grim).',
+      'Choose ONE tactic from: "shell_perimeter" (rapid volleys across outer plots), "target_workers" (aim playful sparks near busy workers), "siege_plaza" (lob high arcs toward central square), or "regroup" (steady slow shots while bracing camp).',
+      'Return ONLY raw JSON: {"tactic":"shell_perimeter|target_workers|siege_plaza|regroup","commanderOrder":"short playful battle cry under 14 words"}',
+    ].join('\n');
+
+    const userPrompt = `Town: ${townName} | Wave #${waveNumber} | Raider Camp HP: ${campHp}/${campMaxHp} | Town Defense Towers/Walls: ${defenseCount} | Town Hospital Built: ${hasHospital ? 'Yes' : 'No'} | Villagers: ${population} (${injuredCount} resting/injured). Pick your next cartoon raid tactic!`;
+
+    try {
+      const result = await callChatCompletionsWithKeyPool(
+        baseUrl,
+        apiKeys,
+        {
+          model: modelName,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.75,
+          max_tokens: 140,
+          response_format: { type: 'json_object' },
+        },
+        true,
+      );
+
+      if ('errorText' in result && result.errorText) {
+        res.status(result.status >= 400 ? result.status : 502).json({
+          error: `Raider AI error (${result.status}): ${result.errorText}`,
+        });
+        return;
+      }
+
+      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
+      const content = choices?.[0]?.message?.content || '';
+      const parsed = extractJsonObject(content);
+      const rawTactic = String(parsed.tactic ?? 'shell_perimeter').trim().toLowerCase();
+      const tactic =
+        rawTactic === 'target_workers' || rawTactic === 'siege_plaza' || rawTactic === 'regroup'
+          ? rawTactic
+          : 'shell_perimeter';
+      const commanderOrder =
+        String(parsed.commanderOrder ?? '').trim().slice(0, 120) ||
+        'Load the brass cannon — let us test their stone walls!';
+
+      res.json({
+        tactic,
+        commanderOrder,
+        modelUsed: result.modelUsed || modelName,
+      });
+    } catch (error) {
+      res.status(502).json({
+        error: error instanceof Error ? error.message : 'Failed to reach Raider AI.',
       });
     }
   });

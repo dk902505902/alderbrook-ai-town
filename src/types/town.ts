@@ -51,6 +51,8 @@ export type StructureType =
   | 'granary'
   | 'pavilion'
   | 'clock_tower'
+  | 'hospital'
+  | 'defense_wall'
   | 'custom';
 
 export type StructureStatus = 'building' | 'complete';
@@ -359,6 +361,42 @@ export interface TownExpansionState {
   autoMode: boolean;
 }
 
+export type AgentHealthStatus = 'healthy' | 'injured';
+
+export type RaiderTactic = 'shell_perimeter' | 'target_workers' | 'siege_plaza' | 'regroup';
+
+export interface EnemyRaidState {
+  enabled: boolean;
+  active: boolean;
+  waveNumber: number;
+  campHp: number;
+  campMaxHp: number;
+  tactic: RaiderTactic;
+  commanderName: string;
+  commanderOrder: string;
+  modelUsed: string;
+  raidsRepelled: number;
+  lastEventMs: number;
+  nextWaveAtMs?: number | null;
+}
+
+export function createDefaultEnemyRaidState(enabled = false): EnemyRaidState {
+  return {
+    enabled,
+    active: false,
+    waveNumber: 0,
+    campHp: 100,
+    campMaxHp: 100,
+    tactic: 'shell_perimeter',
+    commanderName: 'Captain Ironjaw',
+    commanderOrder: 'Standing by beyond the western ridge.',
+    modelUsed: 'Instant Tactics · 0 tokens',
+    raidsRepelled: 0,
+    lastEventMs: 0,
+    nextWaveAtMs: null,
+  };
+}
+
 export interface AgentRecord {
   id: AgentId;
   name: string;
@@ -373,6 +411,9 @@ export interface AgentRecord {
   hatStyle?: HatStyle;
   outfitColors?: OutfitPalette;
   isHired?: boolean;
+  /** Local non-lethal rescue state — never causes permanent worker deletion */
+  healthStatus?: AgentHealthStatus;
+  injuredAtMs?: number;
   location: LocationId;
   activePlotId: PlotId | null;
   targetAgent: string | null;
@@ -518,6 +559,8 @@ export function getWeatherSeasonEffect(
 export type AIProviderPreset = 'gemini' | 'openrouter' | 'groq' | 'openai' | 'custom';
 export type AIKeyStrategy = 'round_robin' | 'failover_only';
 export const EXTERNAL_CLI_PROVIDER_ID = 'external_cli' as const;
+export const INSTANT_TACTICS_PROVIDER_ID = 'instant_tactics' as const;
+export const ENEMY_RAIDER_AGENT_ID = 'enemy_raider_commander' as const;
 
 export interface AIProviderEntry {
   /** Stable unique ID (e.g. 'gemini', 'groq', 'openrouter', 'openai', 'custom_173...') */
@@ -679,6 +722,8 @@ export const ALL_STRUCTURE_TYPES: StructureType[] = [
   'granary',
   'pavilion',
   'clock_tower',
+  'hospital',
+  'defense_wall',
 ];
 
 export const PLOT_META: Record<
@@ -770,6 +815,18 @@ export const STRUCTURE_META: Record<
     color: '#a855f7',
     bonus: { prosperity: 2, order: 3, morale: 2 },
   },
+  hospital: {
+    label: 'Town Hospital',
+    category: 'Medical & Rescue',
+    color: '#ef4444',
+    bonus: { prosperity: 1, order: 2, morale: 5 },
+  },
+  defense_wall: {
+    label: 'Defense Wall & Turret',
+    category: 'Town Defense',
+    color: '#475569',
+    bonus: { prosperity: 0, order: 6, morale: 2 },
+  },
   custom: {
     label: 'Custom Civic Hall',
     category: 'Custom Project',
@@ -777,6 +834,22 @@ export const STRUCTURE_META: Record<
     bonus: { prosperity: 3, order: 2, morale: 3 },
   },
 };
+
+export function isHospitalStructure(
+  structure: Pick<TownStructure, 'structureType' | 'customLabel'>,
+): boolean {
+  if (structure.structureType === 'hospital') return true;
+  return /\b(hospital|clinic|infirmary|medic)\b/i.test(structure.customLabel || '');
+}
+
+export function isDefenseStructure(
+  structure: Pick<TownStructure, 'structureType' | 'customLabel'>,
+): boolean {
+  if (structure.structureType === 'defense_wall' || structure.structureType === 'watchtower') {
+    return true;
+  }
+  return /\b(defense|palisade|turret|fort|bastion|cannon|wall)\b/i.test(structure.customLabel || '');
+}
 
 export const CUSTOM_STYLE_COLORS: Record<CustomBuildingStyle, string> = {
   lab: '#06b6d4',

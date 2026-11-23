@@ -9,6 +9,7 @@ import {
   EyeOff,
   Gem,
   HeartHandshake,
+  HeartPulse,
   MapPin,
   MessageCircle,
   Mountain,
@@ -359,12 +360,21 @@ export function HierarchyPanel({
                   <div className="flex min-w-0 items-center gap-2">
                     <span
                       className="h-2.5 w-2.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: agent.accentColor }}
+                      style={{
+                        backgroundColor:
+                          agent.healthStatus === 'injured' ? '#fb7185' : agent.accentColor,
+                      }}
                       aria-hidden="true"
                     />
                     <span className="truncate font-display text-sm font-semibold text-white">
                       {agent.name}
                     </span>
+                    {agent.healthStatus === 'injured' && (
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-rose-200">
+                        <HeartPulse className="h-3 w-3" />
+                        <span>Injured</span>
+                      </span>
+                    )}
                   </div>
                   <span className="shrink-0 text-xs font-medium text-slate-400">
                     {placeLabel}
@@ -383,8 +393,14 @@ export function HierarchyPanel({
                   )}
                 </div>
 
-                <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-200">
-                  {agent.currentTask}
+                <p
+                  className={`mt-2 line-clamp-2 text-xs leading-relaxed ${
+                    agent.healthStatus === 'injured' ? 'text-rose-200' : 'text-slate-200'
+                  }`}
+                >
+                  {agent.healthStatus === 'injured'
+                    ? 'Injured (Needs Hospital) — walking safely to Town Hospital for care.'
+                    : agent.currentTask}
                 </p>
 
                 {resolvedModel.isOverride && !isSelected && (

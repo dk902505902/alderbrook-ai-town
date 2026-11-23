@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   Star,
+  Swords,
   Trash2,
   Wifi,
   X,
@@ -42,7 +43,9 @@ import {
 } from '../lib/webSearch.ts';
 import {
   DEFAULT_PROVIDER_CONFIG,
+  ENEMY_RAIDER_AGENT_ID,
   EXTERNAL_CLI_PROVIDER_ID,
+  INSTANT_TACTICS_PROVIDER_ID,
   type AgentRecord,
   type AIProviderConfig,
   type AIProviderEntry,
@@ -56,6 +59,8 @@ interface AIProvidersModalProps {
   agents: AgentRecord[];
   webhookUrl: string;
   hasServerDefaultKey: boolean;
+  enemyRaidsEnabled: boolean;
+  onToggleEnemyRaids: (next?: boolean) => void;
   onClose: () => void;
   onSave: (nextConfig: AIProviderConfig, nextWebhookUrl: string) => void;
   onSaveWebSearchConfig: (nextSearchConfig: WebSearchConfig) => void;
@@ -76,6 +81,7 @@ function encodeChoice(providerId: string, model: string): string {
 }
 
 const EXTERNAL_CLI_OPTION = encodeChoice(EXTERNAL_CLI_PROVIDER_ID, 'external-cli');
+const INSTANT_TACTICS_OPTION = encodeChoice(INSTANT_TACTICS_PROVIDER_ID, 'instant-tactics');
 
 export function AIProvidersModal({
   isOpen,
@@ -85,6 +91,8 @@ export function AIProvidersModal({
   agents,
   webhookUrl,
   hasServerDefaultKey,
+  enemyRaidsEnabled,
+  onToggleEnemyRaids,
   onClose,
   onSave,
   onSaveWebSearchConfig,
@@ -183,7 +191,7 @@ export function AIProvidersModal({
   }, [providers, hasServerDefaultKey]);
 
   const knownChoiceValues = useMemo(() => {
-    const set = new Set<string>([EXTERNAL_CLI_OPTION]);
+    const set = new Set<string>([EXTERNAL_CLI_OPTION, INSTANT_TACTICS_OPTION]);
     for (const g of presetOptionGroups) {
       for (const m of g.models) {
         set.add(encodeChoice(g.providerId, m));
@@ -1202,6 +1210,36 @@ export function AIProvidersModal({
             </div>
           </div>
 
+          {/* 2b. Quick Toggle: Enemy Raider AI & Town Defense */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/30 bg-rose-950/20 px-3.5 py-2.5">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <Swords className="h-4 w-4 shrink-0 text-rose-400" />
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-white">
+                  Enemy Raider AI &amp; Town Defense
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  {enemyRaidsEnabled
+                    ? 'Active: Low-poly raiders attack the perimeter · Workers are rescued at Town Hospital'
+                    : 'Peaceful Mode (OFF) — Enable anytime or say "Trigger enemy raid" to Mayor'}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onToggleEnemyRaids(!enemyRaidsEnabled)}
+              aria-pressed={enemyRaidsEnabled}
+              className={`inline-flex min-h-[38px] shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition-colors ${
+                enemyRaidsEnabled
+                  ? 'border-rose-400/70 bg-rose-500/25 text-rose-100 hover:bg-rose-500/35'
+                  : 'border-white/15 bg-slate-900 text-slate-300 hover:border-rose-400/40 hover:text-rose-200'
+              }`}
+            >
+              <Swords className="h-3.5 w-3.5" />
+              <span>Raids: {enemyRaidsEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+          </div>
+
           {/* 3. Collapsible Per-Character Models Section */}
           <div className="rounded-xl border border-white/10 bg-slate-950/55">
             <button
@@ -1214,12 +1252,12 @@ export function AIProvidersModal({
                 <Cpu className="h-4 w-4 shrink-0 text-amber-300" />
                 <div className="min-w-0">
                   <span className="block text-xs font-semibold text-white">
-                    Per-Character Models
+                    Per-Character Models (incl. Enemy Raider AI)
                   </span>
                   <span className="block truncate text-[11px] text-slate-400">
                     {overrideCount > 0
-                      ? `${overrideCount} of ${agents.length} villagers using custom models`
-                      : `All ${agents.length} villagers using ${defaultProvider.name}`}
+                      ? `${overrideCount} custom character model${overrideCount === 1 ? '' : 's'} assigned`
+                      : `All villagers & Enemy Raider using ${defaultProvider.name}`}
                   </span>
                 </div>
               </div>
@@ -1241,7 +1279,7 @@ export function AIProvidersModal({
               <div className="space-y-3 border-t border-white/10 px-3.5 pt-3 pb-3.5">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] leading-snug text-slate-400">
-                    Route any villager to any configured provider &amp; key pool.
+                    Route any villager or the Enemy Raider Commander to any configured provider &amp; key pool.
                   </p>
                   <button
                     type="button"
@@ -1253,6 +1291,110 @@ export function AIProvidersModal({
                     <span>Reset All to Default</span>
                   </button>
                 </div>
+
+                {/* Dedicated Enemy Raider Commander AI Slot */}
+                {(() => {
+                  const raiderEntry = draft.characterModels?.[ENEMY_RAIDER_AGENT_ID] ?? null;
+                  const raiderEncoded =
+                    raiderEntry && raiderEntry.model
+                      ? encodeChoice(raiderEntry.providerId, raiderEntry.model)
+                      : '';
+                  const isRaiderCustom =
+                    Boolean(customRowIds[ENEMY_RAIDER_AGENT_ID]) ||
+                    (Boolean(raiderEncoded) && !knownChoiceValues.has(raiderEncoded));
+                  const raiderSelectVal = isRaiderCustom ? CUSTOM_SENTINEL : raiderEncoded;
+
+                  return (
+                    <div className="rounded-lg border border-rose-500/40 bg-rose-950/25 p-2.5">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Swords className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                          <div className="min-w-0">
+                            <div className="truncate text-xs font-semibold text-rose-100">
+                              Enemy Raider Commander
+                            </div>
+                            <div className="truncate text-[10px] text-rose-300/80">
+                              Enemy AI · Controls raid tactics &amp; cannon volleys
+                            </div>
+                          </div>
+                        </div>
+
+                        <select
+                          aria-label="AI model for Enemy Raider Commander"
+                          value={raiderSelectVal}
+                          onChange={(e) =>
+                            handleCharacterSelectChange(ENEMY_RAIDER_AGENT_ID, e.target.value)
+                          }
+                          className={`min-h-[40px] w-full rounded-lg border bg-slate-950 px-2.5 text-xs focus:border-rose-400 focus:outline-none sm:w-52 sm:shrink-0 ${
+                            raiderEntry?.providerId === INSTANT_TACTICS_PROVIDER_ID
+                              ? 'border-emerald-400/60 text-emerald-200'
+                              : raiderEntry?.providerId === EXTERNAL_CLI_PROVIDER_ID
+                                ? 'border-cyan-400/60 text-cyan-200'
+                                : raiderEntry
+                                  ? 'border-rose-400/60 text-rose-100'
+                                  : 'border-white/15 text-slate-300'
+                          }`}
+                        >
+                          <option value="">
+                            Global Default ({formatCompactModelName(defaultProvider.defaultModel)})
+                          </option>
+                          <option value={INSTANT_TACTICS_OPTION}>
+                            Instant Zero-Token Tactics (0 API tokens)
+                          </option>
+                          <option value={EXTERNAL_CLI_OPTION}>
+                            External CLI Agent (0 API tokens)
+                          </option>
+                          {presetOptionGroups.map((group) => (
+                            <optgroup key={group.providerId} label={group.groupLabel}>
+                              {group.models.map((model) => (
+                                <option
+                                  key={encodeChoice(group.providerId, model)}
+                                  value={encodeChoice(group.providerId, model)}
+                                >
+                                  {group.label} · {formatCompactModelName(model)}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
+                          <option value={CUSTOM_SENTINEL}>Custom model ID...</option>
+                        </select>
+                      </div>
+
+                      {isRaiderCustom && (
+                        <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-5">
+                          <select
+                            aria-label="Custom provider for Enemy Raider Commander"
+                            value={raiderEntry?.providerId ?? defaultProvider.id}
+                            onChange={(e) =>
+                              handleCharacterCustomUpdate(ENEMY_RAIDER_AGENT_ID, {
+                                providerId: e.target.value,
+                              })
+                            }
+                            className="min-h-[38px] rounded-lg border border-white/10 bg-slate-950 px-2 text-xs text-slate-200 focus:border-rose-400 focus:outline-none sm:col-span-2"
+                          >
+                            {providers.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="text"
+                            aria-label="Custom model name for Enemy Raider Commander"
+                            value={raiderEntry?.model ?? ''}
+                            onChange={(e) =>
+                              handleCharacterCustomUpdate(ENEMY_RAIDER_AGENT_ID, {
+                                model: e.target.value,
+                              })
+                            }
+                            placeholder="Enter exact model ID..."
+                            className="min-h-[38px] rounded-lg border border-white/10 bg-slate-950 px-2.5 text-xs text-white placeholder:text-slate-500 focus:border-rose-400 focus:outline-none sm:col-span-3"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Compact Villager Rows */}
                 <div className="space-y-2">

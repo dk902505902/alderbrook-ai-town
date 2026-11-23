@@ -136,6 +136,8 @@ const BASE_GOLD_PER_TURN: Record<StructureType, number> = {
   granary: 20,
   pavilion: 12,
   clock_tower: 16,
+  hospital: 15,
+  defense_wall: 12,
   custom: 22,
 };
 
@@ -246,8 +248,16 @@ export function computeResourceRates(
     if (s.structureType === 'bakery' || s.structureType === 'windmill' || s.structureType === 'granary' || s.structureType === 'greenhouse') {
       harvest += 3 * t;
     }
-    if (s.structureType === 'watchtower' || s.structureType === 'clock_tower' || s.structureType === 'library') {
+    if (
+      s.structureType === 'watchtower' ||
+      s.structureType === 'clock_tower' ||
+      s.structureType === 'library' ||
+      s.structureType === 'defense_wall'
+    ) {
       stone += 2 * t;
+    }
+    if (s.structureType === 'hospital') {
+      harvest += 2 * t;
     }
     if (s.structureType === 'pavilion' || s.structureType === 'granary') {
       timber += 2 * t;
@@ -1040,14 +1050,20 @@ export type AgentActivityIcon =
   | 'guard'
   | 'council'
   | 'rest'
-  | 'chat';
+  | 'chat'
+  | 'injured'
+  | 'medic';
 
 export function classifyAgentActivity(
   agent: AgentRecord,
   timeOfDay: TimeOfDay,
   structures: TownStructure[],
 ): { icon: AgentActivityIcon; shortLabel: string } {
-  if (timeOfDay === 'night' && agent.id !== 'commander_vance' && !/watch|guard|patrol/i.test(agent.role)) {
+  if (agent.healthStatus === 'injured') {
+    return { icon: 'injured', shortLabel: 'Injured (Needs Hospital)' };
+  }
+
+  if (timeOfDay === 'night' && agent.id !== 'commander_vance' && !/watch|guard|patrol|medic|nurse|doctor/i.test(agent.role)) {
     return { icon: 'rest', shortLabel: 'Resting' };
   }
 
@@ -1060,6 +1076,9 @@ export function classifyAgentActivity(
 
   const hay = `${agent.role} ${agent.currentTask} ${assignedStruct ? getStructureDisplayLabel(assignedStruct) : ''}`.toLowerCase();
 
+  if (/(medic|nurse|doctor|hospital|clinic|heal|triage|infirmary)/i.test(hay)) {
+    return { icon: 'medic', shortLabel: 'Healing' };
+  }
   if (/(research|lab|observatory|science|archive|library|study)/i.test(hay)) {
     return { icon: 'research', shortLabel: 'Researching' };
   }
@@ -1072,8 +1091,8 @@ export function classifyAgentActivity(
   if (/(farm|greenhouse|windmill|granary|harvest|gather|stone|timber|haul)/i.test(hay)) {
     return { icon: 'harvest', shortLabel: 'Gathering' };
   }
-  if (/(guard|patrol|watch|security|commander|secure|shield)/i.test(hay)) {
-    return { icon: 'guard', shortLabel: 'Patrolling' };
+  if (/(guard|patrol|watch|security|commander|secure|shield|turret|defense|raider|defend)/i.test(hay)) {
+    return { icon: 'guard', shortLabel: 'Defending' };
   }
   if (agent.rank === 1 || /(mayor|decree|council|charter|survey)/i.test(hay)) {
     return { icon: 'council', shortLabel: 'Leading' };

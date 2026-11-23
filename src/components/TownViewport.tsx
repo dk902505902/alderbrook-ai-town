@@ -3,16 +3,19 @@ import {
   Check,
   Coffee,
   Compass,
+  Cross,
   Crown,
   Eye,
   EyeOff,
   FlaskConical,
   Footprints,
   Hammer,
+  HeartPulse,
   MessageCircle,
   Moon,
   Pencil,
   Shield,
+  Swords,
   TrainFront,
   Trash2,
   UserCheck,
@@ -38,6 +41,7 @@ import {
   type BiomeId,
   type CameraMode,
   type DecorPackId,
+  type EnemyRaidState,
   type GraphicsQuality,
   type LocationId,
   type PlotId,
@@ -80,12 +84,18 @@ interface TownViewportProps {
     | { type: 'biome'; id: BiomeId; nonce: number }
     | { type: 'rail_spur'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
+    | { type: 'raider_camp'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null;
   signalRelayPulseNonce?: number;
   triggerTrainNonce?: number;
   decorPacks?: DecorPackId[];
   triggerCelebrationNonce?: number;
+  raidState: EnemyRaidState;
+  onRaiderImpact?: (x: number, z: number) => void;
+  onDefenseHitCamp?: (damage: number) => void;
+  onFocusRaiderCamp?: () => void;
+  onToggleRaids?: (next?: boolean) => void;
   onSelectAgent: (agentId: AgentId) => void;
   onTogglePovAgent: (agentId: AgentId) => void;
   onToggleTrainPov?: (seat: 'cab' | 'passenger') => void;
@@ -115,6 +125,8 @@ const ACTIVITY_ICON_MAP: Record<AgentActivityIcon, typeof Hammer> = {
   council: Crown,
   rest: Moon,
   chat: MessageCircle,
+  injured: HeartPulse,
+  medic: Cross,
 };
 
 const ACTIVITY_COLOR_MAP: Record<AgentActivityIcon, string> = {
@@ -126,6 +138,8 @@ const ACTIVITY_COLOR_MAP: Record<AgentActivityIcon, string> = {
   council: 'text-yellow-300',
   rest: 'text-indigo-300',
   chat: 'text-slate-300',
+  injured: 'text-rose-400',
+  medic: 'text-emerald-300',
 };
 
 export function TownViewport({
@@ -154,6 +168,11 @@ export function TownViewport({
   triggerTrainNonce = 0,
   decorPacks = [],
   triggerCelebrationNonce = 0,
+  raidState,
+  onRaiderImpact,
+  onDefenseHitCamp,
+  onFocusRaiderCamp,
+  onToggleRaids,
   onSelectAgent,
   onTogglePovAgent,
   onToggleTrainPov,
@@ -226,6 +245,8 @@ export function TownViewport({
     onMinimapUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
+    onRaiderImpact,
+    onDefenseHitCamp,
   });
   callbacksRef.current = {
     onSelectAgent,
@@ -237,6 +258,8 @@ export function TownViewport({
     onMinimapUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
+    onRaiderImpact,
+    onDefenseHitCamp,
   };
 
   useEffect(() => {
@@ -262,6 +285,8 @@ export function TownViewport({
         onContextRestored: () => setContextLost(false),
         onMinimapUpdate: (coords) => callbacksRef.current.onMinimapUpdate?.(coords),
         onUserOrbitStart: () => callbacksRef.current.onUserOrbitStart?.(),
+        onRaiderImpact: (x, z) => callbacksRef.current.onRaiderImpact?.(x, z),
+        onDefenseHitCamp: (dmg) => callbacksRef.current.onDefenseHitCamp?.(dmg),
         onLabelUpdate: (positions: Record<AgentId, ProjectedLabel>) => {
           for (const [id, pos] of Object.entries(positions)) {
             const el = labelRefs.current[id];
@@ -412,6 +437,10 @@ export function TownViewport({
   }, [triggerCelebrationNonce]);
 
   useEffect(() => {
+    controllerRef.current?.syncRaidState(raidState);
+  }, [raidState]);
+
+  useEffect(() => {
     if (!focusRequest || !controllerRef.current) return;
     if (focusRequest.type === 'agent') {
       controllerRef.current.focusAgent(focusRequest.id);
@@ -425,6 +454,8 @@ export function TownViewport({
       controllerRef.current.focusRailSpur();
     } else if (focusRequest.type === 'signal_relay') {
       controllerRef.current.focusSignalRelay();
+    } else if (focusRequest.type === 'raider_camp') {
+      controllerRef.current.focusRaiderCamp();
     } else {
       controllerRef.current.resetCamera();
     }
@@ -489,6 +520,8 @@ export function TownViewport({
           const ActIcon = ACTIVITY_ICON_MAP[activity.icon];
           const actColor = ACTIVITY_COLOR_MAP[activity.icon];
 
+          const isInjured = agent.healthStatus === 'injured';
+
           return (
             <button
               key={agent.id}
@@ -497,7 +530,7 @@ export function TownViewport({
                 labelRefs.current[agent.id] = el;
               }}
               onClick={() => onTogglePovAgent(agent.id)}
-              title={`${agent.name} (${activity.shortLabel}) · Tap for First-Person POV`}
+              title={`${agent.name} (${isInjured ? 'Injured · Needs Hospital' : activity.shortLabel}) · Tap for First-Person POV`}
               style={{ opacity: 0 }}
               className="absolute top-0 left-0 flex flex-col items-center transition-opacity duration-150 focus:outline-none"
             >
@@ -508,25 +541,97 @@ export function TownViewport({
               )}
               <div
                 className={`flex items-center gap-1.5 rounded-lg border px-2 py-0.5 text-[11px] font-semibold tracking-tight whitespace-nowrap shadow-md ${
-                  isSelected
-                    ? 'border-amber-400 bg-slate-950 text-white'
-                    : isActive
-                      ? 'border-white/40 bg-slate-950/92 text-white'
-                      : 'border-white/15 bg-slate-950/85 text-slate-200'
+                  isInjured
+                    ? 'border-rose-400 bg-rose-950/95 text-rose-100'
+                    : isSelected
+                      ? 'border-amber-400 bg-slate-950 text-white'
+                      : isActive
+                        ? 'border-white/40 bg-slate-950/92 text-white'
+                        : 'border-white/15 bg-slate-950/85 text-slate-200'
                 }`}
               >
                 <span
                   className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: agent.accentColor }}
+                  style={{ backgroundColor: isInjured ? '#fb7185' : agent.accentColor }}
                   aria-hidden="true"
                 />
                 <span>{agent.name}</span>
-                <ActIcon className={`h-3 w-3 shrink-0 ${actColor}`} aria-hidden="true" />
+                {isInjured ? (
+                  <span className="inline-flex items-center gap-0.5 rounded bg-rose-500/25 px-1 text-[10px] font-bold text-rose-200">
+                    + Injured
+                  </span>
+                ) : (
+                  <ActIcon className={`h-3 w-3 shrink-0 ${actColor}`} aria-hidden="true" />
+                )}
               </div>
             </button>
           );
         })}
       </div>
+
+      {/* Active Raider Alert & Defense Bar (Compact, non-obtrusive, no backdrop-blur) */}
+      {raidState.active && cameraMode === 'orbit' && !selectedPlotId && (
+        <div className="fixed top-18 left-1/2 z-20 flex w-[calc(100%-1.5rem)] max-w-md -translate-x-1/2 flex-col gap-1.5 rounded-2xl border border-rose-500/50 bg-slate-950/95 px-3 py-2 shadow-2xl md:top-20">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Swords className="h-4 w-4 shrink-0 text-rose-400" />
+              <div className="min-w-0 leading-tight">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                  <span className="truncate">
+                    Wave {raidState.waveNumber} · {raidState.commanderName}
+                  </span>
+                  <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+                    {raidState.modelUsed}
+                  </span>
+                </div>
+                <div className="truncate text-[11px] text-rose-200/90">
+                  {raidState.commanderOrder}
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              {onFocusRaiderCamp && (
+                <button
+                  type="button"
+                  onClick={onFocusRaiderCamp}
+                  className="inline-flex min-h-[32px] items-center rounded-lg border border-rose-400/40 bg-rose-500/15 px-2 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/25"
+                >
+                  Camp
+                </button>
+              )}
+              {onToggleRaids && (
+                <button
+                  type="button"
+                  onClick={() => onToggleRaids(false)}
+                  title="Turn off Enemy Raids (Peaceful Mode)"
+                  className="inline-flex min-h-[32px] items-center rounded-lg border border-white/15 bg-slate-900 px-2 text-[11px] font-medium text-slate-300 hover:text-white"
+                >
+                  OFF
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
+              <div
+                className="h-full rounded-full bg-rose-500 transition-all duration-300"
+                style={{
+                  width: `${Math.max(0, Math.min(100, Math.round((raidState.campHp / Math.max(1, raidState.campMaxHp)) * 100)))}%`,
+                }}
+              />
+            </div>
+            <span className="font-mono-tabular text-[10px] font-semibold text-slate-300">
+              Camp {Math.max(0, Math.round(raidState.campHp))}/{raidState.campMaxHp} HP
+            </span>
+            {agents.some((a) => a.healthStatus === 'injured') && (
+              <span className="inline-flex items-center gap-1 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-rose-200">
+                <HeartPulse className="h-3 w-3" />
+                {agents.filter((a) => a.healthStatus === 'injured').length} Injured
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Contextual Camera Mode Banner (Villager POV / Train Ride / Free-Roam Walk / Scenic Tour) */}
       {cameraMode !== 'orbit' && (

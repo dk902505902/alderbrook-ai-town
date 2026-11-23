@@ -12,6 +12,7 @@ import {
   Plus,
   Send,
   Settings,
+  Swords,
   Volume2,
   VolumeX,
   X,
@@ -43,6 +44,7 @@ import {
   type AIProviderConfig,
   type BiomeId,
   type CustomBuildingStyle,
+  type EnemyRaidState,
   type StructureType,
   type TimeOfDay,
   type TownLogItem,
@@ -73,6 +75,7 @@ interface MayorChatModalProps {
   roads: string[];
   railSpurBuilt: boolean;
   autoMode: boolean;
+  raidState: EnemyRaidState;
   agents: AgentRecord[];
   structures: TownStructure[];
   logs: TownLogItem[];
@@ -86,6 +89,8 @@ interface MayorChatModalProps {
   onClose: () => void;
   onTogglePlay: () => void;
   onToggleAutoMode: (next?: boolean) => void;
+  onToggleEnemyRaids: (next?: boolean) => void;
+  onTriggerEnemyRaid: () => Promise<MayorBuildResult>;
   onSwitchTown: (townId: string) => Promise<void>;
   onCreateTown: (name: string) => Promise<MayorBuildResult>;
   onExpandBiome: (biome: BiomeId) => Promise<MayorBuildResult>;
@@ -125,7 +130,9 @@ interface MayorActionPlan {
     | 'expand_biome'
     | 'build_road'
     | 'extend_rail'
-    | 'toggle_auto';
+    | 'toggle_auto'
+    | 'trigger_raid'
+    | 'toggle_raids';
   target?: string;
   workerPrompt?: string;
   decree?: string;
@@ -133,6 +140,7 @@ interface MayorActionPlan {
   biome?: BiomeId;
   roadTarget?: string;
   autoEnabled?: boolean;
+  raidsEnabled?: boolean;
 }
 
 interface BrowserSpeechRecognition {
@@ -147,10 +155,11 @@ interface BrowserSpeechRecognition {
 }
 
 const BASE_STARTER_CHIPS = [
+  'Build Town Hospital',
+  'Build Defense Wall',
+  'Trigger enemy raid',
   'Expand map further',
   'Extend train track',
-  'Build a Research Lab',
-  'Build a road',
   'Status report',
 ];
 
@@ -197,9 +206,25 @@ function mapBuildingRequest(rawText: string): {
   const lower = rawText.toLowerCase();
   const preferredBiome = detectMentionedBiome(rawText);
 
+  // Dedicated Town Defense & Rescue buildings (checked before generic custom regex)
+  if (/\b(hospital|clinic|infirmary|medical|medic center|healing)\b/.test(lower)) {
+    return {
+      structureType: 'hospital',
+      displayLabel: STRUCTURE_META.hospital.label,
+      preferredBiome,
+    };
+  }
+  if (/\b(defense wall|palisade|cannon turret|turret|bastion|defense turret|wall)\b/.test(lower)) {
+    return {
+      structureType: 'defense_wall',
+      displayLabel: STRUCTURE_META.defense_wall.label,
+      preferredBiome,
+    };
+  }
+
   // Explicit custom buildings (Research Lab, Observatory, Cafe Shop, Tavern, Forge, Guild, Cabin, etc.)
   if (
-    /\b(research|lab|laboratory|science|academy|university|observatory|telescope|astro|planetarium|cafe|coffee|espresso|tea|bistro|tavern|inn|pub|forge|smith|foundry|smithy|workshop|guild|hall|clinic|hospital|museum|studio|cabin|lodge|outpost|camp)\b/.test(
+    /\b(research|lab|laboratory|science|academy|university|observatory|telescope|astro|planetarium|cafe|coffee|espresso|tea|bistro|tavern|inn|pub|forge|smith|foundry|smithy|workshop|guild|hall|museum|studio|cabin|lodge|outpost|camp)\b/.test(
       lower,
     )
   ) {
@@ -404,6 +429,31 @@ function parseLocalIntent(
 ): { reply: string; action: MayorActionPlan } | null {
   const lower = text.toLowerCase();
 
+  // 0) Enemy Raids trigger / toggle
+  if (
+    /\b(raid|raids|raider|raiders|attack|invade|enemy)\b/.test(lower) &&
+    /\b(trigger|start|launch|spawn|send|begin|test|incoming)\b/.test(lower)
+  ) {
+    return {
+      reply:
+        'Sound the bells! Raiders spotted on the southwest ridge! Mobilizing Commander Vance, Town Hospital medics, and defense turrets immediately!',
+      action: { type: 'trigger_raid' },
+    };
+  }
+  if (
+    (/\b(raid|raids|raider|raiders|enemy)\b/.test(lower) &&
+      /\b(stop|disable|turn off|off|peaceful|end|enable|turn on|on)\b/.test(lower)) ||
+    /\b(peaceful mode)\b/.test(lower)
+  ) {
+    const turnOff = /\b(stop|disable|turn off|off|peaceful|end)\b/.test(lower);
+    return {
+      reply: turnOff
+        ? 'Peaceful Mode restored! Raiders have retreated and our medics are tending everyone back to full strength.'
+        : 'Enemy Raids enabled! Keep our Town Hospital and Defense Walls ready — Commander Vance is on watch!',
+      action: { type: 'toggle_raids', raidsEnabled: !turnOff },
+    };
+  }
+
   // 1) Automatic City-Builder Mode toggle
   if (
     /\b(automatic|auto mode|autopilot|self[- ]?build|autonomous)\b/.test(lower) &&
@@ -482,11 +532,11 @@ function parseLocalIntent(
     };
   }
 
-  // 6) Build / Construct ANY preset or custom building (Research Lab, Observatory, Cafe Shop, etc.)
+  // 6) Build / Construct ANY preset or custom building (Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, etc.)
   if (
     /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
     !/\b(worker|villager|staff)\b/.test(lower) &&
-    /\b(lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|clinic|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
+    /\b(hospital|clinic|infirmary|wall|palisade|turret|cannon|bastion|defense|lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
       lower,
     )
   ) {
@@ -540,6 +590,7 @@ export function MayorChatModal({
   roads,
   railSpurBuilt,
   autoMode,
+  raidState,
   agents,
   structures,
   logs,
@@ -553,6 +604,8 @@ export function MayorChatModal({
   onClose,
   onTogglePlay,
   onToggleAutoMode,
+  onToggleEnemyRaids,
+  onTriggerEnemyRaid,
   onSwitchTown,
   onCreateTown,
   onExpandBiome,
@@ -666,6 +719,23 @@ export function MayorChatModal({
     action: MayorActionPlan,
     fallbackText: string,
   ): Promise<{ badge?: string; extraNote?: string }> => {
+    if (action.type === 'trigger_raid') {
+      const res = await onTriggerEnemyRaid();
+      return {
+        badge: res.ok ? `⚔️ ${res.badge}` : `⚠️ ${res.badge}`,
+        extraNote: res.ok ? undefined : res.detail,
+      };
+    }
+
+    if (action.type === 'toggle_raids') {
+      const nextVal =
+        typeof action.raidsEnabled === 'boolean' ? action.raidsEnabled : !raidState.enabled;
+      onToggleEnemyRaids(nextVal);
+      return {
+        badge: nextVal ? '⚔️ Enemy Raids: ON' : '🕊️ Enemy Raids: OFF (Peaceful)',
+      };
+    }
+
     if (action.type === 'toggle_auto') {
       const nextVal = typeof action.autoEnabled === 'boolean' ? action.autoEnabled : !autoMode;
       onToggleAutoMode(nextVal);
@@ -1126,6 +1196,26 @@ export function MayorChatModal({
           </div>
 
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {/* Enemy Raids ON/OFF Toggle */}
+            <button
+              type="button"
+              onClick={() => onToggleEnemyRaids()}
+              aria-pressed={raidState.enabled}
+              title={
+                raidState.enabled
+                  ? 'Enemy Raids are ON — Click to return to Peaceful Mode'
+                  : 'Enemy Raids are OFF — Click to activate Raider AI & Town Defense'
+              }
+              className={`inline-flex min-h-[38px] items-center gap-1 rounded-xl border px-2 text-[11px] font-semibold transition-colors ${
+                raidState.enabled
+                  ? 'border-rose-400/65 bg-rose-500/25 text-rose-100 hover:bg-rose-500/35'
+                  : 'border-white/10 bg-slate-900 text-slate-400 hover:border-rose-400/40 hover:text-rose-200'
+              }`}
+            >
+              <Swords className="h-3.5 w-3.5 shrink-0" />
+              <span>Raids: {raidState.enabled ? 'ON' : 'OFF'}</span>
+            </button>
+
             {/* Automatic City-Builder Toggle */}
             <button
               type="button"

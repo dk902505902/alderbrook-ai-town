@@ -25,6 +25,7 @@ import {
   ScrollText,
   Settings,
   Sparkles,
+  Swords,
   TrainFront,
   Users,
   Video,
@@ -51,6 +52,7 @@ import {
   buildInferenceHeaders,
   computeActualKeySlot,
   countCharacterOverrides,
+  formatCompactModelName,
   resolveInferenceConfig,
   sanitizeProviderConfig,
 } from './lib/aiRouting.ts';
@@ -116,15 +118,19 @@ import {
   ALL_TOWN_THEMES,
   BIOME_META,
   BIOME_PLOT_IDS,
+  createDefaultEnemyRaidState,
   createHiredAgentRecord,
   DEFAULT_PROVIDER_CONFIG,
   DEFAULT_REMOTE_BRIDGE_CONFIG,
   DEFAULT_SIGNAL_RELAY_CONFIG,
   detectDefaultGraphicsQuality,
+  ENEMY_RAIDER_AGENT_ID,
   getAvailablePlotIds,
   getStructureDisplayLabel,
   getWeatherSeasonEffect,
   inferCustomBuildingSpec,
+  isDefenseStructure,
+  isHospitalStructure,
   LOCATION_LABELS,
   MAX_TOWN_AGENTS,
   normalizeTownTheme,
@@ -138,6 +144,8 @@ import {
   type AIProviderConfig,
   type BiomeId,
   type CameraMode,
+  type EnemyRaidState,
+  type RaiderTactic,
   type CliAgentActivity,
   type CouncilProposal,
   type CustomBuildingStyle,
@@ -479,6 +487,14 @@ export default function App() {
   const [roads, setRoads] = useState<string[]>(initialLocal.current.roads);
   const [railSpurBuilt, setRailSpurBuilt] = useState<boolean>(initialLocal.current.railSpurBuilt);
   const [autoMode, setAutoMode] = useState<boolean>(initialLocal.current.autoMode);
+  const [raidState, setRaidState] = useState<EnemyRaidState>(() => {
+    try {
+      const saved = window.localStorage.getItem('alderbrook_enemy_raids_enabled_v1');
+      return createDefaultEnemyRaidState(saved === 'true');
+    } catch {
+      return createDefaultEnemyRaidState(false);
+    }
+  });
   const [treasuryGold, setTreasuryGold] = useState<number>(initialLocal.current.treasuryGold);
   const [resources, setResources] = useState<TownResources>(initialLocal.current.resources);
   const [activePolicies, setActivePolicies] = useState<PolicyId[]>(
@@ -536,6 +552,10 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [showMinimap, setShowMinimap] = useState(false);
   const [minimapCoords, setMinimapCoords] = useState<Partial<Record<AgentId, AgentWorldCoord>>>({});
+  const minimapCoordsRef = useRef<Partial<Record<AgentId, AgentWorldCoord>>>({});
+  minimapCoordsRef.current = minimapCoords;
+  const lastRaiderInjuryMsRef = useRef<number>(0);
+  const lastDefenseAutoOrderMsRef = useRef<number>(0);
   const [communicationEvent, setCommunicationEvent] = useState<{
     speakerId: AgentId;
     targetAgentName: string | null;
@@ -550,6 +570,7 @@ export default function App() {
     | { type: 'biome'; id: BiomeId; nonce: number }
     | { type: 'rail_spur'; nonce: number }
     | { type: 'signal_relay'; nonce: number }
+    | { type: 'raider_camp'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null
   >(null);
@@ -796,6 +817,8 @@ export default function App() {
     roads,
     railSpurBuilt,
     autoMode,
+    raidState,
+    hasServerDefaultKey,
     treasuryGold,
     resources,
     activePolicies,
@@ -829,6 +852,8 @@ export default function App() {
     roads,
     railSpurBuilt,
     autoMode,
+    raidState,
+    hasServerDefaultKey,
     treasuryGold,
     resources,
     activePolicies,
@@ -3365,10 +3390,50 @@ export default function App() {
         soundscape.playBuildCompleteChime();
       }
 
-      // If creating a custom building (e.g. Research Lab) and under 15-villager cap, staff a matching specialist!
+      // Auto-staff a Town Medic whenever a Town Hospital is constructed (under 15-villager cap)
       let recruitedRoleNote = '';
       let recruitedWorker: AgentRecord | null = null;
       if (
+        (actionKind === 'create' || (actionKind === 'progress' && nextStruct.status === 'complete')) &&
+        structureType === 'hospital' &&
+        snap.agents.length < MAX_TOWN_AGENTS
+      ) {
+        const alreadyHasMedic = snap.agents.some((a) =>
+          /\b(medic|nurse|doctor|healer)\b/i.test(a.role),
+        );
+        if (!alreadyHasMedic) {
+          const existingIds = new Set(snap.agents.map((a) => a.id));
+          recruitedWorker = createHiredAgentRecord(
+            {
+              name: snap.agents.some((a) => a.name.toLowerCase().includes('clara'))
+                ? 'Medic Tessa'
+                : 'Medic Clara',
+              role: 'Town Medic',
+              department: 'Town Hospital',
+              supervisor: 'Mayor Sterling',
+              personality: 'Warm, quick-thinking healer patching up bruised workers.',
+              location: 'town_hall',
+              assignedPlotId: chosenPlot,
+              accentColor: '#ef4444',
+              outfitColors: {
+                coat: '#f8fafc',
+                pants: '#334155',
+                hat: '#ef4444',
+                trim: '#ef4444',
+              },
+              hatStyle: 'cap',
+              dialogue: 'Town Hospital is open! Bring any bruised workers right in.',
+              currentTask: 'Staffing Town Hospital & healing injured workers',
+              thought: 'Stocking clean bandages and glowing lanterns for anyone who needs care.',
+            },
+            existingIds,
+            now + 5,
+          );
+          setAgents((prev) => [...prev, recruitedWorker!].slice(0, MAX_TOWN_AGENTS));
+          recruitedRoleNote = ` + Staffed ${recruitedWorker.name} (Town Medic)`;
+          badge = `${badge} · ${recruitedWorker.name}`;
+        }
+      } else if (
         actionKind === 'create' &&
         structureType === 'custom' &&
         customSpec &&
@@ -3430,6 +3495,533 @@ export default function App() {
     [],
   );
 
+  // --- Enemy Raider AI Commander, Non-Lethal Injury/Hospital Healing & Mayor Auto-Defense ---
+  const consultRaiderCommanderAI = useCallback(
+    async (
+      waveNumber: number,
+      campHp: number,
+      campMaxHp: number,
+    ): Promise<{ tactic: RaiderTactic; commanderOrder: string; modelUsed: string }> => {
+      const snap = stateRef.current;
+      const resolved = resolveInferenceConfig(snap.providerConfig, ENEMY_RAIDER_AGENT_ID);
+      const defenseCount = snap.structures.filter(
+        (s) => s.status === 'complete' && isDefenseStructure(s),
+      ).length;
+      const hasHospital = snap.structures.some(
+        (s) => s.status === 'complete' && isHospitalStructure(s),
+      );
+      const injuredCount = snap.agents.filter((a) => a.healthStatus === 'injured').length;
+
+      const pickZeroTokenTactic = (): {
+        tactic: RaiderTactic;
+        commanderOrder: string;
+        modelUsed: string;
+      } => {
+        const label = resolved.isExternalCli ? 'External CLI · 0 tokens' : 'Instant Tactics · 0 tokens';
+        if (campHp < campMaxHp * 0.35) {
+          return {
+            tactic: 'regroup',
+            commanderOrder: 'Hold the ridge, crew! Keep our brass cannon steady!',
+            modelUsed: label,
+          };
+        }
+        if (defenseCount >= 2) {
+          return {
+            tactic: 'siege_plaza',
+            commanderOrder: 'Aim high over their stone turrets — test the town square!',
+            modelUsed: label,
+          };
+        }
+        if (waveNumber % 2 === 0) {
+          return {
+            tactic: 'target_workers',
+            commanderOrder: 'Lob bouncy spark-shells near the busy work crews!',
+            modelUsed: label,
+          };
+        }
+        return {
+          tactic: 'shell_perimeter',
+          commanderOrder: 'Fire a cheerful volley over the meadow perimeter!',
+          modelUsed: label,
+        };
+      };
+
+      const hasUsableKey =
+        !resolved.isInstantTactics &&
+        !resolved.isExternalCli &&
+        (resolved.apiKeys.length > 0 ||
+          (resolved.providerId === 'gemini' && snap.hasServerDefaultKey));
+
+      if (!hasUsableKey) {
+        return pickZeroTokenTactic();
+      }
+
+      try {
+        advanceProviderKeyCursor(resolved);
+        const res = await fetch('/api/town/raider-tactic', {
+          method: 'POST',
+          headers: buildInferenceHeaders(resolved),
+          body: JSON.stringify({
+            townName: snap.townName,
+            waveNumber,
+            campHp,
+            campMaxHp,
+            defenseCount,
+            hasHospital,
+            injuredCount,
+            population: snap.agents.length,
+          }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            tactic?: string;
+            commanderOrder?: string;
+            modelUsed?: string;
+          };
+          const validTactic: RaiderTactic =
+            data.tactic === 'target_workers' ||
+            data.tactic === 'siege_plaza' ||
+            data.tactic === 'regroup'
+              ? data.tactic
+              : 'shell_perimeter';
+          return {
+            tactic: validTactic,
+            commanderOrder:
+              data.commanderOrder || 'Fire the brass cannon — let us test their walls!',
+            modelUsed: formatCompactModelName(data.modelUsed || resolved.modelName),
+          };
+        }
+      } catch {
+        // Fallback to zero-token local tactics cleanly
+      }
+      return pickZeroTokenTactic();
+    },
+    [],
+  );
+
+  const triggerMayorDefenseResponse = useCallback(
+    async (reason: 'raid_started' | 'worker_injured') => {
+      const now = Date.now();
+      if (now - lastDefenseAutoOrderMsRef.current < 8000) return;
+      lastDefenseAutoOrderMsRef.current = now;
+
+      const snap = stateRef.current;
+      // Mobilize Commander Vance to defend the perimeter
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === 'commander_vance'
+            ? {
+                ...a,
+                currentTask: 'Defending perimeter & directing turret counter-fire!',
+                dialogue: 'All hands clear! Watchtowers & turrets, return fire on the Raider Camp!',
+              }
+            : a,
+        ),
+      );
+
+      const hospital = snap.structures.find((s) => isHospitalStructure(s));
+      const defenseWall = snap.structures.find((s) => isDefenseStructure(s));
+
+      // Priority 1: Ensure Town Hospital exists (or finishes building) so medics can rescue injured workers
+      if (!hospital) {
+        await handleMayorBuildStructure('hospital', 'Town Hospital');
+        return;
+      }
+      if (hospital.status === 'building') {
+        await handleMayorBuildStructure('hospital', 'Town Hospital');
+        return;
+      }
+
+      // Priority 2: Ensure Defense Wall & Cannon Turret exists to fire back at Raider Camp
+      if (!defenseWall || defenseWall.status === 'building') {
+        await handleMayorBuildStructure('defense_wall', 'Defense Wall & Turret');
+        return;
+      }
+
+      if (reason === 'raid_started') {
+        setLogs((prev) =>
+          [
+            {
+              id: `mayor-defense-${now}`,
+              turnNumber: snap.turnCount,
+              agentId: 'mayor_sterling',
+              agentName: 'Mayor Sterling',
+              rank: 1 as const,
+              location: 'town_hall' as const,
+              targetAgent: 'Commander Vance',
+              thought: 'Town Hospital and Defense Walls are ready — coordinate counter-fire!',
+              dialogue:
+                'Commander Vance, man the defense turrets! Medics stand by at Town Hospital!',
+              newTask: 'Coordinating town defense',
+              timestampMs: now,
+            },
+            ...prev,
+          ].slice(0, 50),
+        );
+      }
+    },
+    [handleMayorBuildStructure],
+  );
+
+  const launchRaidWave = useCallback(
+    async (waveNum: number) => {
+      const now = Date.now();
+      const maxHp = 100 + (waveNum - 1) * 30;
+      const snap = stateRef.current;
+
+      setRaidState((prev) => ({
+        ...prev,
+        enabled: true,
+        active: true,
+        waveNumber: waveNum,
+        campHp: maxHp,
+        campMaxHp: maxHp,
+        nextWaveAtMs: null,
+        lastEventMs: now,
+      }));
+      soundscape.playAgentChime(2);
+
+      const aiPlan = await consultRaiderCommanderAI(waveNum, maxHp, maxHp);
+      setRaidState((prev) =>
+        prev.active
+          ? {
+              ...prev,
+              tactic: aiPlan.tactic,
+              commanderOrder: aiPlan.commanderOrder,
+              modelUsed: aiPlan.modelUsed,
+              lastEventMs: Date.now(),
+            }
+          : prev,
+      );
+
+      setLogs((prev) =>
+        [
+          {
+            id: `raid-wave-${now}`,
+            turnNumber: snap.turnCount,
+            agentId: 'commander_vance',
+            agentName: 'Commander Vance',
+            rank: 2 as const,
+            location: 'town_hall' as const,
+            targetAgent: 'Mayor Sterling',
+            thought: `Raider Wave #${waveNum} spotted on the southwest ridge (${aiPlan.modelUsed}).`,
+            dialogue: `Raider Alert! Captain Ironjaw (${aiPlan.modelUsed}): "${aiPlan.commanderOrder}"`,
+            newTask: 'Defending perimeter & directing turret counter-fire!',
+            timestampMs: now,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+
+      void triggerMayorDefenseResponse('raid_started');
+    },
+    [consultRaiderCommanderAI, triggerMayorDefenseResponse],
+  );
+
+  const handleToggleEnemyRaids = useCallback(
+    (next?: boolean) => {
+      const snap = stateRef.current;
+      const targetVal = typeof next === 'boolean' ? next : !snap.raidState.enabled;
+      try {
+        window.localStorage.setItem('alderbrook_enemy_raids_enabled_v1', String(targetVal));
+      } catch {
+        // Ignore storage errors
+      }
+
+      if (!targetVal) {
+        setRaidState((prev) => ({
+          ...prev,
+          enabled: false,
+          active: false,
+          nextWaveAtMs: null,
+        }));
+        // Safely restore any injured villagers in Peaceful Mode so nobody is ever stuck
+        setAgents((prev) =>
+          prev.map((a) =>
+            a.healthStatus === 'injured'
+              ? {
+                  ...a,
+                  healthStatus: 'healthy',
+                  injuredAtMs: undefined,
+                  currentTask: `Returning to ${a.role} duties in peaceful town`,
+                }
+              : a,
+          ),
+        );
+        return;
+      }
+
+      if (!snap.raidState.active) {
+        const nextWave = Math.max(1, snap.raidState.raidsRepelled + 1);
+        void launchRaidWave(nextWave);
+      } else {
+        setRaidState((prev) => ({ ...prev, enabled: true }));
+      }
+    },
+    [launchRaidWave],
+  );
+
+  const handleTriggerEnemyRaid = useCallback(async (): Promise<MayorBuildResult> => {
+    const snap = stateRef.current;
+    try {
+      window.localStorage.setItem('alderbrook_enemy_raids_enabled_v1', 'true');
+    } catch {
+      // Ignore storage errors
+    }
+    const waveNum = snap.raidState.active
+      ? snap.raidState.waveNumber
+      : Math.max(1, snap.raidState.raidsRepelled + 1);
+    await launchRaidWave(waveNum);
+    setFocusRequest({ type: 'raider_camp', nonce: Date.now() });
+    return {
+      ok: true,
+      badge: `Raid Wave #${waveNum} Active`,
+      detail: 'Raider Camp spotted on the southwest ridge! Mayor Sterling & Commander Vance are mobilizing Town Hospital and Defense Walls.',
+    };
+  }, [launchRaidWave]);
+
+  const handleRaiderImpact = useCallback(
+    (impactX: number, impactZ: number) => {
+      const now = Date.now();
+      if (now - lastRaiderInjuryMsRef.current < 6500) return;
+
+      const snap = stateRef.current;
+      if (!snap.raidState.active) return;
+
+      const injuredNow = snap.agents.filter((a) => a.healthStatus === 'injured').length;
+      if (injuredNow >= 3) return;
+
+      // Never permanently remove workers; Mayor Sterling & Medics stay safe to coordinate rescue
+      const candidates = snap.agents.filter(
+        (a) =>
+          a.healthStatus !== 'injured' &&
+          a.id !== 'mayor_sterling' &&
+          !/\b(medic|nurse|doctor|healer)\b/i.test(a.role),
+      );
+      if (candidates.length === 0) return;
+
+      const coords = minimapCoordsRef.current;
+      let nearest = candidates[0];
+      let bestDist = Infinity;
+      for (const a of candidates) {
+        const pos = coords[a.id];
+        const ax = pos ? pos.x : a.activePlotId ? PLOT_META[a.activePlotId].x : 0;
+        const az = pos ? pos.z : a.activePlotId ? PLOT_META[a.activePlotId].z : 0;
+        const d = Math.hypot(ax - impactX, az - impactZ);
+        if (d < bestDist) {
+          bestDist = d;
+          nearest = a;
+        }
+      }
+
+      // Only injure if reasonably close to the splash zone (or occasional stray bounce)
+      if (bestDist > 12.5 && Math.random() > 0.35) return;
+
+      lastRaiderInjuryMsRef.current = now;
+      const hasHospital = snap.structures.some(
+        (s) => s.status === 'complete' && isHospitalStructure(s),
+      );
+
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === nearest.id
+            ? {
+                ...a,
+                healthStatus: 'injured',
+                injuredAtMs: now,
+                currentTask: 'Injured (Needs Hospital) — heading to safety',
+                dialogue: hasHospital
+                  ? 'Whoa, cannonball spark grazed me! Walking to Town Hospital!'
+                  : 'Ouch! Caught a spark volley — we need a Town Hospital!',
+              }
+            : a,
+        ),
+      );
+
+      setLogs((prev) =>
+        [
+          {
+            id: `raid-injury-${now}`,
+            turnNumber: snap.turnCount,
+            agentId: nearest.id,
+            agentName: nearest.name,
+            rank: nearest.rank,
+            location: nearest.location,
+            targetAgent: 'Mayor Sterling',
+            thought: 'Grazed by cartoon cannonball — heading safely to Town Hospital for bandages.',
+            dialogue: hasHospital
+              ? `${nearest.name} is Injured (Needs Hospital) and walking to Town Hospital for care.`
+              : `${nearest.name} is Injured (Needs Hospital) — Mayor Sterling is rushing a Hospital!`,
+            newTask: 'Injured (Needs Hospital)',
+            timestampMs: now,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+
+      if (!hasHospital) {
+        void triggerMayorDefenseResponse('worker_injured');
+      }
+    },
+    [triggerMayorDefenseResponse],
+  );
+
+  const handleDefenseHitCamp = useCallback((damage: number) => {
+    const now = Date.now();
+    const snap = stateRef.current;
+    if (!snap.raidState.active) return;
+
+    const nextHp = Math.max(0, snap.raidState.campHp - damage);
+    if (nextHp <= 0) {
+      const rewardGold = 120 + snap.raidState.waveNumber * 25;
+      const repelledWave = snap.raidState.waveNumber;
+      setRaidState((prev) => ({
+        ...prev,
+        active: false,
+        campHp: 0,
+        raidsRepelled: prev.raidsRepelled + 1,
+        nextWaveAtMs: prev.enabled ? now + 45000 : null,
+      }));
+      setTreasuryGold((g) => g + rewardGold);
+      setMetrics((m) => ({
+        ...m,
+        orderLevel: Math.min(100, m.orderLevel + 4),
+        morale: Math.min(100, m.morale + 5),
+      }));
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+
+      setLogs((prev) =>
+        [
+          {
+            id: `raid-repelled-${now}`,
+            turnNumber: snap.turnCount,
+            agentId: 'commander_vance',
+            agentName: 'Commander Vance',
+            rank: 2 as const,
+            location: 'town_hall' as const,
+            targetAgent: 'Mayor Sterling',
+            thought: `Raider Wave #${repelledWave} repelled by our watchtowers and defense turrets!`,
+            dialogue: `Victory! Wave #${repelledWave} Raiders sent packing! Town earned +${rewardGold}g Treasury reward!`,
+            newTask: 'Patrolling peaceful perimeter',
+            timestampMs: now,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+    } else {
+      setRaidState((prev) => ({
+        ...prev,
+        campHp: Math.max(0, prev.campHp - damage),
+      }));
+    }
+  }, []);
+
+  // Hospital Medic Healing & Safe Recovery Loop (ensures zero permanent worker loss)
+  useEffect(() => {
+    const healInterval = window.setInterval(() => {
+      const snap = stateRef.current;
+      const injuredList = snap.agents.filter((a) => a.healthStatus === 'injured');
+      if (injuredList.length === 0) return;
+
+      const now = Date.now();
+      const completedHospital = snap.structures.find(
+        (s) => s.status === 'complete' && isHospitalStructure(s),
+      );
+      const medic = snap.agents.find((a) => /\b(medic|nurse|doctor|healer)\b/i.test(a.role));
+
+      const target = injuredList[0];
+      const elapsedInjury = now - (target.injuredAtMs ?? now);
+      const canHealAtHospital = Boolean(completedHospital) && elapsedInjury >= 4500;
+      const canSelfRecover = !completedHospital && elapsedInjury >= 32000;
+
+      if (!canHealAtHospital && !canSelfRecover) return;
+
+      const healerName = medic ? medic.name : completedHospital ? 'Town Hospital Staff' : 'Town Hall Rest';
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === target.id
+            ? {
+                ...a,
+                healthStatus: 'healthy',
+                injuredAtMs: undefined,
+                currentTask: `Recovered! Back to ${a.role} duties`,
+                dialogue: completedHospital
+                  ? `Feeling great! Thanks to ${healerName} at Town Hospital!`
+                  : 'Rested up at Town Hall — back on my feet!',
+              }
+            : a,
+        ),
+      );
+      if (completedHospital) {
+        soundscape.playAgentChime(1);
+      }
+      setLogs((prev) =>
+        [
+          {
+            id: `medic-heal-${now}`,
+            turnNumber: snap.turnCount,
+            agentId: medic?.id ?? 'mayor_sterling',
+            agentName: healerName,
+            rank: medic?.rank ?? 1,
+            location: 'town_hall' as const,
+            targetAgent: target.name,
+            thought: `${target.name} treated and restored to full health.`,
+            dialogue: completedHospital
+              ? `${healerName} patched up ${target.name} at Town Hospital — back to full strength!`
+              : `${target.name} rested at Town Hall and recovered safely.`,
+            newTask: completedHospital ? 'Tending Town Hospital patients' : 'Coordinating town recovery',
+            timestampMs: now,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+    }, 4000);
+
+    return () => window.clearInterval(healInterval);
+  }, []);
+
+  // Raider Wave Scheduler & AI Tactic Refresh Loop (runs only when Enemy Raids are ON)
+  useEffect(() => {
+    if (!raidState.enabled) return;
+
+    const raidTickId = window.setInterval(() => {
+      const snap = stateRef.current;
+      if (!snap.raidState.enabled) return;
+      const now = Date.now();
+
+      if (!snap.raidState.active) {
+        if (snap.raidState.nextWaveAtMs && now >= snap.raidState.nextWaveAtMs) {
+          void launchRaidWave(snap.raidState.waveNumber + 1);
+        }
+        return;
+      }
+
+      // Periodically ask the selected Enemy Raider Commander AI model to adapt tactics
+      if (now - snap.raidState.lastEventMs >= 22000) {
+        void consultRaiderCommanderAI(
+          snap.raidState.waveNumber,
+          snap.raidState.campHp,
+          snap.raidState.campMaxHp,
+        ).then((plan) => {
+          setRaidState((prev) =>
+            prev.active
+              ? {
+                  ...prev,
+                  tactic: plan.tactic,
+                  commanderOrder: plan.commanderOrder,
+                  modelUsed: plan.modelUsed,
+                  lastEventMs: Date.now(),
+                }
+              : prev,
+          );
+        });
+      }
+    }, 5000);
+
+    return () => window.clearInterval(raidTickId);
+  }, [raidState.enabled, launchRaidWave, consultRaiderCommanderAI]);
+
   // Automatic City-Builder Loop (lightweight, zero-token civic progression when Auto + Play are ON)
   useEffect(() => {
     if (!autoMode || !isPlaying) return;
@@ -3440,6 +4032,8 @@ export default function App() {
       style?: CustomBuildingStyle;
     }> = [
       { type: 'custom', label: 'Research Lab', style: 'lab' },
+      { type: 'hospital', label: 'Town Hospital' },
+      { type: 'defense_wall', label: 'Defense Wall & Turret' },
       { type: 'bakery', label: 'Artisan Bakery' },
       { type: 'greenhouse', label: 'Glass Greenhouse' },
       { type: 'custom', label: 'Observatory', style: 'observatory' },
@@ -3452,6 +4046,26 @@ export default function App() {
     const intervalId = window.setInterval(() => {
       const snap = stateRef.current;
       if (!snap.autoMode || !snap.isPlaying) return;
+
+      // 0) Emergency Defense Priority during active raids or when workers are injured
+      const hasInjured = snap.agents.some((a) => a.healthStatus === 'injured');
+      if (snap.raidState.active || hasInjured) {
+        const hospital = snap.structures.find((s) => isHospitalStructure(s));
+        if (!hospital || hospital.status === 'building') {
+          void handleMayorBuildStructure('hospital', 'Town Hospital');
+          return;
+        }
+        const defenses = snap.structures.filter((s) => isDefenseStructure(s));
+        const buildingDef = defenses.find((s) => s.status === 'building');
+        if (buildingDef) {
+          void handleMayorBuildStructure(buildingDef.structureType, buildingDef.customLabel);
+          return;
+        }
+        if (defenses.length < 2) {
+          void handleMayorBuildStructure('defense_wall', 'Defense Wall & Turret');
+          return;
+        }
+      }
 
       // 1) Finish any active construction site first
       const activeSite = snap.structures.find((s) => s.status === 'building');
@@ -3908,6 +4522,11 @@ export default function App() {
         triggerTrainNonce={triggerTrainNonce}
         decorPacks={decorPacks}
         triggerCelebrationNonce={triggerCelebrationNonce}
+        raidState={raidState}
+        onRaiderImpact={handleRaiderImpact}
+        onDefenseHitCamp={handleDefenseHitCamp}
+        onFocusRaiderCamp={() => setFocusRequest({ type: 'raider_camp', nonce: Date.now() })}
+        onToggleRaids={handleToggleEnemyRaids}
         onSelectAgent={handleSelectAgent}
         onTogglePovAgent={handleTogglePovAgent}
         onToggleTrainPov={handleToggleTrainPov}
@@ -4059,6 +4678,25 @@ export default function App() {
               >
                 <Zap className="h-3 w-3" />
                 <span>Auto</span>
+              </button>
+            )}
+            {raidState.enabled && (
+              <button
+                type="button"
+                onClick={() =>
+                  raidState.active
+                    ? setFocusRequest({ type: 'raider_camp', nonce: Date.now() })
+                    : handleToggleEnemyRaids(false)
+                }
+                title={
+                  raidState.active
+                    ? 'Active Raider Wave — click to view Raider Camp'
+                    : 'Enemy Raids are ON — click to switch to Peaceful Mode'
+                }
+                className="hidden min-h-[30px] items-center gap-1 rounded-lg border border-rose-400/55 bg-rose-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-rose-100 hover:bg-rose-500/30 lg:inline-flex"
+              >
+                <Swords className="h-3 w-3" />
+                <span>{raidState.active ? `Raid W${raidState.waveNumber}` : 'Raids ON'}</span>
               </button>
             )}
             <div className="hidden items-center gap-1.5 text-xs text-slate-400 xl:flex">
@@ -4717,6 +5355,8 @@ export default function App() {
         agents={agents}
         webhookUrl={remoteBridgeConfig.webhookUrl}
         hasServerDefaultKey={hasServerDefaultKey}
+        enemyRaidsEnabled={raidState.enabled}
+        onToggleEnemyRaids={handleToggleEnemyRaids}
         onClose={() => {
           setSettingsOpen(false);
           setSettingsInitialTab('llm');
@@ -4770,6 +5410,7 @@ export default function App() {
         roads={roads}
         railSpurBuilt={railSpurBuilt}
         autoMode={autoMode}
+        raidState={raidState}
         agents={agents}
         structures={structures}
         logs={logs}
@@ -4786,6 +5427,8 @@ export default function App() {
           setIsPlaying((p) => !p);
         }}
         onToggleAutoMode={handleToggleAutoMode}
+        onToggleEnemyRaids={handleToggleEnemyRaids}
+        onTriggerEnemyRaid={handleTriggerEnemyRaid}
         onSwitchTown={handleSwitchTown}
         onCreateTown={handleCreateNewTown}
         onExpandBiome={handleExpandBiome}

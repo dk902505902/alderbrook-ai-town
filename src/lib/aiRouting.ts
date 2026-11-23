@@ -2,6 +2,7 @@ import {
   AI_PROVIDER_PRESETS,
   DEFAULT_PROVIDER_CONFIG,
   EXTERNAL_CLI_PROVIDER_ID,
+  INSTANT_TACTICS_PROVIDER_ID,
   type AIKeyStrategy,
   type AIProviderConfig,
   type AIProviderEntry,
@@ -26,6 +27,8 @@ export interface ResolvedInferenceConfig {
   isOverride: boolean;
   /** True when villager is delegated to an external CLI agent (uses 0 LLM API tokens) */
   isExternalCli: boolean;
+  /** True when routed to built-in zero-token tactical engine (e.g. Enemy Raider Commander) */
+  isInstantTactics: boolean;
 }
 
 export interface ProviderTemplate {
@@ -316,6 +319,11 @@ export function sanitizeProviderConfig(raw: unknown): AIProviderConfig {
           providerId: EXTERNAL_CLI_PROVIDER_ID,
           model: model || 'external-cli',
         };
+      } else if (providerId === INSTANT_TACTICS_PROVIDER_ID) {
+        characterModels[cleanId] = {
+          providerId: INSTANT_TACTICS_PROVIDER_ID,
+          model: model || 'instant-tactics',
+        };
       } else if (providerId && providerMap.has(providerId) && model) {
         characterModels[cleanId] = { providerId, model };
       }
@@ -401,6 +409,25 @@ export function resolveInferenceConfig(
       keyStrategy: 'failover_only',
       isOverride: true,
       isExternalCli: true,
+      isInstantTactics: false,
+    };
+  }
+
+  if (override && override.providerId === INSTANT_TACTICS_PROVIDER_ID) {
+    return {
+      providerId: INSTANT_TACTICS_PROVIDER_ID,
+      providerLabel: 'Instant Zero-Token Tactics',
+      preset: 'custom',
+      baseUrl: '',
+      modelName: 'Instant Tactics',
+      apiKeys: [],
+      apiKey: '',
+      keyCount: 0,
+      keyStartIndex: 1,
+      keyStrategy: 'failover_only',
+      isOverride: true,
+      isExternalCli: false,
+      isInstantTactics: true,
     };
   }
 
@@ -421,6 +448,7 @@ export function resolveInferenceConfig(
         keyStrategy: strategy,
         isOverride: true,
         isExternalCli: false,
+        isInstantTactics: false,
       };
     }
   }
@@ -446,6 +474,7 @@ export function resolveInferenceConfig(
     keyStrategy: strategy,
     isOverride: false,
     isExternalCli: false,
+    isInstantTactics: false,
   };
 }
 
@@ -498,7 +527,12 @@ export function getOverrideProvidersNeedingKeys(
 
   for (const val of Object.values(config.characterModels)) {
     if (!val || !val.providerId || !val.model.trim()) continue;
-    if (val.providerId === EXTERNAL_CLI_PROVIDER_ID) continue;
+    if (
+      val.providerId === EXTERNAL_CLI_PROVIDER_ID ||
+      val.providerId === INSTANT_TACTICS_PROVIDER_ID
+    ) {
+      continue;
+    }
     if (seen.has(val.providerId)) continue;
     seen.add(val.providerId);
     const provider = byId.get(val.providerId);

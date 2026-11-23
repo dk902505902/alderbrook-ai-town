@@ -536,6 +536,144 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.ConeGeometry(2.05, 0.85, 6), roofMat, 0, 2.28, 0);
     addPart(group, new THREE.ConeGeometry(1.25, 0.65, 6), roofMat, 0, 2.86, 0);
     addPart(group, new THREE.SphereGeometry(0.24, 8, 6), lampMat, 0, 1.55, 0);
+  } else if (type === 'hospital') {
+    // Town Hospital / Clinic — hollow see-inside ward with medical cots, glowing healing lantern & medicine shelf
+    const clinicWallMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.68 }),
+      'wall',
+    );
+    const clinicFloorMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.76 }),
+      'stone',
+    );
+    const clinicRoofMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.56 }),
+      'roofPrimary',
+    );
+    const crossRedMat = new THREE.MeshStandardMaterial({
+      color: 0xef4444,
+      emissive: 0xdc2626,
+      emissiveIntensity: 0.35,
+      roughness: 0.35,
+    });
+    const cotBlanketMat = new THREE.MeshStandardMaterial({ color: 0x0d9488, roughness: 0.72 });
+    const bottleMat = new THREE.MeshStandardMaterial({
+      color: 0x34d399,
+      emissive: 0x10b981,
+      emissiveIntensity: 0.45,
+      roughness: 0.25,
+    });
+    const healingLanternMat = new THREE.MeshStandardMaterial({
+      color: 0xa7f3d0,
+      emissive: 0x10b981,
+      emissiveIntensity: 1.55,
+      roughness: 0.2,
+    });
+    interiorFireMats.push(healingLanternMat);
+    cutawayRoofMaterials.push(clinicRoofMat);
+
+    // Plinth & hollow exterior clinic walls
+    addPart(group, new THREE.BoxGeometry(3.0, 0.28, 2.55), plinthMat, 0, 0.14, 0);
+    addHollowBoxWalls(group, 2.68, 1.65, 2.2, 0.28, 0.14, clinicWallMat, clinicFloorMat);
+
+    // Interior: 2 Medical Cots with crisp white pillows & teal blankets
+    addCozyBed(group, -0.78, 0.3, -0.25, 0, interiorWoodMat, cotBlanketMat, pillowMat);
+    addCozyBed(group, 0.78, 0.3, -0.25, 0, interiorWoodMat, cotBlanketMat, pillowMat);
+
+    // Interior: Medicine Apothecary Shelf on back wall + front triage desk
+    addWallShelf(group, 0, 0.3, -0.88, 0, interiorWoodMat, bottleMat);
+    addWoodenTable(group, 0, 0.3, 0.48, 0.82, 0.42, interiorWoodMat);
+
+    // Interior: Glowing Healing Lantern on central stand
+    addPart(group, new THREE.CylinderGeometry(0.06, 0.08, 0.62, 6), woodMat, 0, 0.62, -0.15);
+    addPart(group, new THREE.OctahedronGeometry(0.16, 0), healingLanternMat, 0, 1.02, -0.15);
+
+    // Cutaway Pitched Roof + Front Gable Awning
+    addPart(group, new THREE.ConeGeometry(2.14, 1.08, 4), clinicRoofMat, 0, 2.46, 0, 0, Math.PI / 4);
+    addPart(group, new THREE.BoxGeometry(1.45, 0.12, 0.62), clinicRoofMat, 0, 1.52, 1.32, 0.22);
+
+    // Bold 3D Red-Cross Emblem on white facade plaque & rooftop sign
+    addPart(group, new THREE.BoxGeometry(0.68, 0.68, 0.08), clinicWallMat, 0, 1.72, 1.14);
+    addPart(group, new THREE.BoxGeometry(0.42, 0.14, 0.1), crossRedMat, 0, 1.72, 1.17);
+    addPart(group, new THREE.BoxGeometry(0.14, 0.42, 0.1), crossRedMat, 0, 1.72, 1.17);
+
+    // Door & glowing clinic windows
+    addPart(group, new THREE.BoxGeometry(0.62, 0.98, 0.08), woodMat, 0, 0.78, 1.12);
+    addPart(group, new THREE.BoxGeometry(0.54, 0.5, 0.08), winMat, -0.86, 1.14, 1.12);
+    addPart(group, new THREE.BoxGeometry(0.54, 0.5, 0.08), winMat, 0.86, 1.14, 1.12);
+  } else if (type === 'defense_wall') {
+    // Stone Defense Palisade & Elevated Rotating Brass/Iron Cannon Turret
+    const fortStoneMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.86 }),
+      'stone',
+    );
+    const darkStoneMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.88 }),
+      'stone',
+    );
+    const deckMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.8 }),
+      'wood',
+    );
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.36,
+      metalness: 0.72,
+    });
+    const brassMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.28, metalness: 0.82 }),
+      'gold',
+    );
+    const bannerMat = tagThemeMaterial(
+      new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.6 }),
+      'banner',
+    );
+    cutawayRoofMaterials.push(deckMat, darkStoneMat);
+
+    // Wide fortified stone bastion plinth + hollow lower guardroom
+    addPart(group, new THREE.BoxGeometry(3.15, 0.38, 2.55), fortStoneMat, 0, 0.19, 0);
+    addHollowBoxWalls(group, 2.48, 1.55, 2.05, 0.38, 0.18, fortStoneMat, interiorFloorMat);
+
+    // Interior: Tactical defense table, brass ammo rack & warm guard brazier
+    addWoodenTable(group, -0.35, 0.4, 0.15, 0.78, 0.46, interiorWoodMat);
+    addWallShelf(group, 0.85, 0.4, -0.15, -Math.PI / 2, interiorWoodMat, brassMat);
+    addPart(group, new THREE.CylinderGeometry(0.18, 0.12, 0.34, 6), hearthStoneMat, -0.58, 0.58, -0.55);
+    addPart(group, new THREE.OctahedronGeometry(0.14, 0), createFireGlowMat(), -0.58, 0.84, -0.55);
+
+    // Flanking wooden palisade spikes on left & right wings
+    const stakeGeo = new THREE.ConeGeometry(0.15, 1.55, 6);
+    for (const sx of [-1.72, -1.48, 1.48, 1.72]) {
+      addPart(group, stakeGeo, woodMat, sx, 0.78, 0.32);
+      addPart(group, stakeGeo, woodMat, sx, 0.78, -0.32);
+    }
+
+    // Upper parapet deck & 4 crenellated stone merlons (fade during roof cutaway)
+    addPart(group, new THREE.BoxGeometry(2.68, 0.22, 2.26), deckMat, 0, 2.04, 0);
+    for (const [mx, mz] of [
+      [-1.12, -0.92],
+      [1.12, -0.92],
+      [-1.12, 0.92],
+      [1.12, 0.92],
+    ] as Array<[number, number]>) {
+      addPart(group, new THREE.BoxGeometry(0.46, 0.52, 0.46), darkStoneMat, mx, 2.4, mz);
+    }
+
+    // Rotating Defense Cannon Turret mounted on top of the bastion
+    const turret = new THREE.Group();
+    turret.position.set(0, 2.18, 0);
+    addPart(turret, new THREE.CylinderGeometry(0.56, 0.66, 0.28, 10), darkStoneMat, 0, 0.14, 0);
+    addPart(turret, new THREE.BoxGeometry(0.52, 0.32, 0.64), woodMat, 0, 0.42, 0);
+    // Tapered iron cannon barrel pointing +Z in turret local space
+    addPart(turret, new THREE.CylinderGeometry(0.13, 0.2, 1.25, 10), ironMat, 0, 0.62, 0.34, Math.PI / 2 - 0.12);
+    addPart(turret, new THREE.TorusGeometry(0.15, 0.04, 6, 10), brassMat, 0, 0.7, 0.92);
+    addPart(turret, new THREE.SphereGeometry(0.19, 8, 6), brassMat, 0, 0.56, -0.26);
+    group.add(turret);
+    group.userData.defenseTurret = turret;
+
+    // Front reinforced gate & shield emblem
+    addPart(group, new THREE.BoxGeometry(0.68, 1.02, 0.12), woodMat, 0, 0.89, 1.04);
+    addPart(group, new THREE.BoxGeometry(0.42, 0.52, 0.08), bannerMat, -0.82, 1.25, 1.04);
+    addPart(group, new THREE.BoxGeometry(0.42, 0.52, 0.08), bannerMat, 0.82, 1.25, 1.04);
   } else if (type === 'custom') {
     const style: CustomBuildingStyle = structure.customStyle || 'lab';
     const labelText = (structure.customLabel || 'Research Lab').trim().slice(0, 24);
