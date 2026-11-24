@@ -139,6 +139,7 @@ const BASE_GOLD_PER_TURN: Record<StructureType, number> = {
   hospital: 15,
   defense_wall: 12,
   triple_gun_tower: 16,
+  apartment: 26,
   custom: 22,
 };
 

@@ -1,5 +1,10 @@
 import * as THREE from 'three';
-import type { GraphicsQuality, TownTheme } from '../types/town.ts';
+import {
+  DEFAULT_TRAIN_BLUEPRINT,
+  type GraphicsQuality,
+  type TownTheme,
+  type TrainBlueprint,
+} from '../types/town.ts';
 import { applyThemeToObjectTree, tagThemeMaterial } from './townThemes.ts';
 
 export interface TownRailwayHandle {
@@ -20,6 +25,7 @@ export interface TownRailwayHandle {
   triggerTrainNow: () => void;
   setRailSpurBuilt: (enabled: boolean) => void;
   setInterTownRailBuilt: (enabled: boolean, targetTownName?: string) => void;
+  setTrainFleet: (blueprints: TrainBlueprint[]) => void;
   update: (delta: number, elapsed: number) => void;
   applyTheme: (theme: TownTheme) => void;
   setGraphicsQuality: (quality: GraphicsQuality) => void;
@@ -1047,6 +1053,312 @@ export function buildTownRailway(
   });
   root.add(trainGroup);
 
+  // 6b. Procedural Custom Train Consist Builder (steam | bullet | freight | neon, 1..5 cars)
+  const sharedWheelGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.09, 10);
+  sharedWheelGeo.rotateZ(Math.PI / 2);
+  sharedWheelGeo.userData.shared = true;
+  const sharedUnitBox = new THREE.BoxGeometry(1, 1, 1);
+  sharedUnitBox.userData.shared = true;
+  const sharedUnitCyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
+  sharedUnitCyl.userData.shared = true;
+  const sharedNoseCone = new THREE.ConeGeometry(0.54, 1.15, 10);
+  sharedNoseCone.rotateX(Math.PI / 2);
+  sharedNoseCone.userData.shared = true;
+  disposables.push(sharedWheelGeo, sharedUnitBox, sharedUnitCyl, sharedNoseCone);
+
+  interface FleetEntry {
+    blueprint: TrainBlueprint;
+    group: THREE.Group;
+    locomotive: THREE.Group;
+    carriages: THREE.Group[];
+    wheels: THREE.Object3D[];
+    smokestackTip: THREE.Object3D;
+    hasSteam: boolean;
+    phaseOffset: number;
+    ownedMaterials: THREE.Material[];
+  }
+
+  function addScaledTrainPart(
+    parent: THREE.Object3D,
+    geo: THREE.BufferGeometry,
+    mat: THREE.Material,
+    x: number,
+    y: number,
+    z: number,
+    sx: number,
+    sy: number,
+    sz: number,
+    rx = 0,
+    ry = 0,
+    rz = 0,
+  ): THREE.Mesh {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.scale.set(sx, sy, sz);
+    m.rotation.set(rx, ry, rz);
+    parent.add(m);
+    return m;
+  }
+
+  function buildBlueprintTrainEntry(
+    bp: TrainBlueprint,
+    phaseOffset: number,
+  ): FleetEntry {
+    const entryGroup = new THREE.Group();
+    entryGroup.name = `train_blueprint:${bp.id}`;
+    const ownedMaterials: THREE.Material[] = [];
+    const wheels: THREE.Mesh[] = [];
+
+    const locoColor = new THREE.Color(bp.locomotiveColor || '#1e293b');
+    const carColor = new THREE.Color(bp.carriageColor || '#0f766e');
+    const accentGlowHex =
+      bp.style === 'neon'
+        ? carColor.getHex()
+        : bp.style === 'bullet'
+          ? 0x38bdf8
+          : 0xfde047;
+
+    const locoMat = new THREE.MeshStandardMaterial({
+      color: locoColor,
+      roughness: bp.style === 'bullet' ? 0.25 : 0.45,
+      metalness: bp.style === 'steam' ? 0.55 : 0.65,
+    });
+    const carMat = new THREE.MeshStandardMaterial({
+      color: carColor,
+      roughness: bp.style === 'bullet' ? 0.28 : 0.5,
+      metalness: bp.style === 'freight' ? 0.42 : 0.3,
+    });
+    const chassisMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.65,
+      metalness: 0.5,
+    });
+    const trimMat = new THREE.MeshStandardMaterial({
+      color: bp.style === 'freight' ? 0xfacc15 : 0xd97706,
+      roughness: 0.3,
+      metalness: 0.78,
+    });
+    const glowMat = new THREE.MeshStandardMaterial({
+      color: 0xfef9c3,
+      emissive: accentGlowHex,
+      emissiveIntensity: bp.style === 'neon' ? 1.5 : 0.85,
+      roughness: 0.2,
+    });
+    const neonStripMat = new THREE.MeshStandardMaterial({
+      color: accentGlowHex,
+      emissive: accentGlowHex,
+      emissiveIntensity: 1.6,
+      roughness: 0.18,
+    });
+    lanternMaterials.push(glowMat);
+    if (bp.style === 'neon') lanternMaterials.push(neonStripMat);
+    ownedMaterials.push(locoMat, carMat, chassisMat, trimMat, glowMat, neonStripMat);
+
+    const addWheels = (parent: THREE.Group, zPositions: number[]) => {
+      for (const wz of zPositions) {
+        for (const wx of [-0.46, 0.46]) {
+          const w = new THREE.Mesh(sharedWheelGeo, chassisMat);
+          w.position.set(wx, 0.22, wz);
+          parent.add(w);
+          wheels.push(w);
+        }
+      }
+    };
+
+    // Build Locomotive according to style
+    const loco = new THREE.Group();
+    loco.userData = { trainVehicle: true };
+    addScaledTrainPart(loco, sharedUnitBox, chassisMat, 0, 0.34, 0, 1.06, 0.22, 2.35);
+    addWheels(loco, [-0.72, 0.05, 0.75]);
+
+    const smokestackTip = new THREE.Object3D();
+    smokestackTip.position.set(0, 1.82, 0.72);
+    loco.add(smokestackTip);
+
+    if (bp.style === 'bullet') {
+      // Sleek tapered aerodynamic nose + smooth continuous cockpit visor
+      addScaledTrainPart(loco, sharedUnitBox, locoMat, 0, 0.84, -0.18, 1.02, 0.86, 1.85);
+      addScaledTrainPart(loco, sharedNoseCone, locoMat, 0, 0.74, 1.24, 0.96, 0.78, 1.02);
+      addScaledTrainPart(loco, sharedUnitBox, carMat, 0, 0.62, 0, 1.06, 0.14, 2.2);
+      // Wrap-around glowing panoramic windshield
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0, 0.98, 0.74, 0.92, 0.28, 0.48, -0.32);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, -0.53, 0.9, -0.25, 0.04, 0.26, 1.45);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0.53, 0.9, -0.25, 0.04, 0.26, 1.45);
+      // Twin LED headlights
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, -0.26, 0.54, 1.62, 0.18, 0.1, 0.08);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0.26, 0.54, 1.62, 0.18, 0.1, 0.08);
+    } else if (bp.style === 'neon') {
+      // Cyberpunk angular maglev locomotive with glowing lightbars & dorsal fin
+      addScaledTrainPart(loco, sharedUnitBox, locoMat, 0, 0.82, -0.05, 1.08, 0.82, 2.18);
+      addScaledTrainPart(loco, sharedNoseCone, locoMat, 0, 0.72, 1.44, 0.92, 0.68, 0.82);
+      // Glowing neon underglow + side pulse rails + dorsal fin
+      addScaledTrainPart(loco, sharedUnitBox, neonStripMat, -0.56, 0.48, 0, 0.05, 0.08, 2.24);
+      addScaledTrainPart(loco, sharedUnitBox, neonStripMat, 0.56, 0.48, 0, 0.05, 0.08, 2.24);
+      addScaledTrainPart(loco, sharedUnitBox, neonStripMat, 0, 1.28, -0.1, 0.12, 0.22, 1.65);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0, 0.96, 1.06, 0.86, 0.24, 0.12);
+    } else if (bp.style === 'freight') {
+      // Heavy industrial diesel-electric freight hood locomotive
+      addScaledTrainPart(loco, sharedUnitBox, locoMat, 0, 0.9, -0.58, 1.04, 1.02, 0.95);
+      addScaledTrainPart(loco, sharedUnitBox, locoMat, 0, 0.78, 0.44, 0.82, 0.78, 1.15);
+      addScaledTrainPart(loco, sharedUnitBox, trimMat, 0, 0.46, 0, 1.1, 0.12, 2.38);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0, 1.08, -0.09, 0.82, 0.3, 0.06);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0, 0.92, 1.05, 0.3, 0.22, 0.08);
+      addScaledTrainPart(loco, sharedUnitCyl, chassisMat, 0, 1.32, 0.55, 0.24, 0.36, 0.24);
+    } else {
+      // Classic Steam Locomotive (custom painted)
+      addScaledTrainPart(loco, sharedUnitCyl, locoMat, 0, 0.82, 0.36, 0.82, 1.48, 0.82, Math.PI / 2);
+      addScaledTrainPart(loco, sharedUnitBox, locoMat, 0, 0.98, -0.68, 1.02, 1.08, 0.84);
+      addScaledTrainPart(loco, sharedUnitBox, trimMat, 0, 1.56, -0.68, 1.16, 0.1, 0.98);
+      addScaledTrainPart(loco, sharedUnitCyl, chassisMat, 0, 1.46, 0.76, 0.24, 0.68, 0.24);
+      addScaledTrainPart(loco, sharedUnitCyl, trimMat, 0, 1.24, 0.22, 0.34, 0.26, 0.34);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0, 0.88, 1.14, 0.24, 0.24, 0.08);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, -0.52, 1.08, -0.68, 0.05, 0.34, 0.42);
+      addScaledTrainPart(loco, sharedUnitBox, glowMat, 0.52, 1.08, -0.68, 0.05, 0.34, 0.42);
+    }
+    entryGroup.add(loco);
+
+    // Build 1..5 carriages matching style
+    const carriages: THREE.Group[] = [];
+    const carCount = Math.max(1, Math.min(5, Math.round(bp.carCount)));
+    for (let c = 0; c < carCount; c++) {
+      const car = new THREE.Group();
+      car.userData = { trainVehicle: true };
+      addScaledTrainPart(car, sharedUnitBox, chassisMat, 0, 0.34, 0, 1.0, 0.2, 2.08);
+      addWheels(car, [-0.66, 0.66]);
+
+      if (bp.style === 'freight') {
+        // Flatbed + stacked cargo containers / bullion crates
+        addScaledTrainPart(car, sharedUnitBox, trimMat, 0, 0.48, 0, 1.02, 0.1, 2.02);
+        addScaledTrainPart(car, sharedUnitBox, carMat, 0, 0.84, -0.42, 0.86, 0.62, 0.86);
+        addScaledTrainPart(
+          car,
+          sharedUnitBox,
+          c % 2 === 0 ? trimMat : carMat,
+          0,
+          0.78,
+          0.48,
+          0.84,
+          0.5,
+          0.78,
+        );
+      } else if (bp.style === 'bullet') {
+        addScaledTrainPart(car, sharedUnitBox, locoMat, 0, 0.84, 0, 1.0, 0.82, 2.02);
+        addScaledTrainPart(car, sharedUnitBox, carMat, 0, 0.58, 0, 1.03, 0.14, 2.04);
+        addScaledTrainPart(car, sharedUnitBox, glowMat, -0.52, 0.9, 0, 0.04, 0.28, 1.66);
+        addScaledTrainPart(car, sharedUnitBox, glowMat, 0.52, 0.9, 0, 0.04, 0.28, 1.66);
+      } else if (bp.style === 'neon') {
+        addScaledTrainPart(car, sharedUnitBox, locoMat, 0, 0.82, 0, 1.02, 0.78, 2.0);
+        addScaledTrainPart(car, sharedUnitBox, neonStripMat, -0.53, 0.52, 0, 0.05, 0.08, 1.98);
+        addScaledTrainPart(car, sharedUnitBox, neonStripMat, 0.53, 0.52, 0, 0.05, 0.08, 1.98);
+        addScaledTrainPart(car, sharedUnitBox, glowMat, -0.53, 0.92, 0, 0.04, 0.24, 1.58);
+        addScaledTrainPart(car, sharedUnitBox, glowMat, 0.53, 0.92, 0, 0.04, 0.24, 1.58);
+      } else {
+        // Classic passenger coach
+        addScaledTrainPart(car, sharedUnitBox, carMat, 0, 0.88, 0, 0.98, 0.88, 1.96);
+        addScaledTrainPart(car, sharedUnitBox, trimMat, 0, 1.36, 0, 1.08, 0.12, 2.08);
+        for (const wz of [-0.52, 0, 0.52]) {
+          addScaledTrainPart(car, sharedUnitBox, glowMat, -0.5, 0.94, wz, 0.04, 0.34, 0.36);
+          addScaledTrainPart(car, sharedUnitBox, glowMat, 0.5, 0.94, wz, 0.04, 0.34, 0.36);
+        }
+      }
+      entryGroup.add(car);
+      carriages.push(car);
+    }
+
+    return {
+      blueprint: bp,
+      group: entryGroup,
+      locomotive: loco,
+      carriages,
+      wheels,
+      smokestackTip,
+      hasSteam: bp.style === 'steam',
+      phaseOffset,
+      ownedMaterials,
+    };
+  }
+
+  let fleet: FleetEntry[] = [
+    {
+      blueprint: DEFAULT_TRAIN_BLUEPRINT,
+      group: new THREE.Group(),
+      locomotive: consist.locomotive,
+      carriages: consist.carriages,
+      wheels: consist.wheels,
+      smokestackTip: consist.smokestackTip,
+      hasSteam: true,
+      phaseOffset: 0,
+      ownedMaterials: [],
+    },
+  ];
+  let usingDefaultConsist = true;
+  let fleetSignature = DEFAULT_TRAIN_BLUEPRINT.id;
+
+  const disposeExtraFleet = () => {
+    for (const entry of fleet) {
+      if (entry.group.parent === trainGroup) {
+        trainGroup.remove(entry.group);
+      }
+      for (const mat of entry.ownedMaterials) {
+        const idx = lanternMaterials.indexOf(mat as THREE.MeshStandardMaterial);
+        if (idx !== -1) lanternMaterials.splice(idx, 1);
+        mat.dispose();
+      }
+    }
+  };
+
+  const setTrainFleet = (blueprints: TrainBlueprint[]) => {
+    const cleanList = (blueprints && blueprints.length > 0 ? blueprints : [DEFAULT_TRAIN_BLUEPRINT]).slice(0, 3);
+    const sig = cleanList
+      .map((b) => `${b.id}:${b.style}:${b.locomotiveColor}:${b.carriageColor}:${b.carCount}:${b.speed}`)
+      .join('|');
+    if (sig === fleetSignature) return;
+    fleetSignature = sig;
+
+    const isSingleDefault =
+      cleanList.length === 1 && cleanList[0].id === DEFAULT_TRAIN_BLUEPRINT.id;
+
+    disposeExtraFleet();
+
+    if (isSingleDefault) {
+      consist.locomotive.visible = true;
+      for (const c of consist.carriages) c.visible = true;
+      usingDefaultConsist = true;
+      fleet = [
+        {
+          blueprint: DEFAULT_TRAIN_BLUEPRINT,
+          group: new THREE.Group(),
+          locomotive: consist.locomotive,
+          carriages: consist.carriages,
+          wheels: consist.wheels,
+          smokestackTip: consist.smokestackTip,
+          hasSteam: true,
+          phaseOffset: 0,
+          ownedMaterials: [],
+        },
+      ];
+      return;
+    }
+
+    // Hide original default consist meshes & mount custom procedural fleet
+    consist.locomotive.visible = false;
+    for (const c of consist.carriages) c.visible = false;
+    usingDefaultConsist = false;
+
+    const nextFleet: FleetEntry[] = [];
+    cleanList.forEach((bp, idx) => {
+      const phaseOffset = idx / cleanList.length;
+      const entry = buildBlueprintTrainEntry(bp, phaseOffset);
+      const enableShadows = activeQuality === 'high';
+      entry.group.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) obj.castShadow = enableShadows;
+      });
+      trainGroup.add(entry.group);
+      nextFleet.push(entry);
+    });
+    fleet = nextFleet;
+  };
+
   // 7. Rising Steam Puffs (THREE.Points with soft radial canvas sprite)
   const MAX_PUFFS = 28;
   const puffPositions = new Float32Array(MAX_PUFFS * 3);
@@ -1160,16 +1472,17 @@ export function buildTownRailway(
       outEye: THREE.Vector3,
       outLook: THREE.Vector3,
     ) => {
-      if (seat === 'passenger' && consist.carriages[0]) {
-        const coach = consist.carriages[0];
-        coach.updateMatrixWorld();
-        outEye.set(0.86, 1.24, 0.05).applyMatrix4(coach.matrixWorld);
-        outLook.set(4.8, 1.0, 5.8).applyMatrix4(coach.matrixWorld);
+      const lead = fleet[0];
+      const leadCar = lead?.carriages[0] ?? consist.carriages[0];
+      const leadLoco = lead?.locomotive ?? consist.locomotive;
+      if (seat === 'passenger' && leadCar) {
+        leadCar.updateMatrixWorld();
+        outEye.set(0.86, 1.24, 0.05).applyMatrix4(leadCar.matrixWorld);
+        outLook.set(4.8, 1.0, 5.8).applyMatrix4(leadCar.matrixWorld);
       } else {
-        const locoObj = consist.locomotive;
-        locoObj.updateMatrixWorld();
-        outEye.set(0, 1.94, -0.32).applyMatrix4(locoObj.matrixWorld);
-        outLook.set(0, 1.38, 10.5).applyMatrix4(locoObj.matrixWorld);
+        leadLoco.updateMatrixWorld();
+        outEye.set(0, 1.94, -0.32).applyMatrix4(leadLoco.matrixWorld);
+        outLook.set(0, 1.38, 10.5).applyMatrix4(leadLoco.matrixWorld);
       }
     },
     getTrainStatus: () => ({
@@ -1226,6 +1539,7 @@ export function buildTownRailway(
         itSignTex.needsUpdate = true;
       }
     },
+    setTrainFleet,
     setGraphicsQuality: (quality: GraphicsQuality) => {
       activeQuality = quality;
       const enableShadows = quality === 'high';
@@ -1255,11 +1569,14 @@ export function buildTownRailway(
       let isStoppedAtFrontier = false;
       let frontierStopElapsed = 0;
 
+      const leadSpeedMult = Math.max(0.6, Math.min(2.2, fleet[0]?.blueprint.speed ?? 1.0));
+      const effectiveDelta = delta * leadSpeedMult;
+
       if (railSpurEnabled) {
-        // Drive the existing steam locomotive + 2 carriages continuously on the connected outer railway loop!
+        // Drive the lead train continuously on the connected outer railway loop!
         activeCurve = extendedLoopCurve;
         activeLen = extendedTrackLength;
-        extCycleTime = (extCycleTime + delta) % EXT_CYCLE_DURATION;
+        extCycleTime = (extCycleTime + effectiveDelta) % EXT_CYCLE_DURATION;
 
         if (extCycleTime < STOP_DURATION) {
           // 10-second stop at Alderbrook Station
@@ -1271,7 +1588,7 @@ export function buildTownRailway(
           // Cruise clockwise from Alderbrook Station onto the connected East Outer Frontier Loop
           const leg = evaluateSmoothLeg(extCycleTime - STOP_DURATION, EXT_LEG1_DUR, 6.0, 6.0);
           headU = (extMainStationU + leg.s * leg1UDelta) % 1;
-          linearSpeed = (leg.vNorm * (leg1UDelta * extendedTrackLength)) / EXT_LEG1_DUR;
+          linearSpeed = ((leg.vNorm * (leg1UDelta * extendedTrackLength)) / EXT_LEG1_DUR) * leadSpeedMult;
         } else if (extCycleTime < EXT_LEG2_START) {
           // 10-second stop at the new Outer Frontier Station!
           headU = extFrontierStationU;
@@ -1282,13 +1599,13 @@ export function buildTownRailway(
           // Depart Outer Frontier Station, merge back onto inner loop, and pull into Alderbrook Station
           const leg = evaluateSmoothLeg(extCycleTime - EXT_LEG2_START, EXT_LEG2_DUR, 4.0, 4.5);
           headU = (extFrontierStationU + leg.s * leg2UDelta) % 1;
-          linearSpeed = (leg.vNorm * (leg2UDelta * extendedTrackLength)) / EXT_LEG2_DUR;
+          linearSpeed = ((leg.vNorm * (leg2UDelta * extendedTrackLength)) / EXT_LEG2_DUR) * leadSpeedMult;
         }
       } else {
-        cycleTime = (cycleTime + delta) % CYCLE_DURATION;
+        cycleTime = (cycleTime + effectiveDelta) % CYCLE_DURATION;
         const sched = evaluateTrainSchedule(cycleTime);
         headU = (STATION_U + sched.progress) % 1;
-        linearSpeed = (sched.speedNorm * trackLength) / MOVE_DURATION;
+        linearSpeed = ((sched.speedNorm * trackLength) / MOVE_DURATION) * leadSpeedMult;
         isStoppedAtMain = sched.isStopped;
         mainStopElapsed = sched.stopElapsed;
       }
@@ -1296,18 +1613,21 @@ export function buildTownRailway(
       const isStoppedAny = isStoppedAtMain || isStoppedAtFrontier;
       lastStoppedAt = isStoppedAtMain ? 'alderbrook' : isStoppedAtFrontier ? 'frontier' : null;
 
-      // 1. Place locomotive and 2 carriages smoothly along the active curve (inner or extended loop)
-      placeCarOnCurve(activeCurve, consist.locomotive, headU);
-      const carDist1 = 2.65 / activeLen;
-      const carDist2 = 5.15 / activeLen;
-      placeCarOnCurve(activeCurve, consist.carriages[0], headU - carDist1);
-      placeCarOnCurve(activeCurve, consist.carriages[1], headU - carDist2);
-
-      // 2. Rotate wheels proportional to linear speed
-      const wheelRotStep = (linearSpeed / 0.24) * delta;
-      if (wheelRotStep > 0.0001) {
-        for (let i = 0; i < consist.wheels.length; i++) {
-          consist.wheels[i].rotation.x += wheelRotStep;
+      // 1. Place lead train & any additional custom AI-imagined trains along the active loop
+      const carSpacing = 2.42;
+      for (let fIdx = 0; fIdx < fleet.length; fIdx++) {
+        const entry = fleet[fIdx];
+        const entryU = fIdx === 0 ? headU : (headU + entry.phaseOffset) % 1;
+        placeCarOnCurve(activeCurve, entry.locomotive, entryU);
+        for (let cIdx = 0; cIdx < entry.carriages.length; cIdx++) {
+          const distBehind = 2.55 + cIdx * carSpacing;
+          placeCarOnCurve(activeCurve, entry.carriages[cIdx], entryU - distBehind / activeLen);
+        }
+        const wheelRotStep = (linearSpeed / 0.24) * delta;
+        if (wheelRotStep > 0.0001) {
+          for (let i = 0; i < entry.wheels.length; i++) {
+            entry.wheels[i].rotation.x += wheelRotStep;
+          }
         }
       }
 
@@ -1400,52 +1720,60 @@ export function buildTownRailway(
         expressCar.rotation.y = interTownCycle < 12.0 ? Math.PI / 2 : -Math.PI / 2;
       }
 
-      // 4. Rising Steam Puffs from Locomotive Smokestack (THREE.Points)
-      consist.locomotive.updateMatrixWorld();
-      consist.smokestackTip.getWorldPosition(_stackWorld);
-      activeCurve.getTangentAt(headU, _tan).normalize();
+      // 4. Rising Steam Puffs from Lead Locomotive Smokestack (visible only for steam locomotives)
+      const leadEntry = fleet[0];
+      steamPoints.visible = Boolean(leadEntry?.hasSteam);
+      if (leadEntry && leadEntry.hasSteam) {
+        leadEntry.locomotive.updateMatrixWorld();
+        leadEntry.smokestackTip.getWorldPosition(_stackWorld);
+        activeCurve.getTangentAt(headU, _tan).normalize();
 
-      const activePuffCount = activeQuality === 'low' ? 14 : MAX_PUFFS;
-      const speedRatio = Math.min(1.5, linearSpeed / 2.6);
-      const puffRate = isStoppedAny ? 0.45 : 0.65 + speedRatio * 0.3;
-      const puffAttr = puffGeo.getAttribute('position') as THREE.BufferAttribute;
+        const activePuffCount = activeQuality === 'low' ? 14 : MAX_PUFFS;
+        const speedRatio = Math.min(1.5, linearSpeed / 2.6);
+        const puffRate = isStoppedAny ? 0.45 : 0.65 + speedRatio * 0.3;
+        const puffAttr = puffGeo.getAttribute('position') as THREE.BufferAttribute;
 
-      for (let i = 0; i < activePuffCount; i++) {
-        let age = puffAges[i] + delta * puffRate;
-        if (age >= 1.0) {
-          age = age % 1.0;
-          puffOrigins[i * 3] = _stackWorld.x + Math.sin(i * 12.7 + elapsed) * 0.06;
-          puffOrigins[i * 3 + 1] = _stackWorld.y;
-          puffOrigins[i * 3 + 2] = _stackWorld.z + Math.cos(i * 9.3 + elapsed) * 0.06;
-          const trail = isStoppedAny ? 0.18 : 0.85;
-          puffDrifts[i * 2] = -_tan.x * trail + Math.sin(i * 3.1) * 0.22;
-          puffDrifts[i * 2 + 1] = -_tan.z * trail + Math.cos(i * 4.7) * 0.22;
+        for (let i = 0; i < activePuffCount; i++) {
+          let age = puffAges[i] + delta * puffRate;
+          if (age >= 1.0) {
+            age = age % 1.0;
+            puffOrigins[i * 3] = _stackWorld.x + Math.sin(i * 12.7 + elapsed) * 0.06;
+            puffOrigins[i * 3 + 1] = _stackWorld.y;
+            puffOrigins[i * 3 + 2] = _stackWorld.z + Math.cos(i * 9.3 + elapsed) * 0.06;
+            const trail = isStoppedAny ? 0.18 : 0.85;
+            puffDrifts[i * 2] = -_tan.x * trail + Math.sin(i * 3.1) * 0.22;
+            puffDrifts[i * 2 + 1] = -_tan.z * trail + Math.cos(i * 4.7) * 0.22;
+          }
+          puffAges[i] = age;
+
+          _puffOrigin.set(puffOrigins[i * 3], puffOrigins[i * 3 + 1], puffOrigins[i * 3 + 2]);
+          if (_puffOrigin.y <= 0.1) {
+            puffPositions[i * 3] = _stackWorld.x;
+            puffPositions[i * 3 + 1] = _stackWorld.y + age * 2.4;
+            puffPositions[i * 3 + 2] = _stackWorld.z;
+          } else {
+            const rise = isStoppedAny ? 3.2 : 2.5;
+            puffPositions[i * 3] =
+              _puffOrigin.x + puffDrifts[i * 2] * age + Math.sin(elapsed * 2 + i) * 0.12 * age;
+            puffPositions[i * 3 + 1] = _puffOrigin.y + age * rise;
+            puffPositions[i * 3 + 2] =
+              _puffOrigin.z + puffDrifts[i * 2 + 1] * age + Math.cos(elapsed * 1.8 + i) * 0.12 * age;
+          }
         }
-        puffAges[i] = age;
-
-        _puffOrigin.set(puffOrigins[i * 3], puffOrigins[i * 3 + 1], puffOrigins[i * 3 + 2]);
-        if (_puffOrigin.y <= 0.1) {
-          puffPositions[i * 3] = _stackWorld.x;
-          puffPositions[i * 3 + 1] = _stackWorld.y + age * 2.4;
-          puffPositions[i * 3 + 2] = _stackWorld.z;
-        } else {
-          const rise = isStoppedAny ? 3.2 : 2.5;
-          puffPositions[i * 3] =
-            _puffOrigin.x + puffDrifts[i * 2] * age + Math.sin(elapsed * 2 + i) * 0.12 * age;
-          puffPositions[i * 3 + 1] = _puffOrigin.y + age * rise;
-          puffPositions[i * 3 + 2] =
-            _puffOrigin.z + puffDrifts[i * 2 + 1] * age + Math.cos(elapsed * 1.8 + i) * 0.12 * age;
-        }
+        puffMat.size = isStoppedAny ? 0.84 : 0.68;
+        puffAttr.needsUpdate = true;
       }
-      puffMat.size = isStoppedAny ? 0.84 : 0.68;
-      puffAttr.needsUpdate = true;
+      void usingDefaultConsist;
     },
     dispose: () => {
+      disposeExtraFleet();
       scene.remove(root);
       root.traverse((obj) => {
         if ((obj as THREE.Mesh).isMesh) {
           const m = obj as THREE.Mesh;
-          m.geometry?.dispose();
+          if (m.geometry && !m.geometry.userData?.shared) {
+            m.geometry.dispose();
+          }
           const mats = Array.isArray(m.material) ? m.material : [m.material];
           for (const mat of mats) {
             if (!mat) continue;

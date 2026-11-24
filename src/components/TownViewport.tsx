@@ -55,6 +55,7 @@ import {
   type TimeOfDay,
   type TownStructure,
   type TownTheme,
+  type TrainBlueprint,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -69,6 +70,7 @@ interface TownViewportProps {
   railSpurBuilt: boolean;
   interTownRailBuilt: boolean;
   interTownRailTarget: string;
+  trainBlueprints?: TrainBlueprint[];
   nextSavedTownName?: string | null;
   activeAgentId: AgentId | null;
   selectedAgentId: AgentId | null;
@@ -174,6 +176,7 @@ export function TownViewport({
   railSpurBuilt,
   interTownRailBuilt,
   interTownRailTarget,
+  trainBlueprints = [],
   nextSavedTownName = null,
   activeAgentId,
   selectedAgentId,
@@ -253,6 +256,7 @@ export function TownViewport({
     timeOfDay,
     weather,
     townTheme,
+    trainBlueprints,
   });
   latestTownDataRef.current = {
     townId,
@@ -272,6 +276,7 @@ export function TownViewport({
     timeOfDay,
     weather,
     townTheme,
+    trainBlueprints,
   };
   const callbacksRef = useRef({
     onSelectAgent,
@@ -380,6 +385,7 @@ export function TownViewport({
       timeOfDay: snap.timeOfDay,
       weather: snap.weather,
       theme: snap.townTheme,
+      trainBlueprints: snap.trainBlueprints,
     });
     loadedTownKeyRef.current = `${snap.townId}:${snap.isMainTown}:${snap.townName}`;
 
@@ -418,6 +424,7 @@ export function TownViewport({
       timeOfDay: snap.timeOfDay,
       weather: snap.weather,
       theme: snap.townTheme,
+      trainBlueprints: snap.trainBlueprints,
     });
     loadedTownKeyRef.current = currentTownKey;
   }, [currentTownKey]);
@@ -446,6 +453,11 @@ export function TownViewport({
     if (loadedTownKeyRef.current !== currentTownKey) return;
     controllerRef.current?.syncStructures(structures, selectedPlotId);
   }, [structures, selectedPlotId, currentTownKey]);
+
+  useEffect(() => {
+    if (loadedTownKeyRef.current !== currentTownKey) return;
+    controllerRef.current?.syncTrainFleet(trainBlueprints);
+  }, [trainBlueprints, currentTownKey]);
 
   useEffect(() => {
     controllerRef.current?.setAtmosphere(timeOfDay, weather);
@@ -1035,6 +1047,18 @@ export function TownViewport({
                   </span>
                 )}
               </div>
+              {selectedStructure.blueprint && (
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-cyan-200/90">
+                  <span className="rounded-md border border-cyan-400/30 bg-cyan-500/10 px-1.5 py-0.5">
+                    {selectedStructure.blueprint.floors}F · {selectedStructure.blueprint.roofStyle.replace('_', ' ')}
+                  </span>
+                  {selectedStructure.blueprint.apartmentCapacity > 0 && (
+                    <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-200">
+                      +{selectedStructure.blueprint.apartmentCapacity} Crowd Housing
+                    </span>
+                  )}
+                </div>
+              )}
 
               {selectedStructure.status === 'building' && (
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">

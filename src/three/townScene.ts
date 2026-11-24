@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ALL_PLOT_IDS,
   BIOME_META,
+  computeTownHousingCapacity,
   createDefaultEnemyCityState,
   createDefaultEnemyRaidState,
   getAvailablePlotIds,
@@ -25,6 +26,7 @@ import {
   type TimeOfDay,
   type TownStructure,
   type TownTheme,
+  type TrainBlueprint,
   type WeatherMode,
 } from '../types/town.ts';
 import {
@@ -38,6 +40,7 @@ import {
   type WaterUniforms,
   type WindUniforms,
 } from './townEnvironment.ts';
+import { buildTownCrowdSystem, type TownCrowdHandle } from './townCrowd.ts';
 import { buildTownLifeAndDecor, type TownLifeHandle } from './townLife.ts';
 import {
   BATTLE_FOCUS_TARGET,
@@ -1657,6 +1660,7 @@ export class TownSceneController {
   private expansionHandle!: TownExpansionHandle;
   private railwayHandle!: TownRailwayHandle;
   private busHandle!: TownBusHandle;
+  private crowdHandle: TownCrowdHandle | null = null;
   private lifeHandle: TownLifeHandle | null = null;
   private dogVillagerCoords: Array<{ x: number; z: number }> = [];
   private raiderHandle: TownRaidersHandle | null = null;
@@ -1878,6 +1882,8 @@ export class TownSceneController {
     this.syncStructures([], null);
     this.buildAgents(initialAgents);
     this.buildParticlesAndArc();
+    this.crowdHandle = buildTownCrowdSystem(this.scene);
+    this.disposables.push(this.crowdHandle);
     this.lifeHandle = buildTownLifeAndDecor(this.sharedShadowTex);
     this.scene.add(this.lifeHandle.group);
     this.disposables.push(this.lifeHandle);
@@ -2407,6 +2413,7 @@ export class TownSceneController {
     this.expansionHandle?.setGraphicsQuality(quality);
     this.railwayHandle?.setGraphicsQuality(quality);
     this.busHandle?.setGraphicsQuality(quality);
+    this.crowdHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.raiderHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
@@ -2913,6 +2920,7 @@ export class TownSceneController {
     timeOfDay: TimeOfDay;
     weather: WeatherMode;
     theme: TownTheme;
+    trainBlueprints?: TrainBlueprint[];
   }): void {
     this.currentTownId = params.townId;
     this.currentTownName = params.townName || (params.isMainTown ? 'Alderbrook' : 'New Town');
@@ -2928,9 +2936,14 @@ export class TownSceneController {
     if (this.starterResourcesGroup) {
       this.starterResourcesGroup.visible = this.isCleanFrontier;
     }
+    const hasCustomTrain = Boolean(params.trainBlueprints && params.trainBlueprints.length > 0);
     if (this.railwayHandle) {
       this.railwayHandle.group.visible =
-        params.isMainTown || params.railSpurBuilt || Boolean(params.interTownRailBuilt);
+        params.isMainTown ||
+        params.railSpurBuilt ||
+        Boolean(params.interTownRailBuilt) ||
+        hasCustomTrain;
+      this.railwayHandle.setTrainFleet(params.trainBlueprints ?? []);
     }
 
     // 3. Clear transient visual effects, camera mode & cached cutaway/plot state
@@ -3067,12 +3080,25 @@ export class TownSceneController {
     this.busHandle?.setDestinationName(townName);
   }
 
+  public syncTrainFleet(blueprints: TrainBlueprint[]): void {
+    if (!this.railwayHandle) return;
+    if (blueprints.length > 0) {
+      this.railwayHandle.group.visible = true;
+    }
+    this.railwayHandle.setTrainFleet(blueprints);
+  }
+
   public syncStructures(
     structures: TownStructure[],
     selectedPlotId: PlotId | null,
   ): void {
     this.lastStructures = structures;
     this.lastSelectedPlotId = selectedPlotId;
+
+    // Update instanced zero-AI dummy crowd population & apartment entrance anchors
+    const housing = computeTownHousingCapacity(structures);
+    this.crowdHandle?.setTargetPopulation(housing.dummyPopulation);
+    this.crowdHandle?.setApartmentAnchors(structures);
 
     const byPlot = new Map<PlotId, TownStructure>();
     for (const s of structures) {
@@ -3101,8 +3127,11 @@ export class TownSceneController {
       }
 
       const isSelected = selectedPlotId === plotId;
+      const bpSig = s?.blueprint
+        ? `${s.blueprint.name}:${s.blueprint.floors}:${s.blueprint.width}:${s.blueprint.depth}:${s.blueprint.roofStyle}:${s.blueprint.primaryColor}:${s.blueprint.accentColor}:${s.blueprint.windowGlow}:${s.blueprint.hasBalconies}:${s.blueprint.apartmentCapacity}`
+        : '';
       const sig = s
-        ? `${s.structureType}:${s.customLabel ?? ''}:${s.customStyle ?? ''}:${s.status}:${s.progress}:${s.tier}:${isSelected}`
+        ? `${s.structureType}:${s.customLabel ?? ''}:${s.customStyle ?? ''}:${bpSig}:${s.status}:${s.progress}:${s.tier}:${isSelected}`
         : `empty:${isSelected}`;
 
       if (this.plotSignatures.get(plotId) === sig) {
@@ -4271,6 +4300,10 @@ export class TownSceneController {
         }
       }
 
+      if (this.crowdHandle) {
+        this.crowdHandle.update(delta, elapsed);
+      }
+
       if (this.lifeHandle) {
         let idx = 0;
         this.rigs.forEach((rig) => {
@@ -4385,7 +4418,9 @@ export class TownSceneController {
     this.scene.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh || (obj as THREE.Points).isPoints || (obj as THREE.Line).isLine) {
         const renderable = obj as THREE.Mesh | THREE.Points | THREE.Line;
-        renderable.geometry?.dispose();
+        if (renderable.geometry && !renderable.geometry.userData?.shared) {
+          renderable.geometry.dispose();
+        }
         if (Array.isArray(renderable.material)) {
           renderable.material.forEach((m) => m.dispose());
         } else {

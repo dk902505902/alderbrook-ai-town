@@ -71,6 +71,7 @@ import {
   loadEnemyCityLocal,
   loadLocalTown,
   loadOrInitializeTown,
+  loadTownExtrasLocal,
   LOCAL_MAIN_TOWN_ID,
   markRemoteCommandStatus,
   persistAgentNote,
@@ -89,6 +90,7 @@ import {
   resetTownInFirestore,
   saveEnemyCityLocal,
   saveLocalTown,
+  saveTownExtrasLocal,
   subscribePendingRemoteCommands,
   type LoadedTownState,
 } from './lib/townStore.ts';
@@ -123,6 +125,7 @@ import {
   ALL_TOWN_THEMES,
   BIOME_META,
   BIOME_PLOT_IDS,
+  computeTownHousingCapacity,
   CORE_AGENT_IDS,
   createDefaultEnemyCityState,
   createDefaultEnemyRaidState,
@@ -130,8 +133,11 @@ import {
   DEFAULT_PROVIDER_CONFIG,
   DEFAULT_REMOTE_BRIDGE_CONFIG,
   DEFAULT_SIGNAL_RELAY_CONFIG,
+  DEFAULT_TRAIN_BLUEPRINT,
   detectDefaultGraphicsQuality,
   ENEMY_RAIDER_AGENT_ID,
+  generateFallbackBuildingBlueprint,
+  generateFallbackImaginedTownBlueprint,
   getAvailablePlotIds,
   getStructureDisplayLabel,
   getWeatherSeasonEffect,
@@ -143,6 +149,9 @@ import {
   normalizeTownTheme,
   normalizeWeatherMode,
   PLOT_META,
+  sanitizeBuildingBlueprint,
+  sanitizeImaginedTownBlueprint,
+  sanitizeTrainBlueprint,
   STRUCTURE_META,
   TOWN_THEME_META,
   type AgentId,
@@ -150,10 +159,12 @@ import {
   type AgentTurnResponse,
   type AIProviderConfig,
   type BiomeId,
+  type BuildingBlueprint,
   type CameraMode,
   type EnemyBuildingId,
   type EnemyCityState,
   type EnemyRaidState,
+  type ImaginedTownBlueprint,
   type RaiderTactic,
   type CliAgentActivity,
   type CouncilProposal,
@@ -182,6 +193,7 @@ import {
   type TownStructure,
   type TownSummary,
   type TownTheme,
+  type TrainBlueprint,
   type WeatherMode,
 } from './types/town.ts';
 
@@ -543,6 +555,13 @@ export default function App() {
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>(initialLocal.current.timeOfDay);
   const [weather, setWeather] = useState<WeatherMode>(initialLocal.current.weather);
   const [townTheme, setTownTheme] = useState<TownTheme>(initialLocal.current.theme);
+  const [trainBlueprints, setTrainBlueprints] = useState<TrainBlueprint[]>(() => {
+    const init = initialLocal.current;
+    if (init?.trainBlueprints && init.trainBlueprints.length > 0) {
+      return init.trainBlueprints;
+    }
+    return loadTownExtrasLocal(init?.townId ?? LOCAL_MAIN_TOWN_ID).trainBlueprints;
+  });
   const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>(() =>
     loadGraphicsQuality(),
   );
@@ -552,6 +571,7 @@ export default function App() {
   const [secondsLeft, setSecondsLeft] = useState(8);
   const [isThinking, setIsThinking] = useState(false);
   const [isHiring, setIsHiring] = useState(false);
+  const [isImaginingTown, setIsImaginingTown] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [topBarNewTownOpen, setTopBarNewTownOpen] = useState(false);
   const [topBarNewTownName, setTopBarNewTownName] = useState('');
@@ -691,6 +711,11 @@ export default function App() {
     setStructures(loaded.structures);
     setLogs(loaded.logs);
     setEnemyCity(loaded.enemyCity ?? loadEnemyCityLocal(loaded.townId));
+    setTrainBlueprints(
+      loaded.trainBlueprints && loaded.trainBlueprints.length > 0
+        ? loaded.trainBlueprints
+        : loadTownExtrasLocal(loaded.townId).trainBlueprints,
+    );
     setSelectedPlotId(null);
     setSelectedAgentId('mayor_sterling');
     setRecentSpeakerId(null);
@@ -772,6 +797,7 @@ export default function App() {
       relationships,
       logs: logs.slice(0, 40),
       enemyCity,
+      trainBlueprints,
     };
     saveLocalTown(snapshot);
     if (!user) {
@@ -810,6 +836,7 @@ export default function App() {
     relationships,
     logs,
     enemyCity,
+    trainBlueprints,
     mergeCloudAndLocalTowns,
   ]);
 
@@ -818,6 +845,12 @@ export default function App() {
     if (!activeTownId) return;
     saveEnemyCityLocal(activeTownId, enemyCity);
   }, [activeTownId, enemyCity]);
+
+  // Persist procedural building blueprints & AI-imagined train fleet sidecar across reloads
+  useEffect(() => {
+    if (!activeTownId) return;
+    saveTownExtrasLocal(activeTownId, structures, trainBlueprints);
+  }, [activeTownId, structures, trainBlueprints]);
 
   useEffect(() => {
     return () => {
@@ -899,6 +932,7 @@ export default function App() {
     timeOfDay,
     weather,
     townTheme,
+    trainBlueprints,
     turnIntervalSeconds,
     providerConfig,
     remoteBridgeConfig,
@@ -938,11 +972,14 @@ export default function App() {
     timeOfDay,
     weather,
     townTheme,
+    trainBlueprints,
     turnIntervalSeconds,
     providerConfig,
     remoteBridgeConfig,
     user,
   };
+
+  const housingStats = useMemo(() => computeTownHousingCapacity(structures), [structures]);
 
   const dispatchBridgeNotification = useCallback(
     (
@@ -2812,6 +2849,8 @@ export default function App() {
           structures: snap.structures,
           relationships: snap.relationships,
           logs: snap.logs.slice(0, 40),
+          enemyCity: snap.enemyCity,
+          trainBlueprints: snap.trainBlueprints,
         });
       }
 
@@ -2844,8 +2883,11 @@ export default function App() {
   );
 
   const handleCreateNewTown = useCallback(
-    async (rawName: string): Promise<MayorBuildResult> => {
-      const cleanName = rawName.trim().slice(0, 48) || 'New Haven';
+    async (rawName: string, imagined?: ImaginedTownBlueprint): Promise<MayorBuildResult> => {
+      const cleanImagined = imagined
+        ? sanitizeImaginedTownBlueprint(imagined, rawName)
+        : undefined;
+      const cleanName = (cleanImagined?.name || rawName).trim().slice(0, 48) || 'New Haven';
       const snap = stateRef.current;
       setIsPlaying(false);
       setErrorBanner(null);
@@ -2879,24 +2921,30 @@ export default function App() {
           structures: snap.structures,
           relationships: snap.relationships,
           logs: snap.logs.slice(0, 40),
+          enemyCity: snap.enemyCity,
+          trainBlueprints: snap.trainBlueprints,
         });
       }
 
+      const imaginedSummary = cleanImagined
+        ? ` (${cleanImagined.theme} theme, ${cleanImagined.starterBuildings.length} procedural buildings, ${cleanImagined.train.name})`
+        : ' with a clean empty map, Town Hall, 5 starter villagers & supplies';
+
       if (snap.user) {
         try {
-          const fresh = await createNewTownInFirestore(snap.user.uid, cleanName);
+          const fresh = await createNewTownInFirestore(snap.user.uid, cleanName, cleanImagined);
           applyLoadedTownState(fresh);
           const list = await listUserTowns(snap.user.uid);
           if (list.length > 0) setSavedTowns(mergeCloudAndLocalTowns(list));
           soundscape.playBuildCompleteChime();
           return {
             ok: true,
-            badge: `Created Town: ${fresh.townName}`,
-            detail: `${fresh.townName} initialized with a clean empty map, Town Hall, 5 starter villagers & supplies. ${snap.townName} stays safely saved.`,
+            badge: cleanImagined ? `AI Town: ${fresh.townName}` : `Created Town: ${fresh.townName}`,
+            detail: `${fresh.townName} initialized${imaginedSummary}. ${snap.townName} stays safely saved.`,
           };
         } catch {
           // Graceful local fallback if multi-town Firestore rules aren't deployed yet
-          const freshLocal = createNewLocalTown(cleanName);
+          const freshLocal = createNewLocalTown(cleanName, cleanImagined);
           applyLoadedTownState(freshLocal);
           setSavedTowns((prev) =>
             mergeCloudAndLocalTowns(prev.filter((t) => !t.id.startsWith('local_'))),
@@ -2904,23 +2952,124 @@ export default function App() {
           soundscape.playBuildCompleteChime();
           return {
             ok: true,
-            badge: `Created Town: ${freshLocal.townName}`,
-            detail: `${freshLocal.townName} initialized cleanly on this device with Town Hall, 5 starter villagers & starter supplies. ${snap.townName} stays safely saved.`,
+            badge: cleanImagined
+              ? `AI Town: ${freshLocal.townName}`
+              : `Created Town: ${freshLocal.townName}`,
+            detail: `${freshLocal.townName} initialized cleanly on this device${imaginedSummary}. ${snap.townName} stays safely saved.`,
           };
         }
       }
 
-      const fresh = createNewLocalTown(cleanName);
+      const fresh = createNewLocalTown(cleanName, cleanImagined);
       applyLoadedTownState(fresh);
       setSavedTowns(listLocalTowns());
       soundscape.playBuildCompleteChime();
       return {
         ok: true,
-        badge: `Created Town: ${fresh.townName}`,
-        detail: `${fresh.townName} initialized with a clean empty map, Town Hall, 5 starter villagers & supplies. ${snap.townName} stays safely saved.`,
+        badge: cleanImagined ? `AI Town: ${fresh.townName}` : `Created Town: ${fresh.townName}`,
+        detail: `${fresh.townName} initialized${imaginedSummary}. ${snap.townName} stays safely saved.`,
       };
     },
     [applyLoadedTownState, mergeCloudAndLocalTowns],
+  );
+
+  const handleImagineNewTown = useCallback(
+    async (promptText: string) => {
+      const cleanPrompt = promptText.trim() || 'Futuristic sunlit oasis city';
+      if (isImaginingTown) return;
+      setIsImaginingTown(true);
+      try {
+        const snap = stateRef.current;
+        const mayorModel = resolveInferenceConfig(snap.providerConfig, 'mayor_sterling');
+        const hasLlm =
+          !mayorModel.isExternalCli &&
+          (mayorModel.apiKeys.length > 0 ||
+            (mayorModel.providerId === 'gemini' && snap.hasServerDefaultKey));
+
+        let imagined: ImaginedTownBlueprint = generateFallbackImaginedTownBlueprint(cleanPrompt);
+        if (hasLlm) {
+          try {
+            advanceProviderKeyCursor(mayorModel);
+            const res = await fetch('/api/town/imagine', {
+              method: 'POST',
+              headers: buildInferenceHeaders(mayorModel),
+              body: JSON.stringify({ prompt: cleanPrompt }),
+            });
+            if (res.ok) {
+              const data = (await res.json()) as {
+                imaginedTown?: ImaginedTownBlueprint;
+                town?: ImaginedTownBlueprint;
+              };
+              const payload = data.imaginedTown ?? data.town;
+              if (payload) {
+                imagined = sanitizeImaginedTownBlueprint(payload, cleanPrompt);
+              }
+            }
+          } catch {
+            // Instant local fallback already initialized
+          }
+        }
+
+        await handleCreateNewTown(imagined.name, imagined);
+      } finally {
+        setIsImaginingTown(false);
+      }
+    },
+    [handleCreateNewTown, isImaginingTown],
+  );
+
+  const handleDesignTrain = useCallback(
+    async (
+      blueprint: TrainBlueprint,
+      mode: 'swap' | 'add' = 'swap',
+    ): Promise<MayorBuildResult> => {
+      const snap = stateRef.current;
+      const now = Date.now();
+      const cleanBp = sanitizeTrainBlueprint(blueprint, blueprint.name);
+      const currentFleet =
+        snap.trainBlueprints.length > 0 ? snap.trainBlueprints : [DEFAULT_TRAIN_BLUEPRINT];
+
+      let nextFleet: TrainBlueprint[];
+      let verb: string;
+      if (mode === 'add' && currentFleet.length < 3) {
+        nextFleet = [...currentFleet, cleanBp];
+        verb = `Added Train #${nextFleet.length}`;
+      } else if (mode === 'add') {
+        nextFleet = [currentFleet[0], currentFleet[1], cleanBp];
+        verb = 'Upgraded Train #3';
+      } else {
+        nextFleet = [cleanBp, ...currentFleet.slice(1)];
+        verb = 'Commissioned';
+      }
+
+      setTrainBlueprints(nextFleet);
+      setTriggerTrainNonce((n) => n + 1);
+      saveTownExtrasLocal(snap.activeTownId, snap.structures, nextFleet);
+      soundscape.playBuildCompleteChime();
+
+      const badge = `${verb}: ${cleanBp.name} (${cleanBp.style} · ${cleanBp.carCount} cars)`;
+      const logItem: TownLogItem = {
+        id: `train-design-${now}`,
+        turnNumber: snap.turnCount,
+        agentId: 'mayor_sterling',
+        agentName: 'Mayor Sterling',
+        rank: 1,
+        location: 'market',
+        targetAgent: 'Architect Lyra',
+        thought: `Commissioned custom ${cleanBp.style} locomotive "${cleanBp.name}" (${cleanBp.carCount} cars, speed ${cleanBp.speed}x).`,
+        dialogue: `All aboard! ${cleanBp.name} is rolling onto the ${snap.townName} railway right now!`,
+        newTask: badge,
+        timestampMs: now,
+      };
+      setLogs((prev) => [logItem, ...prev].slice(0, 50));
+
+      return {
+        ok: true,
+        badge,
+        detail: `${cleanBp.name} (${cleanBp.style}, ${cleanBp.carCount} carriages, ${cleanBp.speed.toFixed(1)}x speed) is live on the railway (${nextFleet.length} train${nextFleet.length === 1 ? '' : 's'} active).`,
+      };
+    },
+    [],
   );
 
   const handleExpandBiome = useCallback(async (biome: BiomeId): Promise<MayorBuildResult> => {
@@ -3678,12 +3827,19 @@ export default function App() {
       displayLabel?: string,
       customStyle?: CustomBuildingStyle,
       preferredBiome?: BiomeId,
+      blueprint?: BuildingBlueprint,
     ): Promise<MayorBuildResult> => {
       const snap = stateRef.current;
       const now = Date.now();
       const customSpec =
         structureType === 'custom' ? inferCustomBuildingSpec(displayLabel || 'Research Lab') : null;
+      const resolvedBlueprint: BuildingBlueprint | undefined = blueprint
+        ? sanitizeBuildingBlueprint(blueprint, displayLabel || blueprint.name)
+        : structureType === 'apartment' || structureType === 'custom'
+          ? generateFallbackBuildingBlueprint(displayLabel || STRUCTURE_META[structureType].label)
+          : undefined;
       const label =
+        resolvedBlueprint?.name ||
         displayLabel?.trim() ||
         customSpec?.label ||
         STRUCTURE_META[structureType]?.label ||
@@ -3715,14 +3871,18 @@ export default function App() {
         if (biomeEmpty) chosenPlot = biomeEmpty;
       }
 
-      // 2) Otherwise check if same building is currently under construction or upgradable
+      // 2) Otherwise check if same building is currently under construction (or upgradable for non-apartment landmarks)
       if (!chosenPlot) {
         const matchingExisting = snap.structures.find((s) => {
           const sameType =
-            structureType === 'custom'
-              ? s.structureType === 'custom' &&
-                (s.customLabel || '').toLowerCase() === label.toLowerCase()
+            structureType === 'custom' || structureType === 'apartment'
+              ? s.structureType === structureType &&
+                (s.blueprint?.name || s.customLabel || '').toLowerCase() === label.toLowerCase()
               : s.structureType === structureType;
+          // Allow multiple apartments/procedural buildings on open plots unless an identical one is still being built
+          if (structureType === 'apartment' && s.status === 'complete' && availablePlots.some((p) => !occupiedMap.has(p))) {
+            return false;
+          }
           return sameType && (s.status === 'building' || s.tier < 3);
         });
         if (matchingExisting) {
@@ -3759,36 +3919,58 @@ export default function App() {
       let badge: string;
 
       if (!existing) {
+        const isProceduralInstant = Boolean(blueprint);
         nextStruct = {
           plotId: chosenPlot,
           structureType,
-          customLabel: structureType === 'custom' ? label.slice(0, 36) : undefined,
-          customStyle: structureType === 'custom' ? resolvedStyle : undefined,
-          status: 'building',
-          progress: 50,
+          customLabel:
+            structureType === 'custom' || structureType === 'apartment'
+              ? label.slice(0, 36)
+              : undefined,
+          customStyle:
+            structureType === 'custom' || structureType === 'apartment'
+              ? resolvedStyle ?? 'tower'
+              : undefined,
+          blueprint: resolvedBlueprint,
+          status: isProceduralInstant ? 'complete' : 'building',
+          progress: isProceduralInstant ? 100 : 50,
           tier: 1,
           proposedBy: 'Mayor Sterling',
           lastBuilder: 'Mayor Sterling',
           updatedAtMs: now,
         };
         actionKind = 'create';
-        badge = `Queued: ${label} (${plotLabel})`;
+        const housingTag =
+          resolvedBlueprint && resolvedBlueprint.apartmentCapacity > 0
+            ? ` · +${resolvedBlueprint.apartmentCapacity} Housing`
+            : resolvedBlueprint && resolvedBlueprint.floors > 1
+              ? ` · ${resolvedBlueprint.floors}F ${resolvedBlueprint.roofStyle.replace('_', ' ')}`
+              : '';
+        badge = isProceduralInstant
+          ? `Built: ${label} (${plotLabel})${housingTag}`
+          : `Queued: ${label} (${plotLabel})${housingTag}`;
         setStructures((prev) => [...prev, nextStruct]);
-        soundscape.playAgentChime(1);
+        if (isProceduralInstant) soundscape.playBuildCompleteChime();
+        else soundscape.playAgentChime(1);
       } else if (existing.status === 'building') {
         const nextProgress = Math.min(100, existing.progress + 50);
         const done = nextProgress >= 100;
         const existingLabel = getStructureDisplayLabel(existing);
         nextStruct = {
           ...existing,
+          blueprint: existing.blueprint ?? resolvedBlueprint,
           progress: nextProgress,
           status: done ? 'complete' : 'building',
           lastBuilder: 'Mayor Sterling',
           updatedAtMs: now,
         };
         actionKind = 'progress';
+        const housingTag =
+          done && nextStruct.blueprint && nextStruct.blueprint.apartmentCapacity > 0
+            ? ` · +${nextStruct.blueprint.apartmentCapacity} Housing`
+            : '';
         badge = done
-          ? `Completed: ${existingLabel} (${plotLabel})`
+          ? `Completed: ${existingLabel} (${plotLabel})${housingTag}`
           : `Built: ${existingLabel} ${nextProgress}%`;
         setStructures((prev) => prev.map((s) => (s.plotId === nextStruct.plotId ? nextStruct : s)));
         if (done) soundscape.playBuildCompleteChime();
@@ -5027,12 +5209,14 @@ export default function App() {
       label: string;
       style?: CustomBuildingStyle;
     }> = [
+      { type: 'apartment', label: '4-Story Skyline Apartments', style: 'tower' },
       { type: 'custom', label: 'Research Lab', style: 'lab' },
       { type: 'hospital', label: 'Town Hospital' },
       { type: 'triple_gun_tower', label: 'Triple-Gun Defense Tower' },
       { type: 'defense_wall', label: 'Defense Wall & Turret' },
       { type: 'bakery', label: 'Artisan Bakery' },
       { type: 'greenhouse', label: 'Glass Greenhouse' },
+      { type: 'apartment', label: '5-Story Harbor Flats', style: 'tower' },
       { type: 'custom', label: 'Observatory', style: 'observatory' },
       { type: 'custom', label: 'Artisan Cafe', style: 'cafe' },
       { type: 'windmill', label: 'Timber Windmill' },
@@ -5555,6 +5739,7 @@ export default function App() {
         timeOfDay={timeOfDay}
         weather={weather}
         townTheme={townTheme}
+        trainBlueprints={trainBlueprints}
         graphicsQuality={graphicsQuality}
         followActive={followActive}
         communicationEvent={communicationEvent}
@@ -5659,24 +5844,40 @@ export default function App() {
               setTopBarNewTownName('');
               void handleCreateNewTown(clean);
             }}
-            className="flex items-center gap-1.5"
+            className="space-y-2"
           >
             <input
               type="text"
               value={topBarNewTownName}
               onChange={(e) => setTopBarNewTownName(e.target.value)}
-              maxLength={48}
+              maxLength={64}
               autoFocus
-              placeholder="e.g. New Haven"
-              className="min-h-[38px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
+              placeholder="Name or idea (e.g. Desert Cyber-City)"
+              className="min-h-[38px] w-full rounded-xl border border-white/15 bg-slate-900 px-2.5 text-xs text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
             />
-            <button
-              type="submit"
-              disabled={!topBarNewTownName.trim()}
-              className="min-h-[38px] rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-40"
-            >
-              Create
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="submit"
+                disabled={!topBarNewTownName.trim() || isImaginingTown}
+                className="min-h-[36px] flex-1 rounded-xl border border-white/15 bg-slate-900 px-3 text-xs font-semibold text-slate-200 hover:border-amber-400/50 hover:text-amber-200 disabled:opacity-40"
+              >
+                Blank Town
+              </button>
+              <button
+                type="button"
+                disabled={isImaginingTown}
+                onClick={() => {
+                  const prompt = topBarNewTownName.trim() || 'Alpine neon rail city';
+                  setTopBarNewTownOpen(false);
+                  setTopBarNewTownName('');
+                  void handleImagineNewTown(prompt);
+                }}
+                className="inline-flex min-h-[36px] flex-1 items-center justify-center gap-1 rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-40"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                <span>{isImaginingTown ? 'Imagining…' : 'AI Imagine'}</span>
+              </button>
+            </div>
           </form>
         </div>
       )}
@@ -6132,7 +6333,7 @@ export default function App() {
                   Town Hierarchy
                 </h2>
                 <p className="text-xs text-slate-400">
-                  {agents.length} villagers · {LOCATION_LABELS[activeSpeaker?.location ?? 'town_hall']} active
+                  {agents.length} AI · {housingStats.dummyPopulation}/{housingStats.housingCapacity} crowd · {LOCATION_LABELS[activeSpeaker?.location ?? 'town_hall']}
                 </p>
               </div>
               <button
@@ -6582,6 +6783,7 @@ export default function App() {
         onBuildRoad={handleBuildRoad}
         onExtendRail={handleExtendRail}
         onBuildInterTownRail={handleBuildInterTownRail}
+        onDesignTrain={handleDesignTrain}
         onBuildStructure={handleMayorBuildStructure}
         onHireWorker={handleHireWorker}
         onUnhireWorker={handleUnhireWorker}

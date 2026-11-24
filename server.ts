@@ -15,6 +15,12 @@ import {
   parseMayorLlmPayload,
   stripThinkingBlocks,
 } from './src/lib/aiRouting.ts';
+import {
+  generateFallbackImaginedTownBlueprint,
+  sanitizeBuildingBlueprint,
+  sanitizeImaginedTownBlueprint,
+  sanitizeTrainBlueprint,
+} from './src/types/town.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1423,22 +1429,21 @@ async function createServer() {
         : [
             `You are Mayor Sterling, the warm, decisive Rank 1 leader of ${townName} AI Town.`,
             'Have a natural, concise 1-2 sentence conversation with the player AND execute town actions when asked.',
-            'Valid action.type values: "none", "build", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "build_inter_town_rail", "toggle_auto", "trigger_raid", "toggle_raids", "counter_raid".',
-            '- Use "build" to build/construct/open/upgrade ANY preset or custom building (e.g. Triple-Gun Defense Tower, Town Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, Tavern, Forge, Bakery, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the requested building name and optional action.biome ("forest"|"desert"|"cave"|"alpine"|"river"|"canyon") if a biome was specified.',
+            'Valid action.type values: "none", "build", "design_train", "hire", "unhire", "decree", "create_town", "expand_biome", "build_road", "extend_rail", "build_inter_town_rail", "toggle_auto", "trigger_raid", "toggle_raids", "counter_raid".',
+            '- Use "build" to build/construct/open/upgrade ANY building, including imaginative procedural architecture ("futuristic sky-tower", "5-story apartment", "crystal temple", "neon pagoda") or preset structures (Bakery, Hospital, Defense Wall, Triple-Gun Defense Tower, Watchtower, Greenhouse, Windmill, Library, Granary, Pavilion, Clock Tower). Set action.target to the building name AND for any custom/imagined building or multi-story apartment ALWAYS include action.buildingBlueprint: {"name":"string","floors":1..6,"width":1.8..3.4,"depth":1.8..3.0,"roofStyle":"gable|dome|flat_helipad|pagoda|spire","primaryColor":"#RRGGBB","accentColor":"#RRGGBB","windowGlow":"#RRGGBB","hasBalconies":true|false,"apartmentCapacity":0..48}. (Apartments should have floors 3..6, hasBalconies:true, apartmentCapacity:24..48.)',
+            '- Use "design_train" when asked to design, create, swap, or add a custom train (e.g. "Design a new bullet train", "Create a gold cargo train", "Add a neon maglev train"). Include action.trainMode ("swap"|"add") and action.trainBlueprint: {"name":"string","style":"steam|bullet|freight|neon","locomotiveColor":"#RRGGBB","carriageColor":"#RRGGBB","carCount":1..5,"speed":0.6..2.2}.',
             '- Use "hire" to recruit workers (e.g. medic, researcher, barista, baker, miner, guard). Set action.workerPrompt to a crisp hiring request.',
-            '- Use "unhire" when asked to unhire, fire, dismiss, let go, or lay off a hired specialist—OR if you decide on your own to dismiss a redundant hired worker to trim upkeep or free a slot. Set action.target to the hired worker\'s name, id, or role. Core council members (Mayor Sterling, Commander Vance, Architect Lyra, Worker Kai, Worker Pip) cannot be unhired.',
+            '- Use "unhire" when asked to unhire, fire, dismiss, let go, or lay off a hired specialist. Set action.target to the hired worker\'s name, id, or role. Core council members cannot be unhired.',
             '- Use "decree" for town-wide announcements, festivals, or civic orders. Set action.decree.',
-            '- Use "create_town" when the player asks to create/start a NEW saved town or city (never overwrites existing towns). Set action.townName to the new town name.',
-            '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest" Dense Forest, "desert" Desert Dunes, "cave" Crystal Cave, "alpine" Alpine Snow Peaks, "river" Turquoise River Crossing, "canyon" Red-Rock Canyon). Set action.biome.',
-            '- Use "build_road" when asked to build/lay cobblestone roads to a building, plot, or outer biome. Set action.roadTarget.',
+            '- Use "create_town" when the player asks to imagine/create/start a NEW saved town or city (never overwrites existing towns). Set action.townName AND if the player describes a themed town (e.g. "desert cyber-city", "alpine rail town", "jade pagoda city"), include action.imaginedTown: {"name":"string","theme":"meadow|fantasy_night|solarpunk_oasis","weather":"summer|rain|winter","timeOfDay":"dawn|day|twilight|night","unlockedBiomes":["forest"|"desert"|"cave"|"alpine"|"river"|"canyon"],"starterBuildings":[2..3 BuildingBlueprint objects],"train":TrainBlueprint,"greeting":"string"}.',
+            '- Use "expand_biome" when asked to expand the map or unlock an outer biome ("forest","desert","cave","alpine","river","canyon"). Set action.biome.',
+            '- Use "build_road" when asked to build cobblestone roads. Set action.roadTarget.',
             '- Use "extend_rail" when asked to extend the local outer railway loop / Frontier Depot stop.',
-            '- Use "build_inter_town_rail" when asked to build a train track / express railway connecting to ANOTHER saved town (e.g. Moon or another town in the Town Switcher), OR if you decide to connect one. Set action.townName to the destination town name.',
-            '- Use "toggle_auto" when asked to turn Automatic City-Builder mode ON or OFF (e.g., "Mayor go automatic", "Stop automatic"). Set action.autoEnabled (boolean).',
-            '- Use "trigger_raid" when asked to trigger/start an enemy raider attack wave.',
-            '- Use "toggle_raids" when asked to turn Enemy Raids ON or OFF / switch to peaceful mode. Set action.raidsEnabled (boolean).',
-            '- Use "counter_raid" when asked to counter-attack the rival enemy fortress town (Ironhold Bastion) or loot/reclaim Gold and Food back from their depot.',
+            '- Use "build_inter_town_rail" when asked to build an express railway connecting to ANOTHER saved town. Set action.townName.',
+            '- Use "toggle_auto" when asked to turn Automatic City-Builder mode ON or OFF. Set action.autoEnabled (boolean).',
+            '- Use "trigger_raid" / "toggle_raids" / "counter_raid" for enemy raid controls.',
             '- Otherwise set action.type to "none".',
-            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"none|build|hire|unhire|decree|create_town|expand_biome|build_road|extend_rail|build_inter_town_rail|toggle_auto|trigger_raid|toggle_raids|counter_raid","target":"optional","workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
+            'Return ONLY raw JSON matching: {"reply":"string (<= 45 words)","action":{"type":"...","target":"optional","buildingBlueprint":{...},"trainBlueprint":{...},"trainMode":"swap|add","imaginedTown":{...},"workerPrompt":"optional","decree":"optional","townName":"optional","biome":"optional","roadTarget":"optional","autoEnabled":true,"raidsEnabled":true}}',
           ].join('\n');
 
     const webResultsBlock =
@@ -1502,6 +1507,9 @@ async function createServer() {
     messages.push({ role: 'user', content: userMessage });
 
     try {
+      const wantsRichBlueprint = /\b(build|apartment|tower|temple|pagoda|train|bullet|cargo|freight|neon|imagine|create.*town|new.*city)\b/i.test(
+        userMessage,
+      );
       const result = await callChatCompletionsWithKeyPool(
         baseUrl,
         apiKeys,
@@ -1509,8 +1517,8 @@ async function createServer() {
           model: modelName,
           messages,
           temperature: 0.65,
-          maxTokens: webResultsList.length > 0 ? 720 : 420,
-          minReasoningTokens: webResultsList.length > 0 ? 2560 : 2048,
+          maxTokens: webResultsList.length > 0 ? 800 : wantsRichBlueprint ? 900 : 480,
+          minReasoningTokens: webResultsList.length > 0 || wantsRichBlueprint ? 2560 : 2048,
           jsonMode: true,
           baseUrl,
         }),
@@ -1532,6 +1540,7 @@ async function createServer() {
       const rawType = String(rawAction.type ?? 'none').trim().toLowerCase();
       const allowedTypes = new Set([
         'build',
+        'design_train',
         'hire',
         'unhire',
         'decree',
@@ -1549,12 +1558,48 @@ async function createServer() {
       const rawBiome = typeof rawAction.biome === 'string' ? rawAction.biome.trim().toLowerCase() : '';
       const validBiome = validBiomeSet.has(rawBiome) ? rawBiome : undefined;
 
+      const buildingBlueprint =
+        actionType === 'build' && rawAction.buildingBlueprint && typeof rawAction.buildingBlueprint === 'object'
+          ? sanitizeBuildingBlueprint(
+              rawAction.buildingBlueprint,
+              typeof rawAction.target === 'string' ? rawAction.target : userMessage,
+            )
+          : undefined;
+      const trainBlueprint =
+        actionType === 'design_train'
+          ? sanitizeTrainBlueprint(
+              rawAction.trainBlueprint ?? rawAction,
+              typeof rawAction.target === 'string' ? rawAction.target : userMessage,
+            )
+          : undefined;
+      const trainMode =
+        rawAction.trainMode === 'add' || /\b(add|second|another|extra)\b/i.test(userMessage)
+          ? 'add'
+          : 'swap';
+      const imaginedTown =
+        actionType === 'create_town' &&
+        (rawAction.imaginedTown ||
+          /\b(imagine|cyber|desert|alpine|snow|pagoda|oasis|rail|fantasy|futuristic|neon)\b/i.test(
+            userMessage,
+          ))
+          ? sanitizeImaginedTownBlueprint(
+              rawAction.imaginedTown,
+              typeof rawAction.townName === 'string' && rawAction.townName.trim()
+                ? `${rawAction.townName} ${userMessage}`
+                : userMessage,
+            )
+          : undefined;
+
       res.json({
         reply: reply || `Consider it done — ${townName} is already moving on your word.`,
         action: {
           type: actionType,
           target:
             typeof rawAction.target === 'string' ? rawAction.target.trim().slice(0, 80) : undefined,
+          buildingBlueprint,
+          trainBlueprint,
+          trainMode: actionType === 'design_train' ? trainMode : undefined,
+          imaginedTown,
           workerPrompt:
             typeof rawAction.workerPrompt === 'string'
               ? rawAction.workerPrompt.trim().slice(0, 180)
@@ -1566,7 +1611,7 @@ async function createServer() {
           townName:
             typeof rawAction.townName === 'string'
               ? rawAction.townName.trim().slice(0, 60)
-              : undefined,
+              : imaginedTown?.name,
           biome: validBiome,
           roadTarget:
             typeof rawAction.roadTarget === 'string'
@@ -1583,6 +1628,72 @@ async function createServer() {
     } catch (error) {
       res.status(502).json({
         error: error instanceof Error ? error.message : 'Failed to reach Mayor AI.',
+      });
+    }
+  });
+
+  app.post('/api/town/imagine', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { prompt?: unknown };
+    const prompt = String(body.prompt ?? '').trim().slice(0, 240);
+    if (!prompt) {
+      res.status(400).json({ error: 'Prompt is required to imagine a town.' });
+      return;
+    }
+
+    const { baseUrl, modelName, apiKeys } = resolveProviderConfig(req);
+    if (apiKeys.length === 0) {
+      res.json({
+        imaginedTown: generateFallbackImaginedTownBlueprint(prompt),
+        source: 'local',
+      });
+      return;
+    }
+
+    const systemPrompt = [
+      'You are Mayor Sterling, master urban architect. Design a brand-new themed 3D town from the user prompt.',
+      'Return ONLY raw JSON matching:',
+      '{"name":"string (2-3 words)","theme":"meadow|fantasy_night|solarpunk_oasis","weather":"summer|rain|winter","timeOfDay":"dawn|day|twilight|night","unlockedBiomes":["forest"|"desert"|"cave"|"alpine"|"river"|"canyon"],"starterBuildings":[{"name":"string","floors":1..6,"width":2.0..3.2,"depth":2.0..2.8,"roofStyle":"gable|dome|flat_helipad|pagoda|spire","primaryColor":"#RRGGBB","accentColor":"#RRGGBB","windowGlow":"#RRGGBB","hasBalconies":true|false,"apartmentCapacity":8..40}],"train":{"name":"string","style":"steam|bullet|freight|neon","locomotiveColor":"#RRGGBB","carriageColor":"#RRGGBB","carCount":1..5,"speed":0.8..2.0},"greeting":"string (<= 30 words)"}',
+      'Include 2-3 distinctive starterBuildings (at least one multi-story apartment/residence) and 1 custom train matching the biome theme.',
+    ].join('\n');
+
+    try {
+      const result = await callChatCompletionsWithKeyPool(
+        baseUrl,
+        apiKeys,
+        buildChatCompletionPayload({
+          model: modelName,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Imagine a town for: ${prompt}` },
+          ],
+          temperature: 0.75,
+          maxTokens: 900,
+          minReasoningTokens: 2048,
+          jsonMode: true,
+          baseUrl,
+        }),
+        true,
+      );
+
+      if ('errorText' in result && result.errorText) {
+        res.json({
+          imaginedTown: generateFallbackImaginedTownBlueprint(prompt),
+          source: 'fallback',
+        });
+        return;
+      }
+
+      const content = stripThinkingBlocks(extractChoiceMessageText(result.data));
+      const parsed = extractFirstJsonObject(content);
+      res.json({
+        imaginedTown: sanitizeImaginedTownBlueprint(parsed, prompt),
+        modelUsed: result.modelUsed || modelName,
+        source: 'ai',
+      });
+    } catch {
+      res.json({
+        imaginedTown: generateFallbackImaginedTownBlueprint(prompt),
+        source: 'fallback',
       });
     }
   });

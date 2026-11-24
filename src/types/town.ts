@@ -58,6 +58,44 @@ export type CustomBuildingStyle =
   | 'cabin'
   | 'tower';
 
+export type BuildingRoofStyle = 'gable' | 'dome' | 'flat_helipad' | 'pagoda' | 'spire';
+
+export interface BuildingBlueprint {
+  name: string;
+  floors: number; // 1..6
+  width: number; // 1.8..3.4
+  depth: number; // 1.8..3.0
+  roofStyle: BuildingRoofStyle;
+  primaryColor: string; // hex #RRGGBB
+  accentColor: string; // hex #RRGGBB
+  windowGlow: string; // hex #RRGGBB
+  hasBalconies: boolean;
+  apartmentCapacity: number; // 0..48 dummy citizens housed
+}
+
+export type TrainStyle = 'steam' | 'bullet' | 'freight' | 'neon';
+
+export interface TrainBlueprint {
+  id: string;
+  name: string;
+  style: TrainStyle;
+  locomotiveColor: string;
+  carriageColor: string;
+  carCount: number; // 1..5
+  speed: number; // 0.6..2.2 multiplier
+}
+
+export interface ImaginedTownBlueprint {
+  name: string;
+  theme: TownTheme;
+  weather: WeatherMode;
+  timeOfDay: TimeOfDay;
+  unlockedBiomes: BiomeId[];
+  starterBuildings: BuildingBlueprint[];
+  train: TrainBlueprint;
+  greeting: string;
+}
+
 export type StructureType =
   | 'bakery'
   | 'watchtower'
@@ -70,6 +108,7 @@ export type StructureType =
   | 'hospital'
   | 'defense_wall'
   | 'triple_gun_tower'
+  | 'apartment'
   | 'custom';
 
 export type StructureStatus = 'building' | 'complete';
@@ -203,6 +242,8 @@ export interface TownStructure {
   customLabel?: string;
   /** Visual architecture preset for custom procedural buildings */
   customStyle?: CustomBuildingStyle;
+  /** AI-imagined procedural architecture blueprint (floors, roof, colors, balconies, apartment housing) */
+  blueprint?: BuildingBlueprint;
 }
 
 export type CameraMode =
@@ -1092,6 +1133,7 @@ export const ALL_STRUCTURE_TYPES: StructureType[] = [
   'hospital',
   'defense_wall',
   'triple_gun_tower',
+  'apartment',
 ];
 
 export const PLOT_META: Record<
@@ -1210,6 +1252,12 @@ export const STRUCTURE_META: Record<
     color: '#dc2626',
     bonus: { prosperity: 0, order: 8, morale: 2 },
   },
+  apartment: {
+    label: 'Multi-Story Apartments',
+    category: 'Citizen Housing',
+    color: '#0ea5e9',
+    bonus: { prosperity: 4, order: 1, morale: 4 },
+  },
   custom: {
     label: 'Custom Civic Hall',
     category: 'Custom Project',
@@ -1252,8 +1300,11 @@ export const CUSTOM_STYLE_COLORS: Record<CustomBuildingStyle, string> = {
 };
 
 export function getStructureDisplayLabel(
-  structure: Pick<TownStructure, 'structureType' | 'customLabel'>,
+  structure: Pick<TownStructure, 'structureType' | 'customLabel' | 'blueprint'>,
 ): string {
+  if (structure.blueprint?.name?.trim()) {
+    return structure.blueprint.name.trim();
+  }
   if (structure.customLabel?.trim()) {
     return structure.customLabel.trim();
   }
@@ -1261,8 +1312,11 @@ export function getStructureDisplayLabel(
 }
 
 export function getStructureColor(
-  structure: Pick<TownStructure, 'structureType' | 'customStyle'>,
+  structure: Pick<TownStructure, 'structureType' | 'customStyle' | 'blueprint'>,
 ): string {
+  if (structure.blueprint?.primaryColor) {
+    return structure.blueprint.primaryColor;
+  }
   if (structure.structureType === 'custom' && structure.customStyle) {
     return CUSTOM_STYLE_COLORS[structure.customStyle] ?? STRUCTURE_META.custom.color;
   }
@@ -1636,4 +1690,691 @@ export const DEFAULT_REMOTE_BRIDGE_CONFIG: RemoteBridgeConfig = {
   notifyOnWeatherShift: true,
   notifyOnRemoteCommand: false,
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Procedural AI Buildings, Multi-Story Apartments, Dummy Crowd & Train Designers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const MAX_DUMMY_CITIZENS = 140;
+export const BASE_VILLAGE_HOUSING = 16;
+
+const VALID_ROOF_STYLES = new Set<BuildingRoofStyle>([
+  'gable',
+  'dome',
+  'flat_helipad',
+  'pagoda',
+  'spire',
+]);
+
+const VALID_TRAIN_STYLES = new Set<TrainStyle>(['steam', 'bullet', 'freight', 'neon']);
+
+const BP_HEX_RE = /^#[0-9a-fA-F]{6}$/;
+
+function cleanBpHex(raw: unknown, fallback: string): string {
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (BP_HEX_RE.test(t)) return t;
+    if (/^[0-9a-fA-F]{6}$/.test(t)) return `#${t}`;
+  }
+  return fallback;
+}
+
+function clampNum(raw: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+export function sanitizeBuildingBlueprint(
+  raw: unknown,
+  fallbackName = 'Civic Tower',
+): BuildingBlueprint {
+  const fallback = generateFallbackBuildingBlueprint(fallbackName);
+  if (!raw || typeof raw !== 'object') return fallback;
+  const r = raw as Partial<BuildingBlueprint>;
+  const name =
+    typeof r.name === 'string' && r.name.trim()
+      ? r.name.trim().slice(0, 38)
+      : fallback.name;
+  const floors = Math.round(clampNum(r.floors, 1, 6, fallback.floors));
+  const width = Number(clampNum(r.width, 1.8, 3.4, fallback.width).toFixed(2));
+  const depth = Number(clampNum(r.depth, 1.8, 3.0, fallback.depth).toFixed(2));
+  const roofStyle: BuildingRoofStyle =
+    typeof r.roofStyle === 'string' && VALID_ROOF_STYLES.has(r.roofStyle as BuildingRoofStyle)
+      ? (r.roofStyle as BuildingRoofStyle)
+      : fallback.roofStyle;
+  const hasBalconies =
+    typeof r.hasBalconies === 'boolean' ? r.hasBalconies : fallback.hasBalconies;
+  const rawCap = r.apartmentCapacity;
+  const apartmentCapacity = Number.isFinite(Number(rawCap))
+    ? Math.max(0, Math.min(48, Math.round(Number(rawCap))))
+    : fallback.apartmentCapacity;
+
+  return {
+    name,
+    floors,
+    width,
+    depth,
+    roofStyle,
+    primaryColor: cleanBpHex(r.primaryColor, fallback.primaryColor),
+    accentColor: cleanBpHex(r.accentColor, fallback.accentColor),
+    windowGlow: cleanBpHex(r.windowGlow, fallback.windowGlow),
+    hasBalconies,
+    apartmentCapacity,
+  };
+}
+
+export function generateFallbackBuildingBlueprint(promptOrName: string): BuildingBlueprint {
+  const cleaned = promptOrName
+    .replace(/^(build|construct|make|create|design|erect|add)\s+(a|an|the|new|some)?\s*/i, '')
+    .replace(/[.!?]+$/g, '')
+    .trim();
+  const low = cleaned.toLowerCase();
+
+  // Extract explicit floor count e.g. "5-story", "4 floor", "6-storey"
+  const floorMatch = low.match(/\b([1-6])\s*[-]?\s*(?:story|stories|storey|storeys|floor|floors)\b/);
+  const explicitFloors = floorMatch ? Number(floorMatch[1]) : null;
+
+  const titleCase = (s: string) =>
+    s
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ')
+      .slice(0, 38);
+
+  const displayName = titleCase(cleaned || 'Civic Residence') || 'Civic Residence';
+
+  if (/(apartment|condo|housing|flat|residence|residential|dorm|tenement|tower block)/i.test(low)) {
+    const floors = explicitFloors ?? (/(tall|high|grand|mega|sky)/i.test(low) ? 5 : 4);
+    const isCyber = /(cyber|neon|future|futuristic|glass|modern|solar)/i.test(low);
+    return {
+      name: displayName,
+      floors,
+      width: 2.85,
+      depth: 2.35,
+      roofStyle: isCyber ? 'flat_helipad' : 'gable',
+      primaryColor: isCyber ? '#1e293b' : '#d6cfc2',
+      accentColor: isCyber ? '#06b6d4' : '#b45309',
+      windowGlow: isCyber ? '#38bdf8' : '#fde68a',
+      hasBalconies: true,
+      apartmentCapacity: Math.min(48, floors * 8),
+    };
+  }
+
+  if (/(sky[- ]?tower|skyscraper|cyber|neon|futuristic|sci[- ]?fi|tech|hq|headquarters|hub|helipad)/i.test(low)) {
+    const floors = explicitFloors ?? 5;
+    return {
+      name: displayName,
+      floors,
+      width: 2.4,
+      depth: 2.2,
+      roofStyle: /(helipad|pad|flat)/i.test(low) ? 'flat_helipad' : 'spire',
+      primaryColor: '#1e293b',
+      accentColor: '#38bdf8',
+      windowGlow: '#22d3ee',
+      hasBalconies: floors >= 3,
+      apartmentCapacity: floors * 5,
+    };
+  }
+
+  if (/(crystal|temple|shrine|cathedral|sanctuary|palace|observatory|dome|planetarium|arcane|wizard)/i.test(low)) {
+    const floors = explicitFloors ?? 3;
+    const isCrystal = /(crystal|ice|arcane|magic|prism|diamond)/i.test(low);
+    return {
+      name: displayName,
+      floors,
+      width: 2.7,
+      depth: 2.5,
+      roofStyle: /(spire|cathedral)/i.test(low) ? 'spire' : 'dome',
+      primaryColor: isCrystal ? '#cffafe' : '#e2e8f0',
+      accentColor: isCrystal ? '#8b5cf6' : '#f59e0b',
+      windowGlow: isCrystal ? '#67e8f9' : '#fcd34d',
+      hasBalconies: false,
+      apartmentCapacity: 6,
+    };
+  }
+
+  if (/(pagoda|dojo|tea\s*house|zen|eastern|lotus|dragon|bamboo|monastery)/i.test(low)) {
+    const floors = explicitFloors ?? 4;
+    return {
+      name: displayName,
+      floors,
+      width: 2.55,
+      depth: 2.45,
+      roofStyle: 'pagoda',
+      primaryColor: '#fef3c7',
+      accentColor: '#dc2626',
+      windowGlow: '#fbbf24',
+      hasBalconies: true,
+      apartmentCapacity: floors * 4,
+    };
+  }
+
+  if (/(hotel|inn|resort|mansion|villa|plaza|mall|museum|academy|university|theater|cinema|arena|stadium)/i.test(low)) {
+    const floors = explicitFloors ?? 3;
+    return {
+      name: displayName,
+      floors,
+      width: 3.0,
+      depth: 2.45,
+      roofStyle: /(arena|stadium|museum|planetarium)/i.test(low) ? 'dome' : 'flat_helipad',
+      primaryColor: '#e7e5e4',
+      accentColor: '#d97706',
+      windowGlow: '#fde68a',
+      hasBalconies: true,
+      apartmentCapacity: floors * 6,
+    };
+  }
+
+  // Deterministic hash-based color/style palette for any completely arbitrary prompt
+  let hash = 0;
+  for (let i = 0; i < displayName.length; i++) {
+    hash = (hash * 31 + displayName.charCodeAt(i)) >>> 0;
+  }
+  const palettes: Array<[string, string, string, BuildingRoofStyle]> = [
+    ['#e2e8f0', '#0ea5e9', '#fde68a', 'spire'],
+    ['#f5e6d3', '#b45309', '#fcd34d', 'gable'],
+    ['#dbeafe', '#4f46e5', '#67e8f9', 'dome'],
+    ['#fef3c7', '#dc2626', '#fbbf24', 'pagoda'],
+    ['#334155', '#10b981', '#5eead4', 'flat_helipad'],
+  ];
+  const [primaryColor, accentColor, windowGlow, roofStyle] = palettes[hash % palettes.length];
+  const floors = explicitFloors ?? (2 + (hash % 3));
+  return {
+    name: displayName,
+    floors,
+    width: 2.5,
+    depth: 2.25,
+    roofStyle,
+    primaryColor,
+    accentColor,
+    windowGlow,
+    hasBalconies: floors >= 3,
+    apartmentCapacity: floors >= 3 ? floors * 4 : 4,
+  };
+}
+
+export interface TownHousingStats {
+  housingCapacity: number;
+  dummyPopulation: number;
+  apartmentCount: number;
+}
+
+export function computeTownHousingCapacity(structures: TownStructure[]): TownHousingStats {
+  let apartmentCap = 0;
+  let apartmentCount = 0;
+  let completedCivic = 0;
+
+  for (const s of structures) {
+    if (s.status !== 'complete') continue;
+    completedCivic += 1;
+    const bpCap = s.blueprint?.apartmentCapacity ?? 0;
+    if (s.structureType === 'apartment' || bpCap > 0) {
+      const effectiveCap = bpCap > 0 ? bpCap : 20 + (s.tier - 1) * 8;
+      apartmentCap += effectiveCap;
+      if (s.structureType === 'apartment' || bpCap >= 12) {
+        apartmentCount += 1;
+      }
+    } else {
+      // Every completed regular building supports 3 ambient town visitors/residents
+      apartmentCap += 3 + (s.tier - 1) * 2;
+    }
+  }
+
+  const housingCapacity = Math.min(MAX_DUMMY_CITIZENS, BASE_VILLAGE_HOUSING + apartmentCap);
+  // Active dummy population fills smoothly up to capacity (baseline 14 even in starter village)
+  const fillRatio = completedCivic === 0 ? 0.85 : 0.94;
+  const dummyPopulation = Math.min(
+    MAX_DUMMY_CITIZENS,
+    Math.max(12, Math.round(housingCapacity * fillRatio)),
+  );
+
+  return {
+    housingCapacity,
+    dummyPopulation,
+    apartmentCount,
+  };
+}
+
+export const DEFAULT_TRAIN_BLUEPRINT: TrainBlueprint = {
+  id: 'train_alderbrook_express',
+  name: 'Alderbrook Steam Express',
+  style: 'steam',
+  locomotiveColor: '#1e293b',
+  carriageColor: '#0f766e',
+  carCount: 2,
+  speed: 1.0,
+};
+
+export function sanitizeTrainBlueprint(
+  raw: unknown,
+  fallbackPrompt = 'Alderbrook Express',
+): TrainBlueprint {
+  const fallback = generateFallbackTrainBlueprint(fallbackPrompt);
+  if (!raw || typeof raw !== 'object') return fallback;
+  const r = raw as Partial<TrainBlueprint>;
+  const name =
+    typeof r.name === 'string' && r.name.trim() ? r.name.trim().slice(0, 38) : fallback.name;
+  const style: TrainStyle =
+    typeof r.style === 'string' && VALID_TRAIN_STYLES.has(r.style as TrainStyle)
+      ? (r.style as TrainStyle)
+      : fallback.style;
+  const id =
+    typeof r.id === 'string' && r.id.trim()
+      ? r.id.trim().slice(0, 42)
+      : `train_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24)}_${Date.now().toString(36).slice(-4)}`;
+
+  return {
+    id,
+    name,
+    style,
+    locomotiveColor: cleanBpHex(r.locomotiveColor, fallback.locomotiveColor),
+    carriageColor: cleanBpHex(r.carriageColor, fallback.carriageColor),
+    carCount: Math.round(clampNum(r.carCount, 1, 5, fallback.carCount)),
+    speed: Number(clampNum(r.speed, 0.6, 2.2, fallback.speed).toFixed(2)),
+  };
+}
+
+export function generateFallbackTrainBlueprint(promptOrName: string): TrainBlueprint {
+  const low = (promptOrName || '').toLowerCase();
+  const slug = low.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20) || 'express';
+  const id = `train_${slug}_${Date.now().toString(36).slice(-4)}`;
+
+  const carMatch = low.match(/\b([1-5])\s*(?:car|cars|carriage|carriages|coach|coaches|wagon|wagons)\b/);
+  const explicitCars = carMatch ? Number(carMatch[1]) : null;
+
+  let style: TrainStyle = 'steam';
+  if (/(bullet|shinkansen|high[- ]?speed|maglev|hyper|jet|sleek|express)/i.test(low)) {
+    style = 'bullet';
+  } else if (/(neon|cyber|futuristic|laser|plasma|synth|glow|tron)/i.test(low)) {
+    style = 'neon';
+  } else if (/(cargo|freight|gold|ore|mining|heavy|supply|timber|coal)/i.test(low)) {
+    style = 'freight';
+  }
+
+  let locomotiveColor =
+    style === 'bullet'
+      ? '#f8fafc'
+      : style === 'neon'
+        ? '#0f172a'
+        : style === 'freight'
+          ? '#b45309'
+          : '#1e293b';
+  let carriageColor =
+    style === 'bullet'
+      ? '#0284c7'
+      : style === 'neon'
+        ? '#a855f7'
+        : style === 'freight'
+          ? '#eab308'
+          : '#0f766e';
+
+  if (/\bgold|golden|amber\b/i.test(low)) {
+    locomotiveColor = '#d97706';
+    carriageColor = '#facc15';
+  } else if (/\bred|crimson|ruby|scarlet\b/i.test(low)) {
+    locomotiveColor = '#b91c1c';
+    carriageColor = '#991b1b';
+  } else if (/\bblue|cobalt|sapphire|ice|alpine\b/i.test(low)) {
+    locomotiveColor = '#1d4ed8';
+    carriageColor = '#38bdf8';
+  } else if (/\bgreen|emerald|forest|jade\b/i.test(low)) {
+    locomotiveColor = '#15803d';
+    carriageColor = '#10b981';
+  } else if (/\bpurple|violet|amethyst|cyber\b/i.test(low)) {
+    locomotiveColor = '#4c1d95';
+    carriageColor = '#c026d3';
+  } else if (/\bblack|obsidian|shadow|night\b/i.test(low)) {
+    locomotiveColor = '#0f172a';
+    carriageColor = '#334155';
+  } else if (/\bwhite|silver|chrome|pearl\b/i.test(low)) {
+    locomotiveColor = '#f1f5f9';
+    carriageColor = '#94a3b8';
+  }
+
+  const defaultName =
+    style === 'bullet'
+      ? 'Skyline Bullet Express'
+      : style === 'neon'
+        ? 'Neon Pulse Maglev'
+        : style === 'freight'
+          ? /\bgold\b/i.test(low)
+            ? 'Golden Bullion Freight'
+            : 'Ironclad Cargo Line'
+          : 'Alderbrook Heritage Steam';
+
+  const cleanLabel = promptOrName
+    .replace(/^(design|create|build|make|add|swap|new)\s+(a|an|the|new)?\s*/i, '')
+    .replace(/[.!?]+$/g, '')
+    .trim();
+  const name =
+    cleanLabel.length >= 3 && cleanLabel.length <= 36
+      ? cleanLabel
+          .split(/\s+/)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ')
+      : defaultName;
+
+  return {
+    id,
+    name: name.slice(0, 38),
+    style,
+    locomotiveColor,
+    carriageColor,
+    carCount: explicitCars ?? (style === 'freight' ? 4 : style === 'bullet' ? 3 : 2),
+    speed: style === 'bullet' ? 1.85 : style === 'neon' ? 1.65 : style === 'freight' ? 0.85 : 1.05,
+  };
+}
+
+export function sanitizeImaginedTownBlueprint(
+  raw: unknown,
+  promptOrName: string,
+): ImaginedTownBlueprint {
+  const fallback = generateFallbackImaginedTownBlueprint(promptOrName);
+  if (!raw || typeof raw !== 'object') return fallback;
+  const r = raw as Partial<ImaginedTownBlueprint>;
+  const name =
+    typeof r.name === 'string' && r.name.trim() ? r.name.trim().slice(0, 44) : fallback.name;
+  const theme = normalizeTownTheme(r.theme ?? fallback.theme);
+  const weather = normalizeWeatherMode(r.weather ?? fallback.weather);
+  const timeOfDay: TimeOfDay =
+    r.timeOfDay === 'dawn' ||
+    r.timeOfDay === 'day' ||
+    r.timeOfDay === 'twilight' ||
+    r.timeOfDay === 'night'
+      ? r.timeOfDay
+      : fallback.timeOfDay;
+  const validBiomes = new Set<string>(ALL_BIOME_IDS);
+  const unlockedBiomes: BiomeId[] = Array.isArray(r.unlockedBiomes)
+    ? Array.from(
+        new Set(
+          r.unlockedBiomes.filter(
+            (b): b is BiomeId => typeof b === 'string' && validBiomes.has(b),
+          ),
+        ),
+      ).slice(0, 4)
+    : fallback.unlockedBiomes;
+  const starterBuildings: BuildingBlueprint[] =
+    Array.isArray(r.starterBuildings) && r.starterBuildings.length > 0
+      ? r.starterBuildings
+          .slice(0, 4)
+          .map((b, idx) => sanitizeBuildingBlueprint(b, `${name} Landmark ${idx + 1}`))
+      : fallback.starterBuildings;
+  const train = r.train ? sanitizeTrainBlueprint(r.train, `${name} Express`) : fallback.train;
+  const greeting =
+    typeof r.greeting === 'string' && r.greeting.trim()
+      ? r.greeting.trim().slice(0, 180)
+      : fallback.greeting;
+
+  return {
+    name,
+    theme,
+    weather,
+    timeOfDay,
+    unlockedBiomes: unlockedBiomes.length > 0 ? unlockedBiomes : fallback.unlockedBiomes,
+    starterBuildings,
+    train,
+    greeting,
+  };
+}
+
+export function generateFallbackImaginedTownBlueprint(promptOrName: string): ImaginedTownBlueprint {
+  const low = (promptOrName || '').toLowerCase();
+
+  if (/(cyber|neon|future|synth|sci[- ]?fi|metro)/i.test(low)) {
+    const isDesert = /(desert|dune|sand|oasis|canyon|mars)/i.test(low);
+    const name = isDesert ? 'Helios Cyber-Oasis' : 'Neo-Vespera';
+    return {
+      name,
+      theme: isDesert ? 'solarpunk_oasis' : 'fantasy_night',
+      weather: 'summer',
+      timeOfDay: isDesert ? 'twilight' : 'night',
+      unlockedBiomes: isDesert ? ['desert', 'canyon'] : ['cave', 'desert'],
+      starterBuildings: [
+        sanitizeBuildingBlueprint({
+          name: isDesert ? 'Solar Neon Spire' : 'Vespera Sky-Tower',
+          floors: 5,
+          width: 2.5,
+          depth: 2.3,
+          roofStyle: 'spire',
+          primaryColor: '#1e293b',
+          accentColor: '#06b6d4',
+          windowGlow: '#22d3ee',
+          hasBalconies: true,
+          apartmentCapacity: 28,
+        }),
+        sanitizeBuildingBlueprint({
+          name: 'Cyber Habitat Flats',
+          floors: 4,
+          width: 2.9,
+          depth: 2.4,
+          roofStyle: 'flat_helipad',
+          primaryColor: '#0f172a',
+          accentColor: '#ec4899',
+          windowGlow: '#38bdf8',
+          hasBalconies: true,
+          apartmentCapacity: 32,
+        }),
+        sanitizeBuildingBlueprint({
+          name: 'Prism Energy Dome',
+          floors: 2,
+          width: 2.7,
+          depth: 2.5,
+          roofStyle: 'dome',
+          primaryColor: '#312e81',
+          accentColor: '#f59e0b',
+          windowGlow: '#67e8f9',
+          hasBalconies: false,
+          apartmentCapacity: 8,
+        }),
+      ],
+      train: sanitizeTrainBlueprint({
+        name: isDesert ? 'Dune-Runner Neon Maglev' : 'Hyper-Neon Express',
+        style: 'neon',
+        locomotiveColor: '#0f172a',
+        carriageColor: '#06b6d4',
+        carCount: 3,
+        speed: 1.75,
+      }),
+      greeting: `Welcome to ${name}! Neon towers, habitat apartments, and a maglev rail line are already online.`,
+    };
+  }
+
+  if (/(alpine|snow|winter|mountain|glacier|frost|nordic|rail)/i.test(low)) {
+    const name = /(rail|train)/i.test(low) ? 'Frostpeak Rail Haven' : 'Glacier Ridge';
+    return {
+      name,
+      theme: 'meadow',
+      weather: 'winter',
+      timeOfDay: 'dawn',
+      unlockedBiomes: ['alpine', 'forest'],
+      starterBuildings: [
+        sanitizeBuildingBlueprint({
+          name: 'Alpine Lodge Apartments',
+          floors: 4,
+          width: 2.8,
+          depth: 2.4,
+          roofStyle: 'gable',
+          primaryColor: '#e2e8f0',
+          accentColor: '#7c2d12',
+          windowGlow: '#fbbf24',
+          hasBalconies: true,
+          apartmentCapacity: 30,
+        }),
+        sanitizeBuildingBlueprint({
+          name: 'Glacier Observatory',
+          floors: 3,
+          width: 2.5,
+          depth: 2.4,
+          roofStyle: 'dome',
+          primaryColor: '#cbd5e1',
+          accentColor: '#0284c7',
+          windowGlow: '#bae6fd',
+          hasBalconies: false,
+          apartmentCapacity: 8,
+        }),
+      ],
+      train: sanitizeTrainBlueprint({
+        name: 'Glacier Bullet Express',
+        style: 'bullet',
+        locomotiveColor: '#f8fafc',
+        carriageColor: '#0284c7',
+        carCount: 3,
+        speed: 1.8,
+      }),
+      greeting: `Welcome to ${name}! Crisp snow peaks, cozy alpine apartments, and a high-speed rail loop await.`,
+    };
+  }
+
+  if (/(desert|oasis|dune|sand|solar|canyon|sun)/i.test(low)) {
+    const name = 'Suncrest Oasis';
+    return {
+      name,
+      theme: 'solarpunk_oasis',
+      weather: 'summer',
+      timeOfDay: 'day',
+      unlockedBiomes: ['desert', 'canyon'],
+      starterBuildings: [
+        sanitizeBuildingBlueprint({
+          name: 'Terracotta Sky Residences',
+          floors: 4,
+          width: 2.85,
+          depth: 2.35,
+          roofStyle: 'flat_helipad',
+          primaryColor: '#e6c79c',
+          accentColor: '#0d9488',
+          windowGlow: '#fde68a',
+          hasBalconies: true,
+          apartmentCapacity: 32,
+        }),
+        sanitizeBuildingBlueprint({
+          name: 'Sunstone Crystal Dome',
+          floors: 3,
+          width: 2.7,
+          depth: 2.5,
+          roofStyle: 'dome',
+          primaryColor: '#fed7aa',
+          accentColor: '#d97706',
+          windowGlow: '#22d3ee',
+          hasBalconies: false,
+          apartmentCapacity: 8,
+        }),
+      ],
+      train: sanitizeTrainBlueprint({
+        name: 'Golden Caravan Freight',
+        style: 'freight',
+        locomotiveColor: '#b45309',
+        carriageColor: '#f59e0b',
+        carCount: 4,
+        speed: 1.0,
+      }),
+      greeting: `Welcome to ${name}! Sunlit terracotta apartments and a golden freight railway anchor your oasis.`,
+    };
+  }
+
+  if (/(pagoda|sakura|zen|lotus|eastern|jade|dragon|bamboo)/i.test(low)) {
+    const name = 'Jade Lotus Valley';
+    return {
+      name,
+      theme: 'meadow',
+      weather: 'summer',
+      timeOfDay: 'dawn',
+      unlockedBiomes: ['river', 'forest'],
+      starterBuildings: [
+        sanitizeBuildingBlueprint({
+          name: 'Five-Tier Lotus Pagoda',
+          floors: 5,
+          width: 2.6,
+          depth: 2.5,
+          roofStyle: 'pagoda',
+          primaryColor: '#fef3c7',
+          accentColor: '#dc2626',
+          windowGlow: '#fbbf24',
+          hasBalconies: true,
+          apartmentCapacity: 24,
+        }),
+        sanitizeBuildingBlueprint({
+          name: 'Riverview Terrace Flats',
+          floors: 3,
+          width: 2.8,
+          depth: 2.3,
+          roofStyle: 'pagoda',
+          primaryColor: '#f5f5f4',
+          accentColor: '#0f766e',
+          windowGlow: '#fde68a',
+          hasBalconies: true,
+          apartmentCapacity: 24,
+        }),
+      ],
+      train: sanitizeTrainBlueprint({
+        name: 'Emerald Bullet Shinkansen',
+        style: 'bullet',
+        locomotiveColor: '#10b981',
+        carriageColor: '#f8fafc',
+        carCount: 3,
+        speed: 1.9,
+      }),
+      greeting: `Welcome to ${name}! Tiered pagodas and an emerald bullet line bring serene vitality to the valley.`,
+    };
+  }
+
+  // Generic imagined town from arbitrary name/prompt
+  const cleanName =
+    promptOrName
+      .replace(/^(imagine|create|build|make|found|start|new)\s+(and\s+)?(create|make|build)?\s*(a|an|the|new)?\s*/i, '')
+      .replace(/\b(town|city|village)\b/gi, '')
+      .replace(/[.!?]+$/g, '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 3)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ') || 'Starfall Haven';
+
+  return {
+    name: cleanName.slice(0, 44),
+    theme: 'fantasy_night',
+    weather: 'summer',
+    timeOfDay: 'twilight',
+    unlockedBiomes: ['forest', 'river'],
+    starterBuildings: [
+      sanitizeBuildingBlueprint({
+        name: `${cleanName} Grand Flats`,
+        floors: 4,
+        width: 2.85,
+        depth: 2.35,
+        roofStyle: 'gable',
+        primaryColor: '#e2e8f0',
+        accentColor: '#6366f1',
+        windowGlow: '#fde68a',
+        hasBalconies: true,
+        apartmentCapacity: 32,
+      }),
+      sanitizeBuildingBlueprint({
+        name: `${cleanName} Spire`,
+        floors: 4,
+        width: 2.4,
+        depth: 2.3,
+        roofStyle: 'spire',
+        primaryColor: '#334155',
+        accentColor: '#38bdf8',
+        windowGlow: '#67e8f9',
+        hasBalconies: false,
+        apartmentCapacity: 12,
+      }),
+    ],
+    train: sanitizeTrainBlueprint({
+      name: `${cleanName} Express`,
+      style: 'bullet',
+      locomotiveColor: '#312e81',
+      carriageColor: '#38bdf8',
+      carCount: 3,
+      speed: 1.5,
+    }),
+    greeting: `Welcome to ${cleanName}! Starter apartments, a skyline spire, and a custom express train are ready.`,
+  };
+}
+
 

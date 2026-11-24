@@ -37,24 +37,34 @@ import {
 import {
   ALL_BIOME_IDS,
   BIOME_META,
+  computeTownHousingCapacity,
+  generateFallbackBuildingBlueprint,
+  generateFallbackImaginedTownBlueprint,
+  generateFallbackTrainBlueprint,
   getAvailablePlotIds,
   getStructureDisplayLabel,
   getWeatherSeasonEffect,
   inferCustomBuildingSpec,
   MAX_TOWN_AGENTS,
+  sanitizeBuildingBlueprint,
+  sanitizeImaginedTownBlueprint,
+  sanitizeTrainBlueprint,
   STRUCTURE_META,
   type AgentRecord,
   type AIProviderConfig,
   type BiomeId,
+  type BuildingBlueprint,
   type CustomBuildingStyle,
   type EnemyCityState,
   type EnemyRaidState,
+  type ImaginedTownBlueprint,
   type StructureType,
   type TimeOfDay,
   type TownLogItem,
   type TownMetrics,
   type TownStructure,
   type TownSummary,
+  type TrainBlueprint,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -100,16 +110,21 @@ interface MayorChatModalProps {
   onTriggerEnemyRaid: () => Promise<MayorBuildResult>;
   onLaunchCounterRaid: () => Promise<MayorBuildResult>;
   onSwitchTown: (townId: string) => Promise<void>;
-  onCreateTown: (name: string) => Promise<MayorBuildResult>;
+  onCreateTown: (name: string, imagined?: ImaginedTownBlueprint) => Promise<MayorBuildResult>;
   onExpandBiome: (biome: BiomeId) => Promise<MayorBuildResult>;
   onBuildRoad: (targetHint?: string) => Promise<MayorBuildResult>;
   onExtendRail: () => Promise<MayorBuildResult>;
   onBuildInterTownRail: (targetHint?: string) => Promise<MayorBuildResult>;
+  onDesignTrain?: (
+    blueprint: TrainBlueprint,
+    mode?: 'swap' | 'add',
+  ) => Promise<MayorBuildResult>;
   onBuildStructure: (
     structureType: StructureType,
     displayLabel?: string,
     customStyle?: CustomBuildingStyle,
     preferredBiome?: BiomeId,
+    blueprint?: BuildingBlueprint,
   ) => Promise<MayorBuildResult>;
   onHireWorker: (prompt: string) => Promise<string | null>;
   onUnhireWorker: (targetHint: string, reason?: string) => Promise<MayorBuildResult>;
@@ -142,6 +157,7 @@ interface MayorActionPlan {
     | 'build_road'
     | 'extend_rail'
     | 'build_inter_town_rail'
+    | 'design_train'
     | 'toggle_auto'
     | 'trigger_raid'
     | 'toggle_raids'
@@ -154,6 +170,10 @@ interface MayorActionPlan {
   roadTarget?: string;
   autoEnabled?: boolean;
   raidsEnabled?: boolean;
+  buildingBlueprint?: BuildingBlueprint;
+  trainBlueprint?: TrainBlueprint;
+  trainMode?: 'swap' | 'add';
+  imaginedTown?: ImaginedTownBlueprint;
 }
 
 interface BrowserSpeechRecognition {
@@ -168,11 +188,11 @@ interface BrowserSpeechRecognition {
 }
 
 const BASE_STARTER_CHIPS = [
-  'Counter-attack enemy town',
+  'Build a 5-story apartment',
+  'Build a futuristic sky-tower',
+  'Design a neon bullet train',
+  'Imagine a desert cyber-city',
   'Build 3-gun tower',
-  'Build Town Hospital',
-  'Trigger enemy raid',
-  'Expand map further',
   'Status report',
 ];
 
@@ -221,9 +241,27 @@ function mapBuildingRequest(rawText: string): {
   displayLabel: string;
   customStyle?: CustomBuildingStyle;
   preferredBiome?: BiomeId;
+  blueprint?: BuildingBlueprint;
 } {
   const lower = rawText.toLowerCase();
   const preferredBiome = detectMentionedBiome(rawText);
+
+  // Multi-story Apartments (increase crowd housing capacity)
+  if (
+    /\b(apartment|apartments|condo|condos|tenement|flat|flats|housing block|residences|residential tower|dorm|high[- ]?rise|story apartment|stories apartment|storey apartment)\b/.test(
+      lower,
+    )
+  ) {
+    const extracted = extractBuildingName(rawText) || 'Skyline Apartments';
+    const bp = generateFallbackBuildingBlueprint(rawText);
+    return {
+      structureType: 'apartment',
+      displayLabel: bp.name || extracted,
+      customStyle: 'tower',
+      preferredBiome,
+      blueprint: bp,
+    };
+  }
 
   // Dedicated Town Defense & Rescue buildings (checked before generic custom regex)
   if (/\b(hospital|clinic|infirmary|medical|medic center|healing)\b/.test(lower)) {
@@ -252,19 +290,21 @@ function mapBuildingRequest(rawText: string): {
     };
   }
 
-  // Explicit custom buildings (Research Lab, Observatory, Cafe Shop, Tavern, Forge, Guild, Cabin, etc.)
+  // Explicit custom / AI-imagined procedural buildings (Sky-tower, Crystal Temple, Pagoda, Research Lab, Observatory, Cafe, etc.)
   if (
-    /\b(research|lab|laboratory|science|academy|university|observatory|telescope|astro|planetarium|cafe|coffee|espresso|tea|bistro|tavern|inn|pub|forge|smith|foundry|smithy|workshop|guild|hall|museum|studio|cabin|lodge|outpost|camp)\b/.test(
+    /\b(sky[- ]?tower|skyscraper|cyber|futuristic|crystal|temple|pagoda|shrine|cathedral|palace|hotel|mall|theater|cinema|arena|stadium|monolith|spire|dome|helipad|research|lab|laboratory|science|academy|university|observatory|telescope|astro|planetarium|cafe|coffee|espresso|tea|bistro|tavern|inn|pub|forge|smith|foundry|smithy|workshop|guild|hall|museum|studio|cabin|lodge|outpost|camp)\b/.test(
       lower,
     )
   ) {
     const extracted = extractBuildingName(rawText) || rawText.trim();
     const spec = inferCustomBuildingSpec(extracted);
+    const bp = generateFallbackBuildingBlueprint(rawText);
     return {
       structureType: 'custom',
-      displayLabel: spec.label,
+      displayLabel: bp.name || spec.label,
       customStyle: spec.style,
       preferredBiome,
+      blueprint: bp,
     };
   }
 
@@ -305,15 +345,17 @@ function mapBuildingRequest(rawText: string): {
     };
   }
 
-  // Any other named building becomes a procedural custom building with its own nameplate!
+  // Any other named building becomes a procedural AI-blueprint building with its own nameplate!
   const extracted = extractBuildingName(rawText);
   if (extracted && !/^(building|plot|something|anything|one|house)$/i.test(extracted)) {
     const spec = inferCustomBuildingSpec(extracted);
+    const bp = generateFallbackBuildingBlueprint(rawText);
     return {
-      structureType: 'custom',
-      displayLabel: spec.label,
+      structureType: bp.apartmentCapacity > 0 ? 'apartment' : 'custom',
+      displayLabel: bp.name || spec.label,
       customStyle: spec.style,
       preferredBiome,
+      blueprint: bp,
     };
   }
 
@@ -352,12 +394,13 @@ function buildLiveStatusSummary(
       : '6 outer biomes (Forest, Desert, Cave, Alpine, River, Canyon) await expansion';
 
   const infraPart = `${roads.length} road${roads.length === 1 ? '' : 's'}, rail spur ${railSpurBuilt ? 'active' : 'not yet built'}, Auto Mode ${autoMode ? 'ON' : 'OFF'}`;
+  const housing = computeTownHousingCapacity(structures);
   const pulsePart = `Pulse: Prosperity ${metrics.prosperity}, Order ${metrics.orderLevel}, Morale ${metrics.morale}`;
   const activityPart = latestLog
     ? `Latest: ${latestLog.agentName} said "${latestLog.dialogue.slice(0, 68)}"`
     : 'Everyone is awaiting orders';
 
-  return `${townName} is in ${timeOfDay} (${eff.label}) with ${agents.length}/${MAX_TOWN_AGENTS} villagers — ${sitePart}. ${frontierPart} (${infraPart}). ${pulsePart}. ${activityPart}.`;
+  return `${townName} is in ${timeOfDay} (${eff.label}) with ${agents.length}/${MAX_TOWN_AGENTS} AI agents & ${housing.dummyPopulation}/${housing.housingCapacity} crowd citizens — ${sitePart}. ${frontierPart} (${infraPart}). ${pulsePart}. ${activityPart}.`;
 }
 
 function isSimpleGreeting(text: string): boolean {
@@ -531,14 +574,41 @@ function parseLocalIntent(
     };
   }
 
-  // 3) Create a NEW saved town / city (non-destructive) — handles "Create moon city", "Create a new town called New Haven", etc.
+  // 2b) Procedural Train Designer (swap or add custom AI-imagined trains)
   if (
-    /\b(create|start|found|charter|make|open|build)\b/.test(lower) &&
-    /\b(town|city|village|settlement)\b/.test(lower) &&
+    /\b(design|create|build|make|craft|add|swap|launch|commission)\b/.test(lower) &&
+    /\b(bullet train|cargo train|freight train|neon train|steam train|maglev|express train|gold.*train|new train|custom train|train)\b/.test(
+      lower,
+    ) &&
+    !/\b(track|tracks|spur|loop|portal|other town|another town|inter[- ]?town)\b/.test(lower)
+  ) {
+    const bp = generateFallbackTrainBlueprint(text);
+    const mode: 'swap' | 'add' = /\b(add|second|another|extra|fleet)\b/.test(lower) ? 'add' : 'swap';
+    return {
+      reply: `Magnificent railway engineering! Putting the ${bp.name} (${bp.style} · ${bp.carCount} cars) onto the tracks right away!`,
+      action: { type: 'design_train', trainBlueprint: bp, trainMode: mode },
+    };
+  }
+
+  // 3) Create a NEW saved town / AI-imagined city (non-destructive)
+  if (
+    /\b(imagine|create|start|found|charter|make|open|build|generate)\b/.test(lower) &&
+    /\b(town|city|village|settlement|metropolis|oasis|outpost)\b/.test(lower) &&
     !/\b(town hall|town log|town pulse|town status|city hall|in town|in the town|for the town|other town|another town|next town)\b/.test(
       lower,
     )
   ) {
+    const wantsImagined =
+      /\b(imagine|generate|desert|cyber|neon|alpine|snow|winter|pagoda|crystal|futuristic|rail|forest|oasis|canyon|sunset|autumn|fantasy)\b/.test(
+        lower,
+      );
+    if (wantsImagined) {
+      const imagined = generateFallbackImaginedTownBlueprint(text);
+      return {
+        reply: `Imagining and chartering ${imagined.name} (${imagined.theme} theme) with ${imagined.starterBuildings.length} procedural starter buildings and the ${imagined.train.name}! Your previous towns remain safely saved.`,
+        action: { type: 'create_town', townName: imagined.name, imaginedTown: imagined },
+      };
+    }
     const parsedName = parseNewTownName(text) || 'New Haven';
     return {
       reply: `Chartering a brand-new saved town called ${parsedName} with a clean empty map! Your existing town stays safely saved in your Town Switcher.`,
@@ -553,7 +623,7 @@ function parseLocalIntent(
   ) {
     return {
       reply:
-        'Right away! Our track crew is laying the connected East Outer Railway Loop and building the Outer Frontier Station — our steam train will drive right onto the new tracks!',
+        'Right away! Our track crew is laying the connected East Outer Railway Loop and building the Outer Frontier Station — our train fleet will drive right onto the new tracks!',
       action: { type: 'extend_rail' },
     };
   }
@@ -595,18 +665,24 @@ function parseLocalIntent(
     };
   }
 
-  // 7) Build / Construct ANY preset or custom building (Triple-Gun Tower, Hospital, Defense Wall, Research Lab, Observatory, Cafe Shop, etc.)
+  // 7) Build / Construct ANY preset, multi-story apartment, or AI-imagined procedural building
   if (
-    /\b(build|construct|erect|open|add|make|create|upgrade)\b/.test(lower) &&
-    !/\b(worker|villager|staff)\b/.test(lower) &&
-    /\b(3[- ]?gun|triple|barrel|gun|hospital|clinic|infirmary|wall|palisade|turret|cannon|bastion|defense|lab|laboratory|research|observatory|cafe|coffee|shop|bakery|watchtower|tower|greenhouse|farm|windmill|mill|library|granary|pavilion|clock|tavern|inn|forge|smith|guild|museum|studio|cabin|outpost|building|plot|store|house)\b/.test(
-      lower,
-    )
+    /\b(build|construct|erect|open|add|make|create|upgrade|design)\b/.test(lower) &&
+    !/\b(worker|villager|staff|train|rail|road)\b/.test(lower)
   ) {
     const mapped = mapBuildingRequest(text);
+    const floorNote =
+      mapped.blueprint && mapped.blueprint.floors > 1
+        ? ` (${mapped.blueprint.floors} floors${mapped.blueprint.apartmentCapacity > 0 ? `, +${mapped.blueprint.apartmentCapacity} housing` : ''})`
+        : '';
     return {
-      reply: `Splendid idea! I'm rallying Architect Lyra and our builders to get the ${mapped.displayLabel} underway right away.`,
-      action: { type: 'build', target: mapped.displayLabel, biome: mapped.preferredBiome },
+      reply: `Splendid blueprint! I'm rallying Architect Lyra and our builders to construct ${mapped.displayLabel}${floorNote} right away.`,
+      action: {
+        type: 'build',
+        target: mapped.displayLabel,
+        biome: mapped.preferredBiome,
+        buildingBlueprint: mapped.blueprint,
+      },
     };
   }
 
@@ -705,6 +781,7 @@ export function MayorChatModal({
   onBuildRoad,
   onExtendRail,
   onBuildInterTownRail,
+  onDesignTrain,
   onBuildStructure,
   onHireWorker,
   onUnhireWorker,
@@ -717,7 +794,7 @@ export function MayorChatModal({
     {
       id: 'mayor-welcome',
       sender: 'mayor',
-      text: `Welcome to ${townName} Town Hall! Ask me to build a Research Lab or Cafe Shop, expand into Forest/Desert/Cave, pave cobblestone roads, extend the train track, toggle Auto mode, or create a brand-new saved town.`,
+      text: `Welcome to ${townName} Town Hall! Ask me to build ANY procedural building or multi-story apartment (e.g. "Build a 5-story apartment" or "Build a crystal temple"), design a custom train ("Design a neon bullet train"), or imagine a brand-new AI city!`,
       modelTag: 'Instant · 0 tokens',
       timestampMs: Date.now(),
     },
@@ -848,13 +925,42 @@ export function MayorChatModal({
     }
 
     if (action.type === 'create_town') {
-      const requestedName =
-        (action.townName || parseNewTownName(fallbackText) || 'New Haven').trim();
-      const res = await onCreateTown(requestedName);
+      const imagined = action.imaginedTown
+        ? sanitizeImaginedTownBlueprint(action.imaginedTown, action.townName || fallbackText)
+        : /\b(imagine|desert|cyber|neon|alpine|snow|pagoda|crystal|futuristic|rail|oasis)\b/i.test(
+              fallbackText,
+            )
+          ? generateFallbackImaginedTownBlueprint(fallbackText)
+          : undefined;
+      const requestedName = (
+        imagined?.name ||
+        action.townName ||
+        parseNewTownName(fallbackText) ||
+        'New Haven'
+      ).trim();
+      const res = await onCreateTown(requestedName, imagined);
       return {
         badge: res.ok ? `🏙️ ${res.badge}` : `⚠️ ${res.badge}`,
         extraNote: res.ok ? undefined : res.detail,
       };
+    }
+
+    if (action.type === 'design_train') {
+      const bp = action.trainBlueprint
+        ? sanitizeTrainBlueprint(action.trainBlueprint, fallbackText)
+        : generateFallbackTrainBlueprint(fallbackText);
+      const mode: 'swap' | 'add' =
+        action.trainMode === 'add' || /\b(add|second|another|extra)\b/i.test(fallbackText)
+          ? 'add'
+          : 'swap';
+      if (onDesignTrain) {
+        const res = await onDesignTrain(bp, mode);
+        return {
+          badge: res.ok ? `🚄 ${res.badge}` : `⚠️ ${res.badge}`,
+          extraNote: res.ok ? undefined : res.detail,
+        };
+      }
+      return { badge: `🚄 Designed ${bp.name}` };
     }
 
     if (action.type === 'expand_biome') {
@@ -896,11 +1002,37 @@ export function MayorChatModal({
 
     if (action.type === 'build') {
       const mapped = mapBuildingRequest(action.target || fallbackText);
+      let resolvedBp: BuildingBlueprint | undefined = action.buildingBlueprint
+        ? sanitizeBuildingBlueprint(action.buildingBlueprint, action.target || fallbackText)
+        : mapped.blueprint;
+      let resolvedType: StructureType = mapped.structureType;
+      let resolvedLabel: string = resolvedBp?.name || mapped.displayLabel;
+
+      if (resolvedBp) {
+        if (resolvedBp.apartmentCapacity > 0 && resolvedType === 'custom') {
+          resolvedType = 'apartment';
+        }
+        // If Mayor's LLM explicitly invented a custom blueprint (e.g., "Crystal Temple" or "5-Story Apartment"), use procedural rendering
+        if (
+          action.buildingBlueprint &&
+          resolvedType !== 'hospital' &&
+          resolvedType !== 'defense_wall' &&
+          resolvedType !== 'triple_gun_tower'
+        ) {
+          resolvedType = resolvedBp.apartmentCapacity > 0 ? 'apartment' : 'custom';
+          resolvedLabel = resolvedBp.name;
+        }
+      } else if (resolvedType === 'apartment' || resolvedType === 'custom') {
+        resolvedBp = generateFallbackBuildingBlueprint(action.target || fallbackText);
+        resolvedLabel = resolvedBp.name;
+      }
+
       const res = await onBuildStructure(
-        mapped.structureType,
-        mapped.displayLabel,
+        resolvedType,
+        resolvedLabel,
         mapped.customStyle,
         action.biome || mapped.preferredBiome,
+        resolvedBp,
       );
       return {
         badge: res.ok ? `🏗️ ${res.badge}` : `⚠️ ${res.badge}`,

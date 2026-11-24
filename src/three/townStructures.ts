@@ -1,7 +1,79 @@
 import * as THREE from 'three';
-import type { CustomBuildingStyle, GraphicsQuality, PlotId, StructureType, TownStructure, TownTheme } from '../types/town.ts';
+import {
+  generateFallbackBuildingBlueprint,
+  type BuildingBlueprint,
+  type CustomBuildingStyle,
+  type GraphicsQuality,
+  type PlotId,
+  type StructureType,
+  type TownStructure,
+  type TownTheme,
+} from '../types/town.ts';
 import { createClothWaveMaterial, createWindSwayMaterial, type WindUniforms } from './townEnvironment.ts';
 import { applyThemeToObjectTree, tagThemeMaterial, type ThemeMaterialRole } from './townThemes.ts';
+
+// Shared unit geometries for procedural AI buildings (4 GB RAM Android optimization)
+function markShared<T extends THREE.BufferGeometry>(geo: T): T {
+  geo.userData.shared = true;
+  return geo;
+}
+
+const SHARED_UNIT_BOX = markShared(new THREE.BoxGeometry(1, 1, 1));
+const SHARED_UNIT_CYL = markShared(new THREE.CylinderGeometry(0.5, 0.5, 1, 10));
+const SHARED_UNIT_CONE4 = markShared(new THREE.ConeGeometry(0.72, 1, 4));
+const SHARED_UNIT_DOME = markShared(
+  new THREE.SphereGeometry(0.5, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+);
+const SHARED_UNIT_SPHERE = markShared(new THREE.SphereGeometry(0.5, 8, 6));
+
+function addScaledSharedPart(
+  parent: THREE.Group,
+  geometry: THREE.BufferGeometry,
+  material: THREE.Material,
+  x: number,
+  y: number,
+  z: number,
+  sx: number,
+  sy: number,
+  sz: number,
+  rx = 0,
+  ry = 0,
+  rz = 0,
+  castShadow = true,
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set(x, y, z);
+  mesh.scale.set(sx, sy, sz);
+  mesh.rotation.set(rx, ry, rz);
+  mesh.castShadow = castShadow;
+  mesh.receiveShadow = true;
+  parent.add(mesh);
+  return mesh;
+}
+
+function createHelipadTexture(accentHex: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(0, 0, 128, 128);
+    ctx.strokeStyle = accentHex;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(64, 64, 48, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 58px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('H', 64, 67);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 function addPart(
   parent: THREE.Group,
@@ -773,185 +845,7 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.BoxGeometry(0.66, 1.06, 0.12), timberMat, 0, 0.95, 1.2);
     addPart(group, new THREE.BoxGeometry(0.38, 0.64, 0.08), bannerMat, -0.78, 1.85, 1.22);
     addPart(group, new THREE.BoxGeometry(0.38, 0.64, 0.08), bannerMat, 0.78, 1.85, 1.22);
-  } else if (type === 'custom') {
-    const style: CustomBuildingStyle = structure.customStyle || 'lab';
-    const labelText = (structure.customLabel || 'Research Lab').trim().slice(0, 24);
-
-    // Procedural CanvasTexture nameplate sign mounted on the front facade
-    const signCanvas = document.createElement('canvas');
-    signCanvas.width = 256;
-    signCanvas.height = 64;
-    const sCtx = signCanvas.getContext('2d');
-    const styleAccentMap: Record<CustomBuildingStyle, string> = {
-      lab: '#06b6d4',
-      observatory: '#6366f1',
-      cafe: '#d97706',
-      tavern: '#b45309',
-      forge: '#ea580c',
-      guild: '#8b5cf6',
-      cabin: '#16a34a',
-      tower: '#3b82f6',
-    };
-    const accentHex = styleAccentMap[style] || '#06b6d4';
-    if (sCtx) {
-      sCtx.fillStyle = '#0f172a';
-      sCtx.fillRect(0, 0, 256, 64);
-      sCtx.strokeStyle = accentHex;
-      sCtx.lineWidth = 6;
-      sCtx.strokeRect(4, 4, 248, 56);
-      sCtx.fillStyle = '#f8fafc';
-      sCtx.font = 'bold 24px system-ui, -apple-system, sans-serif';
-      sCtx.textAlign = 'center';
-      sCtx.textBaseline = 'middle';
-      sCtx.fillText(labelText, 128, 33, 232);
-    }
-    const signTex = new THREE.CanvasTexture(signCanvas);
-    signTex.colorSpace = THREE.SRGBColorSpace;
-    const signMat = new THREE.MeshStandardMaterial({
-      map: signTex,
-      roughness: 0.35,
-      emissive: new THREE.Color(accentHex),
-      emissiveIntensity: 0.22,
-    });
-
-    if (style === 'lab') {
-      const labWallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.58 }), 'wall');
-      const labTrimMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x0e7490, roughness: 0.42, metalness: 0.35 }), 'metal');
-      const domeGlassMat = new THREE.MeshStandardMaterial({
-        color: 0xa5f3fc,
-        emissive: 0x06b6d4,
-        emissiveIntensity: 0.32,
-        roughness: 0.16,
-        transparent: true,
-        opacity: 0.72,
-      });
-      const cyanCoreMat = new THREE.MeshStandardMaterial({
-        color: 0x67e8f9,
-        emissive: 0x06b6d4,
-        emissiveIntensity: 1.35,
-        roughness: 0.2,
-      });
-      interiorFireMats.push(cyanCoreMat);
-      cutawayRoofMaterials.push(labTrimMat, domeGlassMat);
-
-      addPart(group, new THREE.BoxGeometry(3.0, 0.3, 2.5), plinthMat, 0, 0.15, 0);
-      addHollowBoxWalls(group, 2.65, 1.65, 2.15, 0.3, 0.14, labWallMat, interiorFloorMat);
-
-      // Interior: Research workbench, glowing cyan reactor tube, specimen shelves
-      addWoodenTable(group, -0.45, 0.32, -0.42, 1.15, 0.54, interiorWoodMat);
-      addPart(group, new THREE.CylinderGeometry(0.18, 0.22, 0.92, 10), cyanCoreMat, 0.65, 0.82, -0.45);
-      addPart(group, new THREE.CylinderGeometry(0.24, 0.24, 0.12, 10), labTrimMat, 0.65, 0.36, -0.45);
-      addPart(group, new THREE.CylinderGeometry(0.24, 0.24, 0.12, 10), labTrimMat, 0.65, 1.28, -0.45);
-      addWallShelf(group, -1.06, 0.32, 0.2, Math.PI / 2, labTrimMat, cyanCoreMat);
-
-      // Roof deck + translucent research dome + brass antenna
-      addPart(group, new THREE.BoxGeometry(2.85, 0.16, 2.35), labTrimMat, 0, 2.02, 0);
-      addPart(group, new THREE.SphereGeometry(0.95, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), domeGlassMat, 0, 2.1, 0);
-      addPart(group, new THREE.CylinderGeometry(0.04, 0.05, 0.72, 6), labTrimMat, 0.85, 2.45, -0.55);
-      addPart(group, new THREE.SphereGeometry(0.11, 8, 6), cyanCoreMat, 0.85, 2.86, -0.55);
-
-      // Door, lab windows & custom nameplate
-      addPart(group, new THREE.BoxGeometry(0.58, 0.98, 0.08), labTrimMat, 0, 0.79, 1.09);
-      addPart(group, new THREE.BoxGeometry(0.52, 0.52, 0.08), winMat, -0.86, 1.18, 1.09);
-      addPart(group, new THREE.BoxGeometry(0.52, 0.52, 0.08), winMat, 0.86, 1.18, 1.09);
-      addPart(group, new THREE.BoxGeometry(1.56, 0.38, 0.07), signMat, 0, 1.82, 1.14);
-    } else if (style === 'observatory') {
-      const obsWallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xddd6fe, roughness: 0.72 }), 'wall');
-      const obsDomeMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x312e81, roughness: 0.38, metalness: 0.55 }), 'roofPrimary');
-      const brassMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.3, metalness: 0.75 }), 'gold');
-      cutawayRoofMaterials.push(obsDomeMat);
-
-      addPart(group, new THREE.CylinderGeometry(1.62, 1.75, 0.32, 12), plinthMat, 0, 0.16, 0);
-      addHollowBoxWalls(group, 2.25, 1.7, 2.25, 0.32, 0.14, obsWallMat, interiorFloorMat);
-
-      // Interior: Star chart table + glowing celestial orb
-      addWoodenTable(group, 0, 0.34, 0, 0.96, 0.62, interiorWoodMat);
-      addPart(group, new THREE.OctahedronGeometry(0.2, 0), createFireGlowMat(), 0, 1.02, 0);
-
-      // Rotating dome + brass telescope barrel
-      addPart(group, new THREE.SphereGeometry(1.36, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2), obsDomeMat, 0, 2.02, 0);
-      addPart(group, new THREE.CylinderGeometry(0.14, 0.2, 1.45, 8), brassMat, 0.45, 2.75, 0.45, Math.PI / 4, 0, -Math.PI / 6);
-      addPart(group, new THREE.BoxGeometry(0.56, 0.96, 0.08), woodMat, 0, 0.8, 1.14);
-      addPart(group, new THREE.BoxGeometry(1.52, 0.36, 0.07), signMat, 0, 1.78, 1.18);
-    } else if (style === 'cafe') {
-      const cafeWallMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.76 }), 'wall');
-      const cafeRoofMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.62 }), 'roofPrimary');
-      const awningMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.6 }), 'roofSecondary');
-      cutawayRoofMaterials.push(cafeRoofMat);
-
-      addPart(group, new THREE.BoxGeometry(2.95, 0.28, 2.45), plinthMat, 0, 0.14, 0);
-      addHollowBoxWalls(group, 2.55, 1.58, 2.05, 0.28, 0.14, cafeWallMat, interiorFloorMat);
-
-      // Interior: Espresso bar counter + glowing coffee roaster + cozy bistro table
-      addWoodenTable(group, -0.55, 0.3, -0.45, 1.1, 0.48, interiorWoodMat);
-      addPart(group, new THREE.BoxGeometry(0.32, 0.34, 0.26), createFireGlowMat(), -0.68, 0.94, -0.46);
-      addWoodenTable(group, 0.58, 0.3, 0.22, 0.66, 0.66, interiorWoodMat);
-
-      // Cafe roof + front terrace awning + outdoor bistro table + nameplate
-      addPart(group, new THREE.ConeGeometry(2.05, 0.96, 4), cafeRoofMat, 0, 2.34, 0, 0, Math.PI / 4);
-      addPart(group, new THREE.BoxGeometry(2.35, 0.1, 0.74), awningMat, 0, 1.56, 1.32, 0.24);
-      addPart(group, new THREE.BoxGeometry(0.58, 0.96, 0.08), woodMat, 0, 0.76, 1.04);
-      addPart(group, new THREE.BoxGeometry(0.56, 0.54, 0.08), winMat, -0.82, 1.08, 1.04);
-      addPart(group, new THREE.BoxGeometry(0.56, 0.54, 0.08), winMat, 0.82, 1.08, 1.04);
-      addPart(group, new THREE.BoxGeometry(1.54, 0.36, 0.07), signMat, 0, 1.88, 1.08);
-    } else {
-      // Tavern / Forge / Guild / Cabin / Tower versatile procedural civic hall
-      const roofColorMap: Record<CustomBuildingStyle, number> = {
-        lab: 0x0e7490,
-        observatory: 0x312e81,
-        cafe: 0x92400e,
-        tavern: 0x7c2d12,
-        forge: 0x44403c,
-        guild: 0x4c1d95,
-        cabin: 0x166534,
-        tower: 0x1e3a8a,
-      };
-      const wallColorMap: Record<CustomBuildingStyle, number> = {
-        lab: 0xe2e8f0,
-        observatory: 0xddd6fe,
-        cafe: 0xfef3c7,
-        tavern: 0xf5e6d3,
-        forge: 0x94a3b8,
-        guild: 0xf1f5f9,
-        cabin: 0xb45309,
-        tower: 0xcbd5e1,
-      };
-      const wallMat = tagThemeMaterial(
-        new THREE.MeshStandardMaterial({ color: wallColorMap[style] ?? 0xf1f5f9, roughness: 0.78 }),
-        'wall',
-      );
-      const roofMat = tagThemeMaterial(
-        new THREE.MeshStandardMaterial({ color: roofColorMap[style] ?? 0x1e3a8a, roughness: 0.62 }),
-        'roofPrimary',
-      );
-      cutawayRoofMaterials.push(roofMat);
-
-      const isTall = style === 'tower';
-      const wallH = isTall ? 2.45 : 1.62;
-      const wX = isTall ? 1.85 : 2.55;
-      const wZ = isTall ? 1.85 : 2.1;
-
-      addPart(group, new THREE.BoxGeometry(wX + 0.4, 0.3, wZ + 0.4), plinthMat, 0, 0.15, 0);
-      addHollowBoxWalls(group, wX, wallH, wZ, 0.3, 0.14, wallMat, interiorFloorMat);
-
-      // Interior focal table + glowing hearth/forge/lantern
-      const shelfAccentMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.65 });
-      addWoodenTable(group, 0, 0.32, 0.1, 0.88, 0.52, interiorWoodMat);
-      addPart(group, new THREE.BoxGeometry(0.46, 0.42, 0.42), createFireGlowMat(), -0.58, 0.56, -0.55);
-      addWallShelf(group, wX / 2 - 0.24, 0.32, -0.1, -Math.PI / 2, interiorWoodMat, shelfAccentMat);
-
-      // Roof + optional forge chimney
-      addPart(group, new THREE.ConeGeometry(isTall ? 1.55 : 2.08, isTall ? 1.35 : 1.05, 4), roofMat, 0, 0.3 + wallH + (isTall ? 0.66 : 0.5), 0, 0, Math.PI / 4);
-      if (style === 'forge' || style === 'tavern') {
-        addPart(group, new THREE.BoxGeometry(0.46, 1.15, 0.46), plinthMat, -0.78, 0.3 + wallH + 0.45, -0.55);
-      }
-
-      addPart(group, new THREE.BoxGeometry(0.56, 0.96, 0.08), woodMat, 0, 0.78, wZ / 2 + 0.02);
-      addPart(group, new THREE.BoxGeometry(0.46, 0.48, 0.08), winMat, -wX * 0.3, 1.12, wZ / 2 + 0.02);
-      addPart(group, new THREE.BoxGeometry(0.46, 0.48, 0.08), winMat, wX * 0.3, 1.12, wZ / 2 + 0.02);
-      addPart(group, new THREE.BoxGeometry(1.52, 0.36, 0.07), signMat, 0, 0.3 + wallH - 0.08, wZ / 2 + 0.08);
-    }
-  } else {
+  } else if (type === 'clock_tower') {
     // clock_tower
     const brickMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x9f1239, roughness: 0.76 }), 'brick');
     const trimMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65 }), 'trim');
@@ -971,6 +865,493 @@ export function buildCompletedStructureMesh(
     addPart(group, new THREE.CylinderGeometry(0.38, 0.38, 0.08, 12), faceMat, 0, 2.65, 0.76, Math.PI / 2);
     addPart(group, new THREE.CylinderGeometry(0.38, 0.38, 0.08, 12), faceMat, 0.76, 2.65, 0, 0, 0, Math.PI / 2);
     addPart(group, new THREE.BoxGeometry(0.46, 0.78, 0.1), woodMat, 0, 0.71, 0.76);
+  }
+
+  // Procedural AI Blueprint / Multi-Story Apartment Renderer (replaces fixed templates for custom/apartment/blueprinted buildings)
+  let computedTopY = 3.2;
+  if (
+    structure.blueprint ||
+    type === 'apartment' ||
+    type === 'custom'
+  ) {
+    // If a blueprint overrides a preset type, keep only the ground contact shadow before procedural assembly
+    if (group.children.length > 1) {
+      for (let i = group.children.length - 1; i >= 1; i--) {
+        group.remove(group.children[i]);
+      }
+      cutawayRoofMaterials.length = 0;
+      interiorFireMats.length = 0;
+    }
+
+    const bp: BuildingBlueprint =
+      structure.blueprint ??
+      generateFallbackBuildingBlueprint(
+        structure.customLabel ||
+          (type === 'apartment' ? 'Alderbrook Apartments' : 'Civic Tower'),
+      );
+
+    const primaryColor = new THREE.Color(bp.primaryColor);
+    const accentColor = new THREE.Color(bp.accentColor);
+    const glowColor = new THREE.Color(bp.windowGlow);
+
+    const groundWallMat = new THREE.MeshStandardMaterial({
+      color: primaryColor,
+      roughness: 0.72,
+      metalness: 0.1,
+    });
+    const upperWallMat = new THREE.MeshStandardMaterial({
+      color: primaryColor,
+      roughness: 0.68,
+      metalness: 0.14,
+    });
+    const accentMat = new THREE.MeshStandardMaterial({
+      color: accentColor,
+      roughness: 0.48,
+      metalness: 0.35,
+    });
+    const roofMat = new THREE.MeshStandardMaterial({
+      color: accentColor.clone().multiplyScalar(0.82),
+      roughness: 0.44,
+      metalness: 0.38,
+    });
+    const winGlowMat = new THREE.MeshStandardMaterial({
+      color: glowColor.clone().lerp(new THREE.Color(0xffffff), 0.35),
+      emissive: glowColor,
+      emissiveIntensity: 0.65,
+      roughness: 0.22,
+      metalness: 0.1,
+    });
+    lanternMaterials.push(winGlowMat);
+
+    // Cutaway fades upper stories & roof cleanly on tap/close zoom to reveal the ground-floor lobby!
+    cutawayRoofMaterials.push(upperWallMat, roofMat);
+
+    const w = Math.max(1.8, Math.min(3.4, bp.width));
+    const d = Math.max(1.8, Math.min(3.0, bp.depth));
+    const floors = Math.max(1, Math.min(6, Math.round(bp.floors)));
+    const groundH = 1.24;
+    const upperFloorH = 0.84;
+
+    // 1. Stone foundation plinth
+    addScaledSharedPart(group, SHARED_UNIT_BOX, plinthMat, 0, 0.14, 0, w + 0.36, 0.28, d + 0.36);
+
+    // 2. Hollow Ground Floor Lobby (visible when cutaway fades upper floors/roof)
+    addHollowBoxWalls(group, w, groundH, d, 0.28, 0.13, groundWallMat, interiorFloorMat);
+
+    // Lobby interior furniture: reception desk + glowing atrium core + warm side seats
+    addWoodenTable(group, -w * 0.18, 0.3, -d * 0.16, Math.min(1.05, w * 0.38), 0.46, interiorWoodMat);
+    const atriumCoreMat = new THREE.MeshStandardMaterial({
+      color: glowColor,
+      emissive: glowColor,
+      emissiveIntensity: 1.25,
+      roughness: 0.2,
+    });
+    interiorFireMats.push(atriumCoreMat);
+    addScaledSharedPart(
+      group,
+      SHARED_UNIT_CYL,
+      atriumCoreMat,
+      w * 0.22,
+      0.74,
+      -d * 0.14,
+      0.34,
+      0.76,
+      0.34,
+      0,
+      0,
+      0,
+      false,
+    );
+
+    // Entrance door + canopy + ground-floor glowing windows
+    addScaledSharedPart(group, SHARED_UNIT_BOX, accentMat, 0, 0.72, d / 2 + 0.03, 0.62, 0.88, 0.08);
+    addScaledSharedPart(group, SHARED_UNIT_BOX, accentMat, 0, 1.24, d / 2 + 0.24, 1.08, 0.1, 0.46);
+    addScaledSharedPart(
+      group,
+      SHARED_UNIT_BOX,
+      winGlowMat,
+      -w * 0.32,
+      0.88,
+      d / 2 + 0.03,
+      0.46,
+      0.44,
+      0.06,
+      0,
+      0,
+      0,
+      false,
+    );
+    addScaledSharedPart(
+      group,
+      SHARED_UNIT_BOX,
+      winGlowMat,
+      w * 0.32,
+      0.88,
+      d / 2 + 0.03,
+      0.46,
+      0.44,
+      0.06,
+      0,
+      0,
+      0,
+      false,
+    );
+
+    // Custom architectural nameplate above the ground-floor entrance
+    const bpSignCanvas = document.createElement('canvas');
+    bpSignCanvas.width = 256;
+    bpSignCanvas.height = 64;
+    const bpSignCtx = bpSignCanvas.getContext('2d');
+    if (bpSignCtx) {
+      bpSignCtx.fillStyle = '#0f172a';
+      bpSignCtx.fillRect(0, 0, 256, 64);
+      bpSignCtx.strokeStyle = bp.accentColor || '#38bdf8';
+      bpSignCtx.lineWidth = 6;
+      bpSignCtx.strokeRect(4, 4, 248, 56);
+      bpSignCtx.fillStyle = '#f8fafc';
+      bpSignCtx.font = 'bold 24px system-ui, -apple-system, sans-serif';
+      bpSignCtx.textAlign = 'center';
+      bpSignCtx.textBaseline = 'middle';
+      bpSignCtx.fillText(bp.name.slice(0, 24), 128, 33, 232);
+    }
+    const bpSignTex = new THREE.CanvasTexture(bpSignCanvas);
+    bpSignTex.colorSpace = THREE.SRGBColorSpace;
+    const bpSignMat = new THREE.MeshStandardMaterial({
+      map: bpSignTex,
+      roughness: 0.45,
+      metalness: 0.15,
+    });
+    addScaledSharedPart(
+      group,
+      SHARED_UNIT_BOX,
+      bpSignMat,
+      0,
+      1.46,
+      d / 2 + 0.08,
+      Math.min(2.1, w * 0.74),
+      0.34,
+      0.07,
+    );
+
+    // 3. Modular Stacked Upper Stories (2..6) using shared unit box geometry
+    let currentY = 0.28 + groundH;
+    const colsFront = w >= 2.6 ? 3 : 2;
+    const colsSide = d >= 2.3 ? 3 : 2;
+
+    // Ground-floor cornice band
+    addScaledSharedPart(group, SHARED_UNIT_BOX, accentMat, 0, currentY, 0, w + 0.14, 0.09, d + 0.14);
+
+    for (let f = 1; f < floors; f++) {
+      // Subtle architectural setback on tall spires/pagodas
+      const taper =
+        bp.roofStyle === 'pagoda'
+          ? 1 - f * 0.065
+          : bp.roofStyle === 'spire' && f >= 3
+            ? 1 - (f - 2) * 0.08
+            : 1.0;
+      const fw = w * taper;
+      const fd = d * taper;
+      const cy = currentY + upperFloorH / 2;
+
+      addScaledSharedPart(group, SHARED_UNIT_BOX, upperWallMat, 0, cy, 0, fw, upperFloorH, fd);
+
+      // Floor cornice / pagoda eave band
+      const eavePad = bp.roofStyle === 'pagoda' ? 0.42 : 0.12;
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_BOX,
+        accentMat,
+        0,
+        currentY + upperFloorH,
+        0,
+        fw + eavePad,
+        bp.roofStyle === 'pagoda' ? 0.11 : 0.08,
+        fd + eavePad,
+      );
+
+      // Glowing window rows (Front & Back)
+      for (let c = 0; c < colsFront; c++) {
+        const u = (c / (colsFront - 1) - 0.5) * (fw * 0.66);
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_BOX,
+          winGlowMat,
+          u,
+          cy + 0.04,
+          fd / 2 + 0.025,
+          0.36,
+          0.38,
+          0.05,
+          0,
+          0,
+          0,
+          false,
+        );
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_BOX,
+          winGlowMat,
+          u,
+          cy + 0.04,
+          -fd / 2 - 0.025,
+          0.36,
+          0.38,
+          0.05,
+          0,
+          0,
+          0,
+          false,
+        );
+      }
+
+      // Glowing window rows (Left & Right sides)
+      for (let c = 0; c < colsSide; c++) {
+        const v = (c / (colsSide - 1) - 0.5) * (fd * 0.64);
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_BOX,
+          winGlowMat,
+          fw / 2 + 0.025,
+          cy + 0.04,
+          v,
+          0.05,
+          0.38,
+          0.34,
+          0,
+          0,
+          0,
+          false,
+        );
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_BOX,
+          winGlowMat,
+          -fw / 2 - 0.025,
+          cy + 0.04,
+          v,
+          0.05,
+          0.38,
+          0.34,
+          0,
+          0,
+          0,
+          false,
+        );
+      }
+
+      // Optional protruding apartment balconies with railings
+      if (bp.hasBalconies) {
+        const balW = fw * 0.72;
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_BOX,
+          accentMat,
+          0,
+          currentY + 0.08,
+          fd / 2 + 0.2,
+          balW,
+          0.07,
+          0.36,
+        );
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_BOX,
+          roofMat,
+          0,
+          currentY + 0.24,
+          fd / 2 + 0.36,
+          balW,
+          0.22,
+          0.04,
+          0,
+          0,
+          0,
+          false,
+        );
+      }
+
+      currentY += upperFloorH;
+    }
+
+    // 4. Procedural Roof Style Assembly
+    const topTaper =
+      bp.roofStyle === 'pagoda'
+        ? 1 - (floors - 1) * 0.065
+        : bp.roofStyle === 'spire' && floors >= 4
+          ? 1 - (floors - 3) * 0.08
+          : 1.0;
+    const topW = w * topTaper;
+    const topD = d * topTaper;
+
+    if (bp.roofStyle === 'dome') {
+      const domeRadius = Math.min(topW, topD) * 0.88;
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_CYL,
+        accentMat,
+        0,
+        currentY + 0.14,
+        0,
+        domeRadius * 1.06,
+        0.24,
+        domeRadius * 1.06,
+      );
+      const domeMat = new THREE.MeshStandardMaterial({
+        color: glowColor.clone().lerp(accentColor, 0.5),
+        emissive: glowColor,
+        emissiveIntensity: 0.28,
+        roughness: 0.2,
+        metalness: 0.45,
+        transparent: true,
+        opacity: 0.84,
+      });
+      cutawayRoofMaterials.push(domeMat);
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_DOME,
+        domeMat,
+        0,
+        currentY + 0.24,
+        0,
+        domeRadius,
+        domeRadius * 0.92,
+        domeRadius,
+      );
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_SPHERE,
+        winGlowMat,
+        0,
+        currentY + 0.24 + domeRadius * 0.48,
+        0,
+        0.24,
+        0.24,
+        0.24,
+        0,
+        0,
+        0,
+        false,
+      );
+      computedTopY = currentY + 0.5 + domeRadius * 0.5;
+    } else if (bp.roofStyle === 'flat_helipad') {
+      // Rooftop parapet rim + painted H helipad + 4 glowing aviation corner lights
+      addScaledSharedPart(group, SHARED_UNIT_BOX, roofMat, 0, currentY + 0.14, 0, topW + 0.16, 0.22, topD + 0.16);
+      const padTex = createHelipadTexture(bp.accentColor);
+      const padMat = new THREE.MeshStandardMaterial({
+        map: padTex,
+        roughness: 0.65,
+        metalness: 0.15,
+      });
+      cutawayRoofMaterials.push(padMat);
+      const padSize = Math.min(topW, topD) * 0.78;
+      addScaledSharedPart(group, SHARED_UNIT_BOX, padMat, 0, currentY + 0.27, 0, padSize, 0.04, padSize);
+      for (const [bx, bz] of [
+        [-topW * 0.44, -topD * 0.44],
+        [topW * 0.44, -topD * 0.44],
+        [-topW * 0.44, topD * 0.44],
+        [topW * 0.44, topD * 0.44],
+      ] as Array<[number, number]>) {
+        addScaledSharedPart(
+          group,
+          SHARED_UNIT_SPHERE,
+          winGlowMat,
+          bx,
+          currentY + 0.34,
+          bz,
+          0.14,
+          0.14,
+          0.14,
+          0,
+          0,
+          0,
+          false,
+        );
+      }
+      computedTopY = currentY + 0.55;
+    } else if (bp.roofStyle === 'pagoda') {
+      const eaveW = topW + 0.65;
+      const eaveD = topD + 0.65;
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_CONE4,
+        roofMat,
+        0,
+        currentY + 0.48,
+        0,
+        eaveW * 0.92,
+        0.92,
+        eaveD * 0.92,
+        0,
+        Math.PI / 4,
+      );
+      addScaledSharedPart(group, SHARED_UNIT_CYL, accentMat, 0, currentY + 1.18, 0, 0.12, 0.78, 0.12);
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_SPHERE,
+        winGlowMat,
+        0,
+        currentY + 1.62,
+        0,
+        0.2,
+        0.2,
+        0.2,
+        0,
+        0,
+        0,
+        false,
+      );
+      computedTopY = currentY + 1.8;
+    } else if (bp.roofStyle === 'spire') {
+      // Stepped crown + tall futuristic spire + glowing beacon
+      addScaledSharedPart(group, SHARED_UNIT_BOX, roofMat, 0, currentY + 0.26, 0, topW * 0.72, 0.52, topD * 0.72);
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_CONE4,
+        accentMat,
+        0,
+        currentY + 1.12,
+        0,
+        topW * 0.58,
+        1.24,
+        topD * 0.58,
+        0,
+        Math.PI / 4,
+      );
+      addScaledSharedPart(group, SHARED_UNIT_CYL, accentMat, 0, currentY + 2.02, 0, 0.08, 1.05, 0.08);
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_SPHERE,
+        winGlowMat,
+        0,
+        currentY + 2.6,
+        0,
+        0.22,
+        0.22,
+        0.22,
+        0,
+        0,
+        0,
+        false,
+      );
+      computedTopY = currentY + 2.75;
+    } else {
+      // 'gable' pitched classic roof + rooftop chimney
+      addScaledSharedPart(
+        group,
+        SHARED_UNIT_CONE4,
+        roofMat,
+        0,
+        currentY + 0.58,
+        0,
+        (topW + 0.32) * 0.95,
+        1.16,
+        (topD + 0.32) * 0.95,
+        0,
+        Math.PI / 4,
+      );
+      addScaledSharedPart(group, SHARED_UNIT_BOX, plinthMat, topW * 0.28, currentY + 0.62, -topD * 0.22, 0.34, 0.9, 0.34);
+      computedTopY = currentY + 1.25;
+    }
   }
 
   // Tier 2 Enhancement: Cloth-Wave Banner & Side Alcove
@@ -996,7 +1377,7 @@ export function buildCompletedStructureMesh(
     const goldMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.22, metalness: 0.85 }), 'gold');
     const postMat = tagThemeMaterial(new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5, metalness: 0.5 }), 'metal');
     const globeMat = createWindowMat(lanternMaterials, 0xfef3c7, 0xf59e0b, 'lantern');
-    addPart(group, new THREE.OctahedronGeometry(0.22, 0), goldMat, 0, 3.65, 0);
+    addPart(group, new THREE.OctahedronGeometry(0.22, 0), goldMat, 0, Math.max(3.65, computedTopY + 0.38), 0);
     addPart(group, new THREE.CylinderGeometry(0.05, 0.06, 1.45, 6), postMat, 1.45, 0.72, 1.18);
     addPart(group, new THREE.SphereGeometry(0.16, 8, 6), globeMat, 1.45, 1.5, 1.18);
   }
@@ -1017,7 +1398,8 @@ export function buildCompletedStructureMesh(
   group.userData.cutawayRoofMaterials = cutawayRoofMaterials;
   group.userData.interiorFireMats = interiorFireMats;
 
-  if (theme !== 'meadow') {
+  // Preserve explicit AI-imagined blueprint hex colors without theme overrides
+  if (theme !== 'meadow' && !structure.blueprint && structure.structureType !== 'apartment') {
     applyThemeToObjectTree(group, theme);
   }
   return group;
@@ -1030,7 +1412,9 @@ export function disposeStructureGroup(
   group.traverse((obj) => {
     if ((obj as THREE.Mesh).isMesh) {
       const mesh = obj as THREE.Mesh;
-      mesh.geometry?.dispose();
+      if (mesh.geometry && !mesh.geometry.userData?.shared) {
+        mesh.geometry.dispose();
+      }
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const mat of mats) {
         if (!mat) continue;

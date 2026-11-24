@@ -30,21 +30,27 @@ import {
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
   CORE_AGENT_IDS,
+  CORE_PLOT_IDS,
   createDefaultEnemyCityState,
   createInitialAgents,
   createInitialLogs,
   DEFAULT_TOWN_METRICS,
+  DEFAULT_TRAIN_BLUEPRINT,
   MAX_TOWN_AGENTS,
   normalizeTownTheme,
   normalizeWeatherMode,
+  sanitizeBuildingBlueprint,
   sanitizeEnemyCityState,
+  sanitizeTrainBlueprint,
   type AgentId,
   type AgentRecord,
   type BiomeId,
+  type BuildingBlueprint,
   type CustomBuildingStyle,
   type DecorPackId,
   type EnemyCityState,
   type HatStyle,
+  type ImaginedTownBlueprint,
   type LocationId,
   type MilestoneId,
   type PlotId,
@@ -62,6 +68,7 @@ import {
   type TownStructure,
   type TownSummary,
   type TownTheme,
+  type TrainBlueprint,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -93,6 +100,7 @@ export interface LoadedTownState {
   relationships: TownRelationship[];
   logs: TownLogItem[];
   enemyCity?: EnemyCityState;
+  trainBlueprints?: TrainBlueprint[];
 }
 
 export const LOCAL_MAIN_TOWN_ID = 'alderbrook_main';
@@ -100,6 +108,62 @@ export const LEGACY_LOCAL_TOWN_KEY = 'alderbrook_local_town_v2';
 const LOCAL_TOWNS_INDEX_KEY = 'alderbrook_local_towns_index_v1';
 const LOCAL_TOWN_PREFIX = 'alderbrook_local_town_slot_';
 const ENEMY_CITY_STORAGE_PREFIX = 'alderbrook_ironhold_city_v1_';
+const TOWN_EXTRAS_STORAGE_PREFIX = 'alderbrook_town_extras_v1_';
+
+export interface TownExtrasSidecar {
+  blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>>;
+  trainBlueprints: TrainBlueprint[];
+}
+
+export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
+  if (typeof window === 'undefined' || !townId) {
+    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT] };
+  }
+  try {
+    const raw = window.localStorage.getItem(`${TOWN_EXTRAS_STORAGE_PREFIX}${townId}`);
+    if (!raw) return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT] };
+    const parsed = JSON.parse(raw) as Partial<TownExtrasSidecar>;
+    const blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>> = {};
+    if (parsed.blueprintsByPlot && typeof parsed.blueprintsByPlot === 'object') {
+      for (const [k, v] of Object.entries(parsed.blueprintsByPlot)) {
+        if (VALID_PLOT_SET.has(k) && v && typeof v === 'object') {
+          blueprintsByPlot[k as PlotId] = sanitizeBuildingBlueprint(v);
+        }
+      }
+    }
+    const trainBlueprints =
+      Array.isArray(parsed.trainBlueprints) && parsed.trainBlueprints.length > 0
+        ? parsed.trainBlueprints.slice(0, 3).map((t) => sanitizeTrainBlueprint(t))
+        : [DEFAULT_TRAIN_BLUEPRINT];
+    return { blueprintsByPlot, trainBlueprints };
+  } catch {
+    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT] };
+  }
+}
+
+export function saveTownExtrasLocal(
+  townId: string,
+  structures: TownStructure[],
+  trainBlueprints: TrainBlueprint[],
+): void {
+  if (typeof window === 'undefined' || !townId) return;
+  try {
+    const blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>> = {};
+    for (const s of structures) {
+      if (s.blueprint) {
+        blueprintsByPlot[s.plotId] = s.blueprint;
+      }
+    }
+    const cleanTrains =
+      trainBlueprints.length > 0 ? trainBlueprints.slice(0, 3) : [DEFAULT_TRAIN_BLUEPRINT];
+    window.localStorage.setItem(
+      `${TOWN_EXTRAS_STORAGE_PREFIX}${townId}`,
+      JSON.stringify({ blueprintsByPlot, trainBlueprints: cleanTrains }),
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 export function loadEnemyCityLocal(townId: string): EnemyCityState {
   if (typeof window === 'undefined' || !townId) return createDefaultEnemyCityState();
@@ -334,20 +398,25 @@ function buildStructureCreatePayload(uid: string, structure: TownStructure): Rec
   const isHospital = structure.structureType === 'hospital';
   const isDefenseWall = structure.structureType === 'defense_wall';
   const isTripleGun = structure.structureType === 'triple_gun_tower';
+  const isApartment = structure.structureType === 'apartment';
   const remoteStructureType =
-    isHospital || isDefenseWall || isTripleGun ? 'custom' : structure.structureType;
+    isHospital || isDefenseWall || isTripleGun || isApartment ? 'custom' : structure.structureType;
   const remoteCustomLabel = isHospital
     ? structure.customLabel?.trim() || 'Town Hospital'
     : isTripleGun
       ? structure.customLabel?.trim() || 'Triple-Gun Defense Tower'
       : isDefenseWall
         ? structure.customLabel?.trim() || 'Defense Wall & Turret'
-        : structure.customLabel?.trim() || '';
+        : isApartment
+          ? structure.blueprint?.name?.trim() || structure.customLabel?.trim() || 'Multi-Story Apartments'
+          : structure.blueprint?.name?.trim() || structure.customLabel?.trim() || '';
   const remoteCustomStyle: CustomBuildingStyle | undefined = isHospital
     ? 'lab'
     : isDefenseWall || isTripleGun
       ? 'tower'
-      : structure.customStyle;
+      : isApartment
+        ? 'guild'
+        : structure.customStyle;
 
   const payload: Record<string, unknown> = {
     ownerId: uid,
@@ -374,8 +443,10 @@ export function createFreshTownState(
   townId: string,
   townName: string,
   isMainTown = false,
+  imagined?: ImaginedTownBlueprint,
 ): LoadedTownState {
-  const cleanName = clampStr(townName.trim(), 60) || (isMainTown ? 'Alderbrook' : 'New Haven');
+  const cleanName =
+    clampStr((imagined?.name || townName).trim(), 60) || (isMainTown ? 'Alderbrook' : 'New Haven');
   const baseAgents = createInitialAgents();
   const agents: AgentRecord[] = isMainTown
     ? baseAgents
@@ -383,11 +454,13 @@ export function createFreshTownState(
         const starterTaskById: Record<string, { task: string; dialogue: string }> = {
           mayor_sterling: {
             task: `Charter ${cleanName} from Town Hall`,
-            dialogue: `Welcome to ${cleanName}! Our frontier is completely open — tell me what to build first.`,
+            dialogue:
+              imagined?.greeting ||
+              `Welcome to ${cleanName}! Our frontier is completely open — tell me what to build first.`,
           },
           architect_lyra: {
-            task: `Survey empty building plots in ${cleanName}`,
-            dialogue: `Fresh land in ${cleanName}! Ready to draft our first structure whenever you say.`,
+            task: `Survey building plots in ${cleanName}`,
+            dialogue: `Fresh land in ${cleanName}! Ready to draft our next structure whenever you say.`,
           },
           commander_vance: {
             task: `Secure ${cleanName} Town Hall perimeter`,
@@ -410,23 +483,55 @@ export function createFreshTownState(
           assignedPlotId: null,
           targetAgent: null,
           userNote: '',
-          thought: `Arrived to establish ${cleanName} from scratch with starter supplies.`,
+          thought: `Arrived to establish ${cleanName} with starter supplies.`,
           dialogue: freshCopy?.dialogue ?? `Ready to build ${cleanName}!`,
           currentTask: freshCopy?.task ?? `Prepare starter site in ${cleanName}`,
           updatedAtMs: Date.now(),
         };
       });
 
+  const now = Date.now();
+  const starterStructures: TownStructure[] = [];
+  if (imagined && imagined.starterBuildings.length > 0) {
+    imagined.starterBuildings.slice(0, 4).forEach((bp, idx) => {
+      const plotId = CORE_PLOT_IDS[idx];
+      if (!plotId) return;
+      const cleanBp = sanitizeBuildingBlueprint(bp, bp.name);
+      starterStructures.push({
+        plotId,
+        structureType: cleanBp.apartmentCapacity >= 16 ? 'apartment' : 'custom',
+        customLabel: cleanBp.name,
+        blueprint: cleanBp,
+        status: 'complete',
+        progress: 100,
+        tier: 1,
+        proposedBy: 'Mayor Sterling',
+        lastBuilder: 'Architect Lyra',
+        updatedAtMs: now,
+      });
+    });
+  }
+
+  const starterBiomes = imagined ? sanitizeBiomes(imagined.unlockedBiomes) : [];
+  const starterRoads = starterBiomes.map((b) => `plaza_to_${b}`);
+  const starterTrains = imagined
+    ? [sanitizeTrainBlueprint(imagined.train, `${cleanName} Express`)]
+    : [DEFAULT_TRAIN_BLUEPRINT];
+
   const logs = createInitialLogs();
   if (!isMainTown && logs[0]) {
     logs[0] = {
       ...logs[0],
-      id: `charter-${townId}-${Date.now()}`,
+      id: `charter-${townId}-${now}`,
       location: 'town_hall',
-      thought: `Chartered ${cleanName} with a clean frontier map, Town Hall, 5 starter villagers, and starter supplies.`,
-      dialogue: `Welcome to ${cleanName}! Only Town Hall and starter supplies stand here — tell me what to build first.`,
+      thought: imagined
+        ? `AI-imagined ${cleanName} (${imagined.theme}) with ${starterStructures.length} signature structures and ${starterTrains[0].name}.`
+        : `Chartered ${cleanName} with a clean frontier map, Town Hall, 5 starter villagers, and starter supplies.`,
+      dialogue:
+        imagined?.greeting ||
+        `Welcome to ${cleanName}! Only Town Hall and starter supplies stand here — tell me what to build first.`,
       newTask: `Charter ${cleanName}`,
-      timestampMs: Date.now(),
+      timestampMs: now,
     };
   }
 
@@ -442,22 +547,28 @@ export function createFreshTownState(
     activePolicies: [],
     decorPacks: [],
     unlockedMilestones: [],
-    history: createStarterHistory(DEFAULT_TREASURY_GOLD, DEFAULT_TOWN_METRICS, agents.length, 0),
+    history: createStarterHistory(
+      DEFAULT_TREASURY_GOLD,
+      DEFAULT_TOWN_METRICS,
+      agents.length,
+      starterStructures.length,
+    ),
     autoDayNight: false,
-    timeOfDay: 'day',
-    weather: 'summer',
-    theme: 'meadow',
-    unlockedBiomes: [],
-    roads: [],
-    railSpurBuilt: false,
+    timeOfDay: imagined?.timeOfDay ?? 'day',
+    weather: imagined?.weather ?? 'summer',
+    theme: imagined?.theme ?? 'meadow',
+    unlockedBiomes: starterBiomes,
+    roads: starterRoads,
+    railSpurBuilt: Boolean(imagined),
     interTownRailBuilt: false,
     interTownRailTarget: '',
     autoMode: false,
     agents,
-    structures: [],
+    structures: starterStructures,
     relationships: createStarterRelationships(),
     logs,
     enemyCity: createDefaultEnemyCityState(),
+    trainBlueprints: starterTrains,
   };
 }
 
@@ -598,6 +709,10 @@ export function loadLocalTown(townId: string): LoadedTownState | null {
           : createStarterRelationships(),
       logs,
       enemyCity: d.enemyCity ? sanitizeEnemyCityState(d.enemyCity) : loadEnemyCityLocal(townId),
+      trainBlueprints:
+        Array.isArray(d.trainBlueprints) && d.trainBlueprints.length > 0
+          ? d.trainBlueprints.slice(0, 3).map((t) => sanitizeTrainBlueprint(t))
+          : loadTownExtrasLocal(townId).trainBlueprints,
     };
   } catch {
     return null;
@@ -612,6 +727,7 @@ export function saveLocalTown(state: LoadedTownState): void {
       : `${LOCAL_TOWN_PREFIX}${state.townId}`;
   try {
     window.localStorage.setItem(key, JSON.stringify(state));
+    saveTownExtrasLocal(state.townId, state.structures, state.trainBlueprints ?? []);
     const index = readLocalTownIndex();
     const now = Date.now();
     const nextEntry: LocalTownMetaEntry = {
@@ -629,12 +745,15 @@ export function saveLocalTown(state: LoadedTownState): void {
   }
 }
 
-export function createNewLocalTown(townName: string): LoadedTownState {
-  const cleanName = clampStr(townName.trim(), 60) || 'New Haven';
+export function createNewLocalTown(
+  townName: string,
+  imagined?: ImaginedTownBlueprint,
+): LoadedTownState {
+  const cleanName = clampStr((imagined?.name || townName).trim(), 60) || 'New Haven';
   const slug = slugifyTownName(cleanName);
   const rand = Math.random().toString(36).slice(2, 6);
   const newId = `local_${slug}_${rand}`;
-  const fresh = createFreshTownState(newId, cleanName, false);
+  const fresh = createFreshTownState(newId, cleanName, false, imagined);
   saveLocalTown(fresh);
   return fresh;
 }
@@ -709,8 +828,9 @@ export async function listUserTowns(uid: string): Promise<TownSummary[]> {
 export async function createNewTownInFirestore(
   uid: string,
   townName: string,
+  imagined?: ImaginedTownBlueprint,
 ): Promise<LoadedTownState> {
-  const cleanName = clampStr(townName.trim(), 60) || 'New Haven';
+  const cleanName = clampStr((imagined?.name || townName).trim(), 60) || 'New Haven';
   const slug = slugifyTownName(cleanName);
   const rand = Math.random().toString(36).slice(2, 6);
   const uidPrefix = uid.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10) || 'u';
@@ -718,7 +838,7 @@ export async function createNewTownInFirestore(
   const townPath = `towns/${townId}`;
   const townRef = doc(db, 'towns', townId);
 
-  const fresh = createFreshTownState(townId, cleanName, false);
+  const fresh = createFreshTownState(townId, cleanName, false, imagined);
   const batch = writeBatch(db);
 
   batch.set(townRef, {
@@ -730,12 +850,12 @@ export async function createNewTownInFirestore(
     prosperity: DEFAULT_TOWN_METRICS.prosperity,
     orderLevel: DEFAULT_TOWN_METRICS.orderLevel,
     morale: DEFAULT_TOWN_METRICS.morale,
-    timeOfDay: 'day',
-    weather: 'summer',
-    theme: 'meadow',
-    unlockedBiomes: [],
-    roads: [],
-    railSpurBuilt: false,
+    timeOfDay: fresh.timeOfDay,
+    weather: fresh.weather,
+    theme: fresh.theme,
+    unlockedBiomes: fresh.unlockedBiomes,
+    roads: fresh.roads,
+    railSpurBuilt: fresh.railSpurBuilt,
     autoMode: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -743,6 +863,13 @@ export async function createNewTownInFirestore(
 
   for (const agent of fresh.agents) {
     batch.set(doc(db, 'towns', townId, 'agents', agent.id), buildAgentDocPayload(uid, agent));
+  }
+
+  for (const structure of fresh.structures) {
+    batch.set(
+      doc(db, 'towns', townId, 'structures', structure.plotId),
+      buildStructureCreatePayload(uid, structure),
+    );
   }
 
   const seedLog = fresh.logs[0];
@@ -765,6 +892,9 @@ export async function createNewTownInFirestore(
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, townPath);
   }
+
+  // Persist procedural blueprints & custom trains in sidecar so Firestore schema stays untouched
+  saveTownExtrasLocal(townId, fresh.structures, fresh.trainBlueprints ?? []);
 
   return fresh;
 }
@@ -966,6 +1096,7 @@ export async function loadOrInitializeTown(
     }
   }
 
+  const townExtras = loadTownExtrasLocal(townId);
   const structures: TownStructure[] = [];
   structuresSnap.forEach((docSnap) => {
     const d = docSnap.data();
@@ -981,6 +1112,7 @@ export async function loadOrInitializeTown(
         ? clampStr(d.customLabel.trim(), 40)
         : undefined;
     const customStyle = sanitizeCustomStyle(d.customStyle);
+    const savedBlueprint = townExtras.blueprintsByPlot[plotId];
     let structureType: StructureType = rawStructureType;
     if (rawStructureType === 'custom' && customLabel) {
       if (/\b(hospital|clinic|infirmary)\b/i.test(customLabel)) {
@@ -989,6 +1121,11 @@ export async function loadOrInitializeTown(
         structureType = 'triple_gun_tower';
       } else if (/\b(defense wall|palisade|cannon turret|bastion)\b/i.test(customLabel)) {
         structureType = 'defense_wall';
+      } else if (
+        /\b(apartment|apartments|flats|condo|residences|housing)\b/i.test(customLabel) ||
+        (savedBlueprint && savedBlueprint.apartmentCapacity >= 16)
+      ) {
+        structureType = 'apartment';
       }
     }
     structures.push({
@@ -996,6 +1133,7 @@ export async function loadOrInitializeTown(
       structureType,
       customLabel,
       customStyle,
+      blueprint: savedBlueprint,
       status,
       progress: clampScore(d.progress, status === 'complete' ? 100 : 0),
       tier: Math.max(1, Math.min(3, Math.round(Number(d.tier ?? 1)))),
@@ -1080,6 +1218,7 @@ export async function loadOrInitializeTown(
     relationships: createStarterRelationships(),
     logs: logs.length > 0 ? logs : createInitialLogs(),
     enemyCity: loadEnemyCityLocal(townId),
+    trainBlueprints: townExtras.trainBlueprints,
   };
 }
 
