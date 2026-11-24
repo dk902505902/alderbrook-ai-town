@@ -505,9 +505,11 @@ export default function App() {
   const [raidState, setRaidState] = useState<EnemyRaidState>(() => {
     try {
       const saved = window.localStorage.getItem('alderbrook_enemy_raids_enabled_v1');
-      return createDefaultEnemyRaidState(saved === 'true');
+      // Default ON so Ironhold Bastion actively attacks unless player explicitly chooses Peaceful Mode ('false')
+      const enabled = saved !== 'false';
+      return createDefaultEnemyRaidState(enabled);
     } catch {
-      return createDefaultEnemyRaidState(false);
+      return createDefaultEnemyRaidState(true);
     }
   });
   const initLocalForEnemy = initialLocal.current;
@@ -581,6 +583,7 @@ export default function App() {
   const lastRaiderLootMsRef = useRef<number>(0);
   const lastDefenseAutoOrderMsRef = useRef<number>(0);
   const lastEnemyTurnMsRef = useRef<number>(0);
+  const launchingWaveRef = useRef<boolean>(false);
   const counterRaidTimerRef = useRef<number | null>(null);
   const [communicationEvent, setCommunicationEvent] = useState<{
     speakerId: AgentId;
@@ -4503,6 +4506,8 @@ export default function App() {
 
   const launchRaidWave = useCallback(
     async (waveNum: number) => {
+      if (launchingWaveRef.current) return;
+      launchingWaveRef.current = true;
       const now = Date.now();
       const maxHp = 120 + (waveNum - 1) * 35;
       const snap = stateRef.current;
@@ -4520,43 +4525,47 @@ export default function App() {
       }));
       soundscape.playAgentChime(2);
 
-      const aiPlan = await consultRaiderCommanderAI(waveNum, maxHp, maxHp);
-      applyAutonomousEnemyTurn(aiPlan);
-      lastEnemyTurnMsRef.current = Date.now();
+      try {
+        const aiPlan = await consultRaiderCommanderAI(waveNum, maxHp, maxHp);
+        applyAutonomousEnemyTurn(aiPlan);
+        lastEnemyTurnMsRef.current = Date.now();
 
-      setRaidState((prev) =>
-        prev.active
-          ? {
-              ...prev,
-              commanderName: 'Warlord Malakor',
-              tactic: aiPlan.tactic,
-              commanderOrder: aiPlan.commanderOrder,
-              modelUsed: aiPlan.modelUsed,
-              lastEventMs: Date.now(),
-            }
-          : prev,
-      );
+        setRaidState((prev) =>
+          prev.active
+            ? {
+                ...prev,
+                commanderName: 'Warlord Malakor',
+                tactic: aiPlan.tactic,
+                commanderOrder: aiPlan.commanderOrder,
+                modelUsed: aiPlan.modelUsed,
+                lastEventMs: Date.now(),
+              }
+            : prev,
+        );
 
-      setLogs((prev) =>
-        [
-          {
-            id: `raid-wave-${now}`,
-            turnNumber: snap.turnCount,
-            agentId: 'commander_vance',
-            agentName: 'Commander Vance',
-            rank: 2 as const,
-            location: 'town_hall' as const,
-            targetAgent: 'Mayor Sterling',
-            thought: `Ironhold Wave #${waveNum} launched autonomously (${aiPlan.modelUsed}).`,
-            dialogue: `Ironhold Raid W${waveNum}! Warlord Malakor (${aiPlan.modelUsed}): "${aiPlan.commanderOrder}"`,
-            newTask: 'Defending perimeter & directing turret counter-fire!',
-            timestampMs: now,
-          },
-          ...prev,
-        ].slice(0, 50),
-      );
+        setLogs((prev) =>
+          [
+            {
+              id: `raid-wave-${now}`,
+              turnNumber: snap.turnCount,
+              agentId: 'commander_vance',
+              agentName: 'Commander Vance',
+              rank: 2 as const,
+              location: 'town_hall' as const,
+              targetAgent: 'Mayor Sterling',
+              thought: `Ironhold Wave #${waveNum} launched autonomously (${aiPlan.modelUsed}).`,
+              dialogue: `Ironhold Raid W${waveNum}! Warlord Malakor (${aiPlan.modelUsed}): "${aiPlan.commanderOrder}"`,
+              newTask: 'Defending perimeter & directing turret counter-fire!',
+              timestampMs: now,
+            },
+            ...prev,
+          ].slice(0, 50),
+        );
 
-      void triggerMayorDefenseResponse('raid_started');
+        void triggerMayorDefenseResponse('raid_started');
+      } finally {
+        launchingWaveRef.current = false;
+      }
     },
     [consultRaiderCommanderAI, applyAutonomousEnemyTurn, triggerMayorDefenseResponse],
   );
@@ -4936,8 +4945,22 @@ export default function App() {
 
       // Between raid waves, Warlord Malakor still builds Ironhold factories, ore railway, airfield & jets!
       if (!snap.raidState.active) {
-        if (snap.raidState.nextWaveAtMs && now >= snap.raidState.nextWaveAtMs) {
-          void launchRaidWave(snap.raidState.waveNumber + 1);
+        if (!snap.raidState.nextWaveAtMs) {
+          // Self-healing guard: never leave an enabled enemy without a scheduled attack wave
+          const nextWave = Math.max(1, snap.raidState.waveNumber + 1);
+          if (snap.raidState.waveNumber === 0) {
+            void launchRaidWave(nextWave);
+          } else {
+            setRaidState((prev) =>
+              prev.enabled && !prev.active && !prev.nextWaveAtMs
+                ? { ...prev, nextWaveAtMs: now + 18000 }
+                : prev,
+            );
+          }
+          return;
+        }
+        if (now >= snap.raidState.nextWaveAtMs) {
+          void launchRaidWave(Math.max(1, snap.raidState.waveNumber + 1));
           return;
         }
         if (now - lastEnemyTurnMsRef.current >= 18000) {
@@ -4984,7 +5007,7 @@ export default function App() {
           );
         });
       }
-    }, 5000);
+    }, 2000);
 
     return () => window.clearInterval(raidTickId);
   }, [
@@ -5706,25 +5729,41 @@ export default function App() {
                 <span>Auto</span>
               </button>
             )}
-            {raidState.enabled && (
-              <button
-                type="button"
-                onClick={() =>
-                  raidState.active
-                    ? handleFocusBattle()
-                    : handleToggleEnemyRaids(false)
+            <button
+              type="button"
+              onClick={() => {
+                if (raidState.active) {
+                  handleFocusBattle();
+                } else if (raidState.enabled) {
+                  void handleTriggerEnemyRaid();
+                } else {
+                  handleToggleEnemyRaids(true);
                 }
-                title={
-                  raidState.active
-                    ? 'Active Raider Wave — click to view Battle'
-                    : 'Enemy Raids are ON — click to switch to Peaceful Mode'
-                }
-                className="hidden min-h-[30px] shrink-0 items-center gap-1 rounded-lg border border-rose-400/55 bg-rose-500/20 px-2 text-[11px] font-semibold whitespace-nowrap text-rose-100 hover:bg-rose-500/30 lg:inline-flex"
-              >
-                <Swords className="h-3 w-3" />
-                <span>{raidState.active ? `Raid W${raidState.waveNumber}` : 'Raids ON'}</span>
-              </button>
-            )}
+              }}
+              title={
+                raidState.active
+                  ? 'Active Raider Wave — click to view Battle'
+                  : raidState.enabled
+                    ? 'Enemy Raids are ON — click to launch the next wave immediately'
+                    : 'Enemy Raids are OFF (Peaceful) — click to enable & launch a raid'
+              }
+              className={`hidden min-h-[30px] shrink-0 items-center gap-1 rounded-lg border px-2 text-[11px] font-semibold whitespace-nowrap lg:inline-flex ${
+                raidState.active
+                  ? 'border-rose-400/75 bg-rose-600/35 text-rose-50 hover:bg-rose-600/50'
+                  : raidState.enabled
+                    ? 'border-rose-400/55 bg-rose-500/20 text-rose-100 hover:bg-rose-500/30'
+                    : 'border-white/15 bg-slate-900 text-slate-300 hover:border-rose-400/45 hover:text-rose-200'
+              }`}
+            >
+              <Swords className="h-3 w-3" />
+              <span>
+                {raidState.active
+                  ? `Raid W${raidState.waveNumber}`
+                  : raidState.enabled
+                    ? 'Raids ON'
+                    : 'Raids OFF'}
+              </span>
+            </button>
             <div className="hidden items-center gap-1.5 text-xs text-slate-400 xl:flex">
               <span className="font-mono-tabular text-slate-300">Turn {turnCount}</span>
               <span aria-hidden="true">·</span>
@@ -6135,6 +6174,17 @@ export default function App() {
                 onSelectPlot={handleSelectPlot}
                 onSelectSignalRelay={handleSelectSignalRelay}
                 onFocusEnemyCity={handleFocusEnemyCity}
+                onToggleEnemyRaids={handleToggleEnemyRaids}
+                onTriggerEnemyRaid={() => {
+                  if (raidState.active) {
+                    handleFocusBattle();
+                  } else {
+                    void handleTriggerEnemyRaid();
+                  }
+                }}
+                onLaunchCounterRaid={() => {
+                  void handleLaunchCounterRaid();
+                }}
                 onOpenChronicle={(tab) => {
                   setChronicleInitialTab(tab);
                   setChronicleOpen(true);
@@ -6306,6 +6356,19 @@ export default function App() {
                   onSelectSignalRelay={handleSelectSignalRelay}
                   onFocusEnemyCity={() => {
                     handleFocusEnemyCity();
+                    setMobileTab(null);
+                  }}
+                  onToggleEnemyRaids={handleToggleEnemyRaids}
+                  onTriggerEnemyRaid={() => {
+                    if (raidState.active) {
+                      handleFocusBattle();
+                    } else {
+                      void handleTriggerEnemyRaid();
+                    }
+                    setMobileTab(null);
+                  }}
+                  onLaunchCounterRaid={() => {
+                    void handleLaunchCounterRaid();
                     setMobileTab(null);
                   }}
                   onOpenChronicle={(tab) => {

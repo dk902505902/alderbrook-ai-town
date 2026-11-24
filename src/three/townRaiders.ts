@@ -2119,7 +2119,8 @@ export function buildTownRaidersSystem(shadowTex: THREE.Texture): TownRaidersHan
             isHammering = true;
           }
         }
-        if (!isHammering && Math.hypot(goalX - r.x, goalZ - r.z) < 0.75) {
+        const inAttackPosition = !isHammering && Math.hypot(r.coverX - r.x, r.coverZ - r.z) < 1.65;
+        if (inAttackPosition) {
           goalX += Math.sin(elapsed * 1.35 + r.strafePhase) * 0.45;
           goalZ += Math.cos(elapsed * 1.15 + r.strafePhase) * 0.45;
         }
@@ -2131,8 +2132,10 @@ export function buildTownRaidersSystem(shadowTex: THREE.Texture): TownRaidersHan
           r.x += (dx / dist) * step;
           r.z += (dz / dist) * step;
           r.root.position.set(r.x, 0, r.z);
-          const moveYaw = Math.atan2(dx, dz);
-          const diff = Math.atan2(Math.sin(moveYaw - r.facingYaw), Math.cos(moveYaw - r.facingYaw));
+          const aimYaw = inAttackPosition
+            ? Math.atan2(-7.5 - r.x, 4.5 - r.z)
+            : Math.atan2(dx, dz);
+          const diff = Math.atan2(Math.sin(aimYaw - r.facingYaw), Math.cos(aimYaw - r.facingYaw));
           r.facingYaw += diff * Math.min(1, delta * 9);
           r.root.rotation.y = r.facingYaw;
           r.walkPhase += delta * 11.5;
@@ -2140,7 +2143,11 @@ export function buildTownRaidersSystem(shadowTex: THREE.Texture): TownRaidersHan
           r.leftLegPivot.rotation.x = swing;
           r.rightLegPivot.rotation.x = -swing;
           r.leftArmPivot.rotation.x = -swing * 0.8;
-          r.rightArmPivot.rotation.x = r.role === 'sapper' ? swing * 0.8 : -0.75 + swing * 0.22;
+          r.rightArmPivot.rotation.x = inAttackPosition
+            ? -1.22 + Math.sin(elapsed * 3.5 + i) * 0.08
+            : r.role === 'sapper'
+              ? swing * 0.8
+              : -0.75 + swing * 0.22;
           r.bodyGroup.position.y = Math.abs(Math.sin(r.walkPhase)) * 0.08;
         } else {
           const townYaw = Math.atan2(-7.5 - r.x, 4.5 - r.z);
@@ -2158,14 +2165,16 @@ export function buildTownRaidersSystem(shadowTex: THREE.Texture): TownRaidersHan
             }
           } else {
             r.rightArmPivot.rotation.x = -1.22 + Math.sin(elapsed * 3.5 + i) * 0.08;
-            r.fireCooldown -= delta;
-            if (r.fireCooldown <= 0) {
-              r.fireCooldown = (r.role === 'captain' ? 2.1 : 2.9) + Math.random() * 1.4;
-              const tgt = pickRaiderTarget(true);
-              const bx = r.x + Math.sin(r.facingYaw) * 0.55;
-              const bz = r.z + Math.cos(r.facingYaw) * 0.55;
-              spawnProjectile('raider_bolt', bx, 1.15, bz, tgt.x, tgt.y + 0.25, tgt.z, 1.6, 0.86, 0);
-            }
+          }
+        }
+        if (inAttackPosition) {
+          r.fireCooldown -= delta;
+          if (r.fireCooldown <= 0) {
+            r.fireCooldown = (r.role === 'captain' ? 2.0 : 2.7) + Math.random() * 1.2;
+            const tgt = pickRaiderTarget(true);
+            const bx = r.x + Math.sin(r.facingYaw) * 0.55;
+            const bz = r.z + Math.cos(r.facingYaw) * 0.55;
+            spawnProjectile('raider_bolt', bx, 1.15, bz, tgt.x, tgt.y + 0.25, tgt.z, 1.6, 0.86, 0);
           }
         }
         radarSnapshot.squad[i].x = r.x;

@@ -706,7 +706,7 @@ export interface EnemyRaidState {
   nextWaveAtMs?: number | null;
 }
 
-export function createDefaultEnemyRaidState(enabled = false): EnemyRaidState {
+export function createDefaultEnemyRaidState(enabled = true): EnemyRaidState {
   return {
     enabled,
     active: false,
@@ -719,7 +719,7 @@ export function createDefaultEnemyRaidState(enabled = false): EnemyRaidState {
     modelUsed: 'Instant Tactics · 0 tokens',
     raidsRepelled: 0,
     lastEventMs: 0,
-    nextWaveAtMs: null,
+    nextWaveAtMs: enabled ? Date.now() + 12000 : null,
   };
 }
 

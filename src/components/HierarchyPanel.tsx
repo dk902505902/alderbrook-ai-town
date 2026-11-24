@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Award,
   Castle,
@@ -83,6 +83,9 @@ interface HierarchyPanelProps {
   onSelectPlot: (plotId: PlotId) => void;
   onSelectSignalRelay?: () => void;
   onFocusEnemyCity?: () => void;
+  onToggleEnemyRaids?: (next?: boolean) => void;
+  onTriggerEnemyRaid?: () => void;
+  onLaunchCounterRaid?: () => void;
   onOpenChronicle?: (tab: ChronicleTab) => void;
   onResetCamera: () => void;
 }
@@ -133,13 +136,29 @@ export function HierarchyPanel({
   onSelectPlot,
   onSelectSignalRelay,
   onFocusEnemyCity,
+  onToggleEnemyRaids,
+  onTriggerEnemyRaid,
+  onLaunchCounterRaid,
   onOpenChronicle,
   onResetCamera,
 }: HierarchyPanelProps) {
   const [activeTab, setActiveTab] = useState<'town' | 'rival'>('town');
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const [hirePrompt, setHirePrompt] = useState('');
   const [confirmUnhireId, setConfirmUnhireId] = useState<AgentId | null>(null);
+
+  useEffect(() => {
+    if (activeTab !== 'rival' || !raidState.enabled || raidState.active) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [activeTab, raidState.enabled, raidState.active]);
+
+  const nextWaveCountdownSec =
+    raidState.enabled && !raidState.active && raidState.nextWaveAtMs
+      ? Math.max(0, Math.ceil((raidState.nextWaveAtMs - nowMs) / 1000))
+      : null;
   const coreAgentSet = new Set<string>(CORE_AGENT_IDS);
   const enemyAiResolved = resolveInferenceConfig(providerConfig, ENEMY_RAIDER_AGENT_ID);
   const enemyModelLabel = enemyAiResolved.isInstantTactics
@@ -254,6 +273,57 @@ export function HierarchyPanel({
             <p className="mt-1.5 text-[11px] leading-snug text-rose-100/90">
               “{enemyCity.warlordDecision}”
             </p>
+
+            {/* Live Raid Status & Quick Actions */}
+            <div className="mt-2.5 space-y-2 border-t border-rose-500/20 pt-2.5">
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="font-semibold text-rose-200">
+                  {raidState.active
+                    ? `Wave #${raidState.waveNumber} Attacking!`
+                    : raidState.enabled
+                      ? nextWaveCountdownSec !== null
+                        ? `Next Raid Wave in ${nextWaveCountdownSec}s`
+                        : 'Preparing Next Raid Wave...'
+                      : 'Peaceful Mode (Raids OFF)'}
+                </span>
+                {onToggleEnemyRaids && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleEnemyRaids(!raidState.enabled)}
+                    className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                      raidState.enabled
+                        ? 'border-rose-400/50 bg-rose-500/25 text-rose-100 hover:bg-rose-500/35'
+                        : 'border-white/15 bg-slate-900 text-slate-300 hover:border-rose-400/40 hover:text-rose-200'
+                    }`}
+                  >
+                    Raids: {raidState.enabled ? 'ON' : 'OFF'}
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {onTriggerEnemyRaid && (
+                  <button
+                    type="button"
+                    onClick={onTriggerEnemyRaid}
+                    className="inline-flex min-h-[34px] items-center justify-center gap-1 rounded-lg border border-rose-400/50 bg-rose-600/85 px-2 text-[11px] font-semibold text-white hover:bg-rose-500"
+                  >
+                    <Swords className="h-3.5 w-3.5 shrink-0" />
+                    <span>{raidState.active ? 'Focus Raid' : 'Attack Now'}</span>
+                  </button>
+                )}
+                {onLaunchCounterRaid && (
+                  <button
+                    type="button"
+                    onClick={onLaunchCounterRaid}
+                    disabled={enemyCity.counterRaidActive}
+                    className="inline-flex min-h-[34px] items-center justify-center gap-1 rounded-lg border border-cyan-400/45 bg-cyan-600/25 px-2 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-600/35 disabled:opacity-50"
+                  >
+                    <Target className="h-3.5 w-3.5 shrink-0" />
+                    <span>{enemyCity.counterRaidActive ? 'Raiding...' : 'Counter-Raid'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Enemy Stockpiles & Two-Way Loot Ledger */}
