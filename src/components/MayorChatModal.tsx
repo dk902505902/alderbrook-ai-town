@@ -22,7 +22,10 @@ import {
   advanceProviderKeyCursor,
   buildInferenceHeaders,
   formatCompactModelName,
+  isReasoningModel,
+  parseMayorLlmPayload,
   resolveInferenceConfig,
+  stripThinkingBlocks,
 } from '../lib/aiRouting.ts';
 import {
   executeWebSearch,
@@ -1047,10 +1050,22 @@ export function MayorChatModal({
               }),
             });
             if (res.ok) {
-              const data = (await res.json()) as { reply?: string; modelUsed?: string };
-              if (data.reply) {
-                summaryReply = data.reply;
-                usedTag = `${formatCompactModelName(data.modelUsed || resolvedMayorModel.modelName)} + ${searchRes.providerName}`;
+              const rawBodyText = await res.text();
+              let data: { reply?: string; modelUsed?: string } | null = null;
+              try {
+                data = JSON.parse(rawBodyText) as { reply?: string; modelUsed?: string };
+              } catch {
+                const parsedFallback = parseMayorLlmPayload(rawBodyText);
+                if (parsedFallback.reply) {
+                  data = { reply: parsedFallback.reply };
+                }
+              }
+              if (data?.reply) {
+                const cleaned = parseMayorLlmPayload(data.reply).reply || stripThinkingBlocks(data.reply);
+                if (cleaned) {
+                  summaryReply = cleaned;
+                  usedTag = `${formatCompactModelName(data.modelUsed || resolvedMayorModel.modelName)} + ${searchRes.providerName}`;
+                }
               }
             }
           } catch {
@@ -1136,6 +1151,9 @@ export function MayorChatModal({
         .map((t) => t.name);
 
       if (hasUsableMayorLlm) {
+        if (isReasoningModel(resolvedMayorModel.modelName)) {
+          setStatusNotice('Mayor Sterling is reasoning through your request…');
+        }
         try {
           advanceProviderKeyCursor(resolvedMayorModel);
           const res = await fetch('/api/town/mayor-chat', {
@@ -1189,19 +1207,50 @@ export function MayorChatModal({
           });
 
           if (res.ok) {
-            const data = (await res.json()) as {
+            const rawText = await res.text();
+            let data: {
               reply?: string;
               action?: MayorActionPlan;
               modelUsed?: string;
-            };
-            if (data.reply) {
-              replyText = data.reply;
-              actionPlan = data.action ?? { type: 'none' };
-              modelTag = formatCompactModelName(data.modelUsed || resolvedMayorModel.modelName);
+            } | null = null;
+            try {
+              data = JSON.parse(rawText) as {
+                reply?: string;
+                action?: MayorActionPlan;
+                modelUsed?: string;
+              };
+            } catch {
+              const recovered = parseMayorLlmPayload(rawText);
+              if (recovered.reply || recovered.action) {
+                data = {
+                  reply: recovered.reply,
+                  action: (recovered.action as MayorActionPlan | null) ?? { type: 'none' },
+                };
+              }
+            }
+
+            if (data) {
+              const rawReplyStr = typeof data.reply === 'string' ? data.reply : '';
+              // Handle nested JSON or leftover <think> tags inside reply safely
+              const normalized = parseMayorLlmPayload(rawReplyStr);
+              const cleanedReply = normalized.reply || stripThinkingBlocks(rawReplyStr);
+              const serverAction =
+                data.action && data.action.type && data.action.type !== 'none'
+                  ? data.action
+                  : normalized.action && typeof normalized.action.type === 'string'
+                    ? (normalized.action as unknown as MayorActionPlan)
+                    : { type: 'none' as const };
+              if (cleanedReply || serverAction.type !== 'none') {
+                replyText =
+                  cleanedReply ||
+                  `Consider it done — ${townName} is already moving on your word.`;
+                actionPlan = serverAction;
+                modelTag = formatCompactModelName(data.modelUsed || resolvedMayorModel.modelName);
+              }
             }
           }
         } catch {
-          // Fall back cleanly to local intent parser below
+          // Fall back cleanly to local intent parser below — never throw in Mayor Chat
         }
       }
 

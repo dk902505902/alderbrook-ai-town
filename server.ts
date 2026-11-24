@@ -7,6 +7,14 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  buildChatCompletionPayload,
+  extractChoiceMessageText,
+  extractFirstJsonObject,
+  isReasoningModel,
+  parseMayorLlmPayload,
+  stripThinkingBlocks,
+} from './src/lib/aiRouting.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -377,15 +385,11 @@ function sanitizeHexColor(val: unknown, fallback: string): string {
 }
 
 function extractJsonObject(rawContent: string): Record<string, unknown> {
-  const trimmed = rawContent.trim();
-  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fencedMatch ? fencedMatch[1].trim() : trimmed;
-  const firstBrace = candidate.indexOf('{');
-  const lastBrace = candidate.lastIndexOf('}');
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+  const parsed = extractFirstJsonObject(rawContent);
+  if (!parsed) {
     throw new Error('Model response did not contain a valid JSON object.');
   }
-  return JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+  return parsed;
 }
 
 function sanitizeHiredWorkerSpec(
@@ -815,9 +819,10 @@ async function callChatCompletions(
   const isGoogleOpenAi = baseUrl.includes('generativelanguage.googleapis.com');
   const fallbackModel =
     isGoogleOpenAi && requestedModel !== 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : null;
+  const timeoutMs = isReasoningModel(requestedModel) ? 60000 : 30000;
 
   try {
-    const first = await callChatCompletionsOnce(endpoint, headers, body, 30000);
+    const first = await callChatCompletionsOnce(endpoint, headers, body, timeoutMs);
     if (
       first.errorText &&
       fallbackModel &&
@@ -869,18 +874,40 @@ async function callChatCompletionsWithKeyPool(
 
   for (let i = 0; i < apiKeys.length; i++) {
     const key = apiKeys[i];
-    let result = await callChatCompletions(baseUrl, key, body);
+    let currentBody = { ...body };
+    let result = await callChatCompletions(baseUrl, key, currentBody);
 
-    if (
-      allowStripResponseFormat &&
-      'errorText' in result &&
-      result.errorText &&
-      result.status === 400 &&
-      'response_format' in body
-    ) {
-      const fallback = { ...body };
-      delete fallback.response_format;
-      result = await callChatCompletions(baseUrl, key, fallback);
+    // Retry gracefully on HTTP 400 when providers/reasoning models reject response_format, temperature, or max_tokens vs max_completion_tokens
+    if ('errorText' in result && result.errorText && result.status === 400) {
+      const errLower = result.errorText.toLowerCase();
+      const nextBody = { ...currentBody };
+      let changed = false;
+
+      if (allowStripResponseFormat && 'response_format' in nextBody) {
+        delete nextBody.response_format;
+        changed = true;
+      }
+      if (
+        'temperature' in nextBody &&
+        (errLower.includes('temperature') || isReasoningModel(String(nextBody.model ?? '')))
+      ) {
+        delete nextBody.temperature;
+        changed = true;
+      }
+      if ('max_tokens' in nextBody && errLower.includes('max_completion_tokens')) {
+        nextBody.max_completion_tokens = nextBody.max_tokens;
+        delete nextBody.max_tokens;
+        changed = true;
+      } else if ('max_completion_tokens' in nextBody && errLower.includes('max_tokens')) {
+        nextBody.max_tokens = nextBody.max_completion_tokens;
+        delete nextBody.max_completion_tokens;
+        changed = true;
+      }
+
+      if (changed) {
+        currentBody = nextBody;
+        result = await callChatCompletions(baseUrl, key, currentBody);
+      }
     }
 
     lastResult = result;
@@ -934,14 +961,18 @@ async function createServer() {
 
     const startedAt = Date.now();
     try {
-      const result = await callChatCompletionsWithKeyPool(baseUrl, apiKeys, {
-        model: modelName,
-        messages: [
-          { role: 'user', content: 'Reply with exactly the word READY.' },
-        ],
-        max_tokens: 16,
-        temperature: 0,
-      });
+      const result = await callChatCompletionsWithKeyPool(
+        baseUrl,
+        apiKeys,
+        buildChatCompletionPayload({
+          model: modelName,
+          messages: [{ role: 'user', content: 'Reply with exactly the word READY.' }],
+          maxTokens: 16,
+          minReasoningTokens: 1024,
+          temperature: 0,
+          baseUrl,
+        }),
+      );
 
       if ('errorText' in result && result.errorText) {
         const poolNote =
@@ -953,8 +984,7 @@ async function createServer() {
         return;
       }
 
-      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
-      const reply = choices?.[0]?.message?.content?.trim() || 'Connected';
+      const reply = stripThinkingBlocks(extractChoiceMessageText(result.data)) || 'Connected';
       res.json({
         ok: true,
         latencyMs: Date.now() - startedAt,
@@ -1232,16 +1262,18 @@ async function createServer() {
       structureSummary,
     ].join('\n');
 
-    const payload: Record<string, unknown> = {
+    const payload = buildChatCompletionPayload({
       model: modelName,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
       temperature: 0.85,
-      max_tokens: 650,
-      response_format: { type: 'json_object' },
-    };
+      maxTokens: 650,
+      minReasoningTokens: 2048,
+      jsonMode: true,
+      baseUrl,
+    });
 
     try {
       const result = await callChatCompletionsWithKeyPool(baseUrl, apiKeys, payload, true);
@@ -1253,8 +1285,7 @@ async function createServer() {
         return;
       }
 
-      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
-      const content = choices?.[0]?.message?.content;
+      const content = extractChoiceMessageText(result.data);
       if (!content) {
         res.status(502).json({ error: 'AI provider returned an empty response.' });
         return;
@@ -1474,13 +1505,15 @@ async function createServer() {
       const result = await callChatCompletionsWithKeyPool(
         baseUrl,
         apiKeys,
-        {
+        buildChatCompletionPayload({
           model: modelName,
           messages,
           temperature: 0.65,
-          max_tokens: webResultsList.length > 0 ? 480 : 280,
-          response_format: { type: 'json_object' },
-        },
+          maxTokens: webResultsList.length > 0 ? 720 : 420,
+          minReasoningTokens: webResultsList.length > 0 ? 2560 : 2048,
+          jsonMode: true,
+          baseUrl,
+        }),
         true,
       );
 
@@ -1491,19 +1524,11 @@ async function createServer() {
         return;
       }
 
-      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
-      const content = choices?.[0]?.message?.content;
-      if (!content) {
-        res.status(502).json({ error: 'Mayor AI returned an empty response.' });
-        return;
-      }
-
-      const parsed = extractJsonObject(content);
-      const reply = String(parsed.reply ?? '').trim().slice(0, webResultsList.length > 0 ? 1100 : 320);
-      const rawAction =
-        parsed.action && typeof parsed.action === 'object'
-          ? (parsed.action as Record<string, unknown>)
-          : {};
+      const content = extractChoiceMessageText(result.data);
+      const parsedPayload = parseMayorLlmPayload(content);
+      const maxReplyLen = webResultsList.length > 0 ? 1100 : 420;
+      const reply = parsedPayload.reply.slice(0, maxReplyLen);
+      const rawAction = parsedPayload.action ?? {};
       const rawType = String(rawAction.type ?? 'none').trim().toLowerCase();
       const allowedTypes = new Set([
         'build',
@@ -1630,16 +1655,18 @@ async function createServer() {
       const result = await callChatCompletionsWithKeyPool(
         baseUrl,
         apiKeys,
-        {
+        buildChatCompletionPayload({
           model: modelName,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
           temperature: 0.75,
-          max_tokens: 200,
-          response_format: { type: 'json_object' },
-        },
+          maxTokens: 280,
+          minReasoningTokens: 1536,
+          jsonMode: true,
+          baseUrl,
+        }),
         true,
       );
 
@@ -1650,8 +1677,7 @@ async function createServer() {
         return;
       }
 
-      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
-      const content = choices?.[0]?.message?.content || '';
+      const content = extractChoiceMessageText(result.data);
       const parsed = extractJsonObject(content);
       const validTactics = new Set([
         'shell_perimeter',
@@ -2152,16 +2178,18 @@ async function createServer() {
       .filter((line) => line !== undefined)
       .join('\n');
 
-    const payloadWithFormat: Record<string, unknown> = {
+    const payloadWithFormat = buildChatCompletionPayload({
       model: modelName,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
       temperature: 0.7,
-      max_tokens: allowAutonomousHire ? 650 : 450,
-      response_format: { type: 'json_object' },
-    };
+      maxTokens: allowAutonomousHire ? 650 : 450,
+      minReasoningTokens: 2048,
+      jsonMode: true,
+      baseUrl,
+    });
 
     try {
       const result = await callChatCompletionsWithKeyPool(
@@ -2178,8 +2206,7 @@ async function createServer() {
         return;
       }
 
-      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
-      const content = choices?.[0]?.message?.content;
+      const content = extractChoiceMessageText(result.data);
       if (!content) {
         res.status(502).json({ error: 'AI provider returned an empty response.' });
         return;
@@ -2670,12 +2697,15 @@ async function createServer() {
       const result = await callChatCompletionsWithKeyPool(
         baseUrl,
         apiKeys,
-        {
+        buildChatCompletionPayload({
           model: modelName,
           messages: chatMessages,
           temperature: 0.78,
-          max_tokens: 120,
-        },
+          maxTokens: 160,
+          minReasoningTokens: 1024,
+          jsonMode: false,
+          baseUrl,
+        }),
         false,
       );
 
@@ -2686,8 +2716,7 @@ async function createServer() {
         return;
       }
 
-      const choices = result.data.choices as Array<{ message?: { content?: string } }> | undefined;
-      const rawReply = choices?.[0]?.message?.content?.trim() || '';
+      const rawReply = stripThinkingBlocks(extractChoiceMessageText(result.data));
       const cleanReply = rawReply.replace(/^["']|["']$/g, '').slice(0, 240);
       res.json({
         reply: cleanReply || `Good to see you in ${townName}! I'm right in the middle of ${vTask.toLowerCase()}.`,
