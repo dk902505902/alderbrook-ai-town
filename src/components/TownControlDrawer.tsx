@@ -75,7 +75,17 @@ import {
   encodeBlueprintShareCode,
   exportHistoryToCsv,
   FESTIVAL_CATALOG,
+  HARBOR_CRUISE_DAILY_TOURISTS,
+  HARBOR_CRUISE_REVENUE_PER_TURN,
+  HARBOR_UNLOCK_COST_GOLD,
+  ISLAND_DEFENSE_COST_GOLD,
+  ISLAND_RESORT_COST_GOLD,
+  ISLAND_RESORT_DAILY_TOURISTS,
+  ISLAND_RESORT_REVENUE_PER_TURN,
   MEGAPROJECT_CATALOG,
+  SUBWAY_BUILD_COST_CRYSTAL,
+  SUBWAY_BUILD_COST_GOLD,
+  SUBWAY_REVENUE_PER_TURN,
   TECH_UPGRADES,
   TRADE_PACT_CATALOG,
 } from '../lib/townSystems.ts';
@@ -86,6 +96,7 @@ import {
   getAvailablePlotIds,
   PLOT_META,
   type ActiveFestivalState,
+  type ActiveMayorMandate,
   type AgentId,
   type AgentRecord,
   type AgentShiftMode,
@@ -112,13 +123,18 @@ import {
   type MarketPricesState,
   type MayorTodoItem,
   type MegaprojectId,
+  type MiniGameMode,
   type MunicipalLoanState,
   type PlotId,
+  type RadioNewsItem,
   type TechUpgradeId,
   type TimeOfDay,
   type TourismSummary,
   type TownCheckpointSlot,
   type TownEconomySummary,
+  type TownElectionState,
+  type TownEraId,
+  type TownEraSummary,
   type TownHistoryPoint,
   type TownNeedsSummary,
   type TownResources,
@@ -135,6 +151,8 @@ import {
 
 export type StudioTab =
   | 'economy'
+  | 'frontier'
+  | 'play'
   | 'world'
   | 'wonders'
   | 'utilities'
@@ -334,6 +352,34 @@ interface TownControlDrawerProps {
   onSurpriseAtmosphere: () => string;
   onResetVisuals: () => string;
   onDownloadBackupJson: () => string;
+  // Batch 5: Subway X-Ray, Coastal Harbor, Elections, Live Radio, 3D Mini-Games & Living Eras
+  subwayBuilt: boolean;
+  undergroundXray: boolean;
+  onBuildSubway: () => string;
+  onToggleUndergroundXray: () => void;
+  onFocusUnderground: () => void;
+  harborUnlocked: boolean;
+  islandResortBuilt: boolean;
+  islandDefenseBuilt: boolean;
+  onUnlockHarbor: () => string;
+  onBuildIslandResort: () => string;
+  onBuildIslandDefense: () => string;
+  onFocusHarbor: () => void;
+  activeElection: TownElectionState | null;
+  activeMandate: ActiveMayorMandate | null;
+  onCallElection: () => string;
+  onVoteElection: (candidateId: string | null) => string;
+  radioTickerEnabled: boolean;
+  radioVoiceEnabled: boolean;
+  radioHeadlines: RadioNewsItem[];
+  onToggleRadioTicker: (next: boolean) => void;
+  onToggleRadioVoice: (next: boolean) => void;
+  onBroadcastRadioNow: () => void;
+  townEraSummary: TownEraSummary;
+  eraOverride: 'auto' | TownEraId;
+  onChangeEraOverride: (next: 'auto' | TownEraId) => void;
+  miniGameBestScores: Record<'train_driver' | 'turret_defense' | 'drone_hunt', number>;
+  onStartMiniGame: (mode: Exclude<MiniGameMode, 'none'>) => void;
 }
 
 const HEATMAP_BUTTONS: Array<{ id: HeatmapMode; label: string }> = [
@@ -566,8 +612,36 @@ export function TownControlDrawer({
   onSurpriseAtmosphere,
   onResetVisuals,
   onDownloadBackupJson,
+  subwayBuilt,
+  undergroundXray,
+  onBuildSubway,
+  onToggleUndergroundXray,
+  onFocusUnderground,
+  harborUnlocked,
+  islandResortBuilt,
+  islandDefenseBuilt,
+  onUnlockHarbor,
+  onBuildIslandResort,
+  onBuildIslandDefense,
+  onFocusHarbor,
+  activeElection,
+  activeMandate,
+  onCallElection,
+  onVoteElection,
+  radioTickerEnabled,
+  radioVoiceEnabled,
+  radioHeadlines,
+  onToggleRadioTicker,
+  onToggleRadioVoice,
+  onBroadcastRadioNow,
+  townEraSummary,
+  eraOverride,
+  onChangeEraOverride,
+  miniGameBestScores,
+  onStartMiniGame,
 }: TownControlDrawerProps) {
   const [tab, setTab] = useState<StudioTab>(initialTab);
+  const [timelineIdx, setTimelineIdx] = useState<number>(Math.max(0, history.length - 1));
   const [trainDraft, setTrainDraft] = useState<TrainBlueprint>(() =>
     generateFallbackTrainBlueprint('Aurora Neon Bullet'),
   );
@@ -668,13 +742,15 @@ export function TownControlDrawer({
 
   const TABS: Array<{ id: StudioTab; label: string; Icon: typeof Coins }> = [
     { id: 'economy', label: 'Economy', Icon: Coins },
+    { id: 'frontier', label: 'Metro & Harbor', Icon: Layers },
+    { id: 'play', label: 'Play & Eras', Icon: Dices },
     { id: 'world', label: activeFestival ? 'World (Fest)' : 'World', Icon: Globe },
     { id: 'wonders', label: 'Wonders', Icon: Landmark },
     { id: 'utilities', label: 'Grid', Icon: Zap },
     { id: 'market', label: unclaimedQuestCount > 0 ? `Market (${unclaimedQuestCount})` : 'Market', Icon: Store },
     { id: 'tech', label: 'Tech', Icon: Cpu },
     { id: 'rail', label: 'Rail', Icon: TrainFront },
-    { id: 'council', label: 'Council', Icon: Scale },
+    { id: 'council', label: activeElection?.status === 'open' ? 'Council (Vote!)' : 'Council', Icon: Scale },
     { id: 'citizens', label: 'Citizens', Icon: Users },
     { id: 'camera', label: 'Camera', Icon: Camera },
     { id: 'trophies', label: `Awards (${unlockedTrophyCount})`, Icon: Trophy },
@@ -2116,9 +2192,152 @@ export function TownControlDrawer({
             </>
           )}
 
-          {/* TAB 6: COUNCIL DEBATES, EMERGENCIES & 3D FIREWORKS SHOW */}
+          {/* TAB 6: COUNCIL DEBATES, ELECTIONS, RADIO, EMERGENCIES & 3D FIREWORKS SHOW */}
           {tab === 'council' && (
             <>
+              {/* Live Villager Elections & AI Political Campaigns */}
+              <div className="space-y-2.5 rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-semibold text-white">Live Villager Elections</div>
+                    <div className="text-[11px] text-cyan-200/80">
+                      Every 15 turns · Winning Mayor grants 15-turn civic mandate
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onCallElection())}
+                    className="min-h-[40px] shrink-0 rounded-xl bg-cyan-400 px-3 text-xs font-semibold whitespace-nowrap text-slate-950 hover:bg-cyan-300"
+                  >
+                    Call Election
+                  </button>
+                </div>
+
+                {activeMandate && (
+                  <div className="rounded-lg border border-white/15 bg-slate-950/80 px-2.5 py-2 text-[11px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-white">
+                        Mandate: {activeMandate.mayorName} · {activeMandate.platformTitle}
+                      </span>
+                      <span className="shrink-0 font-semibold text-amber-300 tabular-nums">
+                        {activeMandate.turnsLeft}t left
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-emerald-300">{activeMandate.buffSummary}</div>
+                  </div>
+                )}
+
+                {activeElection && (
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold text-cyan-200">
+                      {activeElection.status === 'open'
+                        ? `Ballots Open (Turn ${activeElection.turnStarted}) — Cast Deciding Vote:`
+                        : `Election Results (Turn ${activeElection.turnStarted}):`}
+                    </div>
+                    {activeElection.candidates.map((cand) => {
+                      const isWinner = activeElection.winnerId === cand.id;
+                      return (
+                        <div
+                          key={cand.id}
+                          className={`rounded-xl border p-2.5 ${
+                            isWinner
+                              ? 'border-emerald-400/60 bg-emerald-500/15'
+                              : 'border-white/10 bg-slate-950/80'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="truncate font-semibold text-white">
+                                {cand.name} ·{' '}
+                                <span style={{ color: cand.color }}>{cand.platformTitle}</span>
+                              </div>
+                              <div className="text-[10px] text-slate-400">"{cand.slogan}"</div>
+                            </div>
+                            {activeElection.status === 'open' ? (
+                              <button
+                                type="button"
+                                onClick={() => flashStatus(onVoteElection(cand.id))}
+                                className="min-h-[40px] shrink-0 rounded-lg bg-amber-500 px-3 text-xs font-semibold text-slate-950 hover:bg-amber-400"
+                              >
+                                Vote
+                              </button>
+                            ) : (
+                              <span className="shrink-0 text-xs font-bold text-emerald-300 tabular-nums">
+                                {cand.votes} votes{isWinner ? ' · Won' : ''}
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-[10px] text-emerald-300">{cand.buffSummary}</div>
+                        </div>
+                      );
+                    })}
+                    {activeElection.status === 'open' && (
+                      <button
+                        type="button"
+                        onClick={() => flashStatus(onVoteElection(null))}
+                        className="min-h-[44px] w-full rounded-xl border border-white/15 bg-slate-900 font-semibold text-slate-100 hover:bg-slate-800"
+                      >
+                        Let Citizens Vote Automatically
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Breaking News Broadcast & Live Town Radio */}
+              <div className="space-y-2 rounded-xl border border-white/10 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <Radio className="h-3.5 w-3.5 text-amber-300" />
+                    <span>Live Town Radio & Broadcasts</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onBroadcastRadioNow();
+                      flashStatus('Broadcasting latest Town Radio headline!');
+                    }}
+                    className="inline-flex min-h-[38px] items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-500/15 px-2.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/25"
+                  >
+                    <Volume2 className="h-3.5 w-3.5" />
+                    <span>Broadcast</span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onToggleRadioTicker(!radioTickerEnabled)}
+                    className={`min-h-[44px] rounded-xl border text-xs font-semibold ${
+                      radioTickerEnabled
+                        ? 'border-emerald-400/45 bg-emerald-500/15 text-emerald-200'
+                        : 'border-white/10 bg-slate-950 text-slate-400'
+                    }`}
+                  >
+                    Ticker: {radioTickerEnabled ? 'ON' : 'OFF'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onToggleRadioVoice(!radioVoiceEnabled)}
+                    className={`min-h-[44px] rounded-xl border text-xs font-semibold ${
+                      radioVoiceEnabled
+                        ? 'border-cyan-400/45 bg-cyan-500/15 text-cyan-200'
+                        : 'border-white/10 bg-slate-950 text-slate-400'
+                    }`}
+                  >
+                    Voice AI: {radioVoiceEnabled ? 'ON' : 'Muted'}
+                  </button>
+                </div>
+                {radioHeadlines.slice(0, 3).map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-lg border border-white/5 bg-slate-950/70 px-2.5 py-1.5 text-[11px] text-slate-300"
+                  >
+                    <span className="mr-1.5 font-bold text-amber-300">[{item.tag}]</span>
+                    {item.text}
+                  </div>
+                ))}
+              </div>
+
               <div className="flex items-center justify-between rounded-xl border border-amber-400/30 bg-amber-500/10 p-3">
                 <div>
                   <div className="font-semibold text-white">3D Sky Fireworks Show</div>
@@ -3227,6 +3446,297 @@ export function TownControlDrawer({
                     {importFeedback.message}
                   </p>
                 )}
+              </div>
+            </>
+          )}
+
+          {/* NEW TAB: UNDERGROUND SUBWAY METRO & 3D COASTAL HARBOR EXPANSION */}
+          {tab === 'frontier' && (
+            <>
+              {/* 1. Interactive 3D Underground & Subway Metro */}
+              <div className="space-y-3 rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-semibold text-white">3D Underground & Subway Metro</div>
+                    <div className="text-[11px] text-cyan-200/85">
+                      X-Ray transparent streets · Water/Power mains · Twin underground metro trains
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-xs font-bold text-cyan-300 tabular-nums">
+                    {subwayBuilt ? `+${SUBWAY_REVENUE_PER_TURN}g/t` : 'Locked'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onToggleUndergroundXray();
+                      flashStatus(
+                        !undergroundXray
+                          ? 'X-Ray Underground ON — looking through streets!'
+                          : 'Returned to solid surface terrain.',
+                      );
+                    }}
+                    className={`inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl font-semibold ${
+                      undergroundXray
+                        ? 'bg-cyan-400 text-slate-950'
+                        : 'border border-cyan-400/40 bg-slate-950 text-cyan-200 hover:bg-slate-900'
+                    }`}
+                  >
+                    <Layers className="h-4 w-4" />
+                    <span>{undergroundXray ? 'X-Ray: ON' : 'Toggle X-Ray'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onFocusUnderground();
+                      onClose();
+                    }}
+                    className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-950 font-semibold text-slate-100 hover:bg-slate-900"
+                  >
+                    <Eye className="h-4 w-4 text-cyan-300" />
+                    <span>Inspect Below</span>
+                  </button>
+                </div>
+
+                {!subwayBuilt ? (
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onBuildSubway())}
+                    className="min-h-[46px] w-full rounded-xl bg-amber-500 px-3 font-semibold text-slate-950 hover:bg-amber-400"
+                  >
+                    Construct Subway Metro Loop ({SUBWAY_BUILD_COST_GOLD}g + {SUBWAY_BUILD_COST_CRYSTAL} Crystal)
+                  </button>
+                ) : (
+                  <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-2 text-[11px] text-emerald-200">
+                    Subway Metro Operational · 4 Lit Subterranean Stations + Twin Trains (+{SUBWAY_REVENUE_PER_TURN}g/turn)
+                  </div>
+                )}
+              </div>
+
+              {/* 2. 3D Coastal Harbor, Cruise Ship & Offshore Paradise Island */}
+              <div className="space-y-3 rounded-xl border border-sky-400/30 bg-sky-500/10 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-semibold text-white">Coastal Harbor & Offshore Island</div>
+                    <div className="text-[11px] text-sky-200/85">
+                      Striped Lighthouse · Animated Cruise Ship · Arch Bridge · Island Resort
+                    </div>
+                  </div>
+                  {harborUnlocked && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onFocusHarbor();
+                        onClose();
+                      }}
+                      className="inline-flex min-h-[40px] shrink-0 items-center gap-1 rounded-xl bg-sky-400 px-3 text-xs font-semibold text-slate-950 hover:bg-sky-300"
+                    >
+                      <Compass className="h-3.5 w-3.5" />
+                      <span>Harbor Cam</span>
+                    </button>
+                  )}
+                </div>
+
+                {!harborUnlocked ? (
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onUnlockHarbor())}
+                    className="min-h-[46px] w-full rounded-xl bg-sky-400 px-3 font-semibold text-slate-950 hover:bg-sky-300"
+                  >
+                    Unlock Coastal Harbor & Cruise Pier ({HARBOR_UNLOCK_COST_GOLD}g)
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="rounded-lg border border-sky-400/30 bg-slate-950/75 px-2.5 py-2 text-[11px] text-sky-200">
+                      Grand Cruise Ship Active · +{HARBOR_CRUISE_DAILY_TOURISTS} daily tourists · +{HARBOR_CRUISE_REVENUE_PER_TURN}g/turn
+                    </div>
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        type="button"
+                        disabled={islandResortBuilt}
+                        onClick={() => flashStatus(onBuildIslandResort())}
+                        className={`min-h-[46px] rounded-xl px-3 text-left text-xs font-semibold ${
+                          islandResortBuilt
+                            ? 'border border-emerald-400/35 bg-emerald-500/15 text-emerald-200'
+                            : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                        }`}
+                      >
+                        {islandResortBuilt
+                          ? `Offshore Luxury Island Resort Built (+${ISLAND_RESORT_DAILY_TOURISTS} tourists · +${ISLAND_RESORT_REVENUE_PER_TURN}g/t)`
+                          : `Build Offshore Island Luxury Resort (${ISLAND_RESORT_COST_GOLD}g · +${ISLAND_RESORT_REVENUE_PER_TURN}g/t)`}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={islandDefenseBuilt}
+                        onClick={() => flashStatus(onBuildIslandDefense())}
+                        className={`min-h-[46px] rounded-xl px-3 text-left text-xs font-semibold ${
+                          islandDefenseBuilt
+                            ? 'border border-cyan-400/35 bg-cyan-500/15 text-cyan-200'
+                            : 'border border-rose-400/40 bg-rose-500/20 text-rose-100 hover:bg-rose-500/30'
+                        }`}
+                      >
+                        {islandDefenseBuilt
+                          ? 'Coastal Missile Battery Active (Radar & Air-Raid Shield)'
+                          : `Build Coastal Missile Battery (${ISLAND_DEFENSE_COST_GOLD}g · Boosts Defense)`}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* NEW TAB: 3 INTERACTIVE 3D MINI-GAMES, LIVING ERAS & TIMELINE REPLAY */}
+          {tab === 'play' && (
+            <>
+              {/* 1. 3 Interactive 3D Mini-Games */}
+              <div className="space-y-2.5 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3">
+                <div>
+                  <div className="font-semibold text-white">3D Town Mini-Games</div>
+                  <div className="text-[11px] text-amber-200/85">
+                    45-second interactive challenges right inside your 3D town · Win real Gold & Crystal!
+                  </div>
+                </div>
+
+                {[
+                  {
+                    id: 'train_driver' as const,
+                    title: 'Drive the Express Train',
+                    desc: 'Take the Cab POV throttle, blow the horn & stop cleanly in Alderbrook Station Zone!',
+                    reward: '+18g per perfect stop',
+                    best: miniGameBestScores.train_driver,
+                    accent: 'bg-amber-500 text-slate-950 hover:bg-amber-400',
+                  },
+                  {
+                    id: 'turret_defense' as const,
+                    title: 'Turret Air Defense',
+                    desc: 'Tap incoming red raider drones in 3D or fire auto-lock interceptor laser volleys!',
+                    reward: '+14g & Crystal per 3 hits',
+                    best: miniGameBestScores.turret_defense,
+                    accent: 'bg-rose-500 text-white hover:bg-rose-400',
+                  },
+                  {
+                    id: 'drone_hunt' as const,
+                    title: 'Drone Sky Treasure Hunt',
+                    desc: 'Spot & tap 8 glowing golden 3D sky crates hovering around town landmarks!',
+                    reward: '+16g & +1 Crystal per 2 crates',
+                    best: miniGameBestScores.drone_hunt,
+                    accent: 'bg-cyan-400 text-slate-950 hover:bg-cyan-300',
+                  },
+                ].map((game) => (
+                  <div
+                    key={game.id}
+                    className="space-y-2 rounded-xl border border-white/10 bg-slate-950/85 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white">{game.title}</div>
+                        <div className="mt-0.5 text-[11px] text-slate-400">{game.desc}</div>
+                      </div>
+                      <span className="shrink-0 text-[11px] font-bold text-amber-300 tabular-nums">
+                        Best: {game.best}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-medium text-emerald-300">{game.reward}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onStartMiniGame(game.id);
+                          onClose();
+                        }}
+                        className={`min-h-[44px] shrink-0 rounded-xl px-4 text-xs font-semibold whitespace-nowrap ${game.accent}`}
+                      >
+                        Play Now
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* 2. Living Town Eras & 3D Architectural Evolution */}
+              <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-semibold text-white">Living Town Era</div>
+                    <div className="text-[11px] text-cyan-300">{townEraSummary.label}</div>
+                  </div>
+                  <span className="text-xs font-bold text-amber-300 tabular-nums">
+                    +{townEraSummary.goldBonusPerTurn}g/t
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">{townEraSummary.subtitle}</p>
+                <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-amber-400 to-cyan-400"
+                    style={{ width: `${townEraSummary.progressPct}%` }}
+                  />
+                </div>
+                <div className="text-[10px] text-slate-400">{townEraSummary.requirementHint}</div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {(
+                    [
+                      { id: 'auto', label: 'Auto' },
+                      { id: 'village', label: 'Village' },
+                      { id: 'steam_city', label: 'Steam' },
+                      { id: 'neo_metropolis', label: 'Neo' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        onChangeEraOverride(opt.id);
+                        flashStatus(`Living Era visual style set to ${opt.label}.`);
+                      }}
+                      className={`min-h-[40px] rounded-xl text-[11px] font-semibold ${
+                        eraOverride === opt.id
+                          ? 'bg-cyan-400 text-slate-950'
+                          : 'border border-white/10 bg-slate-950 text-slate-300 hover:bg-slate-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 3. Interactive Town History Timeline Scrubber */}
+              <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold text-white">Town History Timeline Replay</div>
+                  <span className="text-[11px] text-slate-400 tabular-nums">
+                    {history.length} snapshot{history.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+                {(() => {
+                  const safeIdx = Math.min(Math.max(0, timelineIdx), Math.max(0, history.length - 1));
+                  const pt = history[safeIdx];
+                  if (!pt) {
+                    return <div className="text-[11px] text-slate-400">Advance turns to record timeline history.</div>;
+                  }
+                  return (
+                    <>
+                      <input
+                        type="range"
+                        min={0}
+                        max={Math.max(0, history.length - 1)}
+                        value={safeIdx}
+                        onChange={(e) => setTimelineIdx(Number(e.target.value))}
+                        aria-label="Scrub town history timeline"
+                        className="h-2 w-full accent-amber-400"
+                      />
+                      <div className="flex items-center justify-between text-[11px] text-slate-300 tabular-nums">
+                        <span className="font-semibold text-amber-300">Turn {pt.turn}</span>
+                        <span>
+                          {pt.treasuryGold}g · {pt.population} pop · {pt.buildings} bldgs · {pt.morale}% morale
+                        </span>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             </>
           )}

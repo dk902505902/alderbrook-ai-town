@@ -550,6 +550,60 @@ export interface TownTrophyItem {
   progressLabel: string;
 }
 
+export type TownEraId = 'village' | 'steam_city' | 'neo_metropolis';
+
+export type MiniGameMode = 'none' | 'train_driver' | 'turret_defense' | 'drone_hunt';
+
+export type ElectionPlatformId = 'transit' | 'green' | 'industry' | 'festival';
+
+export interface ElectionCandidate {
+  id: string;
+  name: string;
+  role: string;
+  platformId: ElectionPlatformId;
+  platformTitle: string;
+  slogan: string;
+  buffSummary: string;
+  votes: number;
+  color: string;
+}
+
+export interface TownElectionState {
+  id: string;
+  turnStarted: number;
+  candidates: ElectionCandidate[];
+  status: 'open' | 'concluded';
+  winnerId: string | null;
+}
+
+export interface ActiveMayorMandate {
+  mayorName: string;
+  platformId: ElectionPlatformId;
+  platformTitle: string;
+  buffSummary: string;
+  turnsLeft: number;
+  color: string;
+}
+
+export interface RadioNewsItem {
+  id: string;
+  turn: number;
+  tag: 'BREAKING' | 'ELECTION' | 'HARBOR' | 'METRO' | 'ERA' | 'ECONOMY' | 'CIVIC';
+  text: string;
+  createdAtMs: number;
+}
+
+export interface TownEraSummary {
+  id: TownEraId;
+  label: string;
+  subtitle: string;
+  nextEraLabel: string | null;
+  progressPct: number;
+  goldBonusPerTurn: number;
+  tourismBonus: number;
+  requirementHint: string;
+}
+
 export interface TownAdvancedState {
   zoneMap: Partial<Record<PlotId, DistrictZoneType>>;
   unlockedTechs: TechUpgradeId[];
@@ -594,6 +648,19 @@ export interface TownAdvancedState {
   activeTradePacts: TradePactId[];
   awardedMedalAgentIds: AgentId[];
   journalEntries: JournalEntry[];
+  // Batch 5 (6 Big Features): Underground Subway, Elections, Live Radio, Coastal Harbor, Mini-Games, Living Eras
+  subwayBuilt: boolean;
+  harborUnlocked: boolean;
+  islandResortBuilt: boolean;
+  islandDefenseBuilt: boolean;
+  radioTickerEnabled: boolean;
+  radioVoiceEnabled: boolean;
+  radioHeadlines: RadioNewsItem[];
+  activeElection: TownElectionState | null;
+  activeMandate: ActiveMayorMandate | null;
+  lastElectionTurn: number;
+  eraOverride: 'auto' | TownEraId;
+  miniGameBestScores: Record<'train_driver' | 'turret_defense' | 'drone_hunt', number>;
 }
 
 export interface TownEventOption {

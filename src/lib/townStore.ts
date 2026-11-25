@@ -177,6 +177,30 @@ export function createDefaultAdvancedState(): TownAdvancedState {
         createdAtMs: 1,
       },
     ],
+    subwayBuilt: false,
+    harborUnlocked: false,
+    islandResortBuilt: false,
+    islandDefenseBuilt: false,
+    radioTickerEnabled: true,
+    radioVoiceEnabled: false,
+    radioHeadlines: [
+      {
+        id: 'radio-welcome',
+        turn: 1,
+        tag: 'CIVIC',
+        text: 'Alderbrook FM Live: Clear skies over Town Square as engineers chart Subway Metro & Harbor plans.',
+        createdAtMs: 1,
+      },
+    ],
+    activeElection: null,
+    activeMandate: null,
+    lastElectionTurn: 0,
+    eraOverride: 'auto',
+    miniGameBestScores: {
+      train_driver: 0,
+      turret_defense: 0,
+      drone_hunt: 0,
+    },
   };
 }
 
@@ -353,6 +377,42 @@ export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
       journalEntries: Array.isArray(rawAdv.journalEntries)
         ? rawAdv.journalEntries.slice(0, 30)
         : fallbackAdv.journalEntries,
+      subwayBuilt: typeof rawAdv.subwayBuilt === 'boolean' ? rawAdv.subwayBuilt : false,
+      harborUnlocked: typeof rawAdv.harborUnlocked === 'boolean' ? rawAdv.harborUnlocked : false,
+      islandResortBuilt:
+        typeof rawAdv.islandResortBuilt === 'boolean' ? rawAdv.islandResortBuilt : false,
+      islandDefenseBuilt:
+        typeof rawAdv.islandDefenseBuilt === 'boolean' ? rawAdv.islandDefenseBuilt : false,
+      radioTickerEnabled:
+        typeof rawAdv.radioTickerEnabled === 'boolean' ? rawAdv.radioTickerEnabled : true,
+      radioVoiceEnabled:
+        typeof rawAdv.radioVoiceEnabled === 'boolean' ? rawAdv.radioVoiceEnabled : false,
+      radioHeadlines:
+        Array.isArray(rawAdv.radioHeadlines) && rawAdv.radioHeadlines.length > 0
+          ? rawAdv.radioHeadlines.slice(0, 16)
+          : fallbackAdv.radioHeadlines,
+      activeElection:
+        rawAdv.activeElection && typeof rawAdv.activeElection === 'object'
+          ? rawAdv.activeElection
+          : null,
+      activeMandate:
+        rawAdv.activeMandate && typeof rawAdv.activeMandate === 'object'
+          ? rawAdv.activeMandate
+          : null,
+      lastElectionTurn:
+        typeof rawAdv.lastElectionTurn === 'number' && Number.isFinite(rawAdv.lastElectionTurn)
+          ? Math.max(0, Math.round(rawAdv.lastElectionTurn))
+          : 0,
+      eraOverride:
+        typeof rawAdv.eraOverride === 'string' &&
+        ['auto', 'village', 'steam_city', 'neo_metropolis'].includes(rawAdv.eraOverride)
+          ? rawAdv.eraOverride
+          : 'auto',
+      miniGameBestScores: {
+        train_driver: Number(rawAdv.miniGameBestScores?.train_driver) || 0,
+        turret_defense: Number(rawAdv.miniGameBestScores?.turret_defense) || 0,
+        drone_hunt: Number(rawAdv.miniGameBestScores?.drone_hunt) || 0,
+      },
     };
     return { blueprintsByPlot, trainBlueprints, taxRate, advanced };
   } catch {

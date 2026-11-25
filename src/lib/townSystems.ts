@@ -17,6 +17,7 @@ import {
   sanitizeTrainBlueprint,
   STRUCTURE_META,
   type ActiveFestivalState,
+  type ActiveMayorMandate,
   type AgentId,
   type AgentRecord,
   type AgentShiftMode,
@@ -33,6 +34,8 @@ import {
   type DecorPackMeta,
   type DistrictZoneType,
   type EcoScoreSummary,
+  type ElectionCandidate,
+  type ElectionPlatformId,
   type EmergencyEventState,
   type FestivalKind,
   type LocationId,
@@ -43,6 +46,7 @@ import {
   type PlotId,
   type PolicyId,
   type PriceTrend,
+  type RadioNewsItem,
   type ShareCodePayload,
   type StructureType,
   type TechUpgradeId,
@@ -50,6 +54,9 @@ import {
   type TimeOfDay,
   type TourismSummary,
   type TownEconomySummary,
+  type TownElectionState,
+  type TownEraId,
+  type TownEraSummary,
   type TownEvent,
   type TownGazetteEdition,
   type TownHistoryPoint,
@@ -2851,6 +2858,321 @@ export function computeTownTrophies(params: {
     },
   ];
 }
+
+// ============================================================================
+// 20. Batch 5: Subway Metro, Coastal Harbor, Elections, Live Radio & Living Eras
+// ============================================================================
+
+export const SUBWAY_BUILD_COST_GOLD = 160;
+export const SUBWAY_BUILD_COST_CRYSTAL = 3;
+export const SUBWAY_REVENUE_PER_TURN = 36;
+
+export const HARBOR_UNLOCK_COST_GOLD = 200;
+export const HARBOR_CRUISE_REVENUE_PER_TURN = 32;
+export const HARBOR_CRUISE_DAILY_TOURISTS = 110;
+
+export const ISLAND_RESORT_COST_GOLD = 140;
+export const ISLAND_RESORT_REVENUE_PER_TURN = 28;
+export const ISLAND_RESORT_DAILY_TOURISTS = 45;
+
+export const ISLAND_DEFENSE_COST_GOLD = 135;
+
+export function computeTownEra(params: {
+  structures: TownStructure[];
+  unlockedTechs: TechUpgradeId[];
+  completedWonders: number;
+  subwayBuilt: boolean;
+  harborUnlocked: boolean;
+  railSpurBuilt: boolean;
+  eraOverride: 'auto' | TownEraId;
+}): TownEraSummary {
+  const completedBldgs = params.structures.filter((s) => s.status === 'complete').length;
+  const housing = computeTownHousingCapacity(params.structures);
+  const eraScore =
+    completedBldgs * 10 +
+    params.unlockedTechs.length * 14 +
+    params.completedWonders * 24 +
+    (params.subwayBuilt ? 22 : 0) +
+    (params.harborUnlocked ? 18 : 0) +
+    (params.railSpurBuilt ? 12 : 0) +
+    Math.min(30, Math.floor(housing.dummyPopulation / 4));
+
+  const autoId: TownEraId =
+    eraScore >= 135 || (completedBldgs >= 10 && (params.unlockedTechs.length >= 2 || params.subwayBuilt || params.completedWonders >= 1))
+      ? 'neo_metropolis'
+      : eraScore >= 55 || completedBldgs >= 5 || params.railSpurBuilt || params.unlockedTechs.length >= 1
+        ? 'steam_city'
+        : 'village';
+
+  const id: TownEraId = params.eraOverride === 'auto' ? autoId : params.eraOverride;
+
+  if (id === 'neo_metropolis') {
+    return {
+      id: 'neo_metropolis',
+      label: 'Solar Neo-Metropolis',
+      subtitle: 'Holographic plaza rings, cyan avenue trims & luminous skyline spires',
+      nextEraLabel: null,
+      progressPct: 100,
+      goldBonusPerTurn: 48,
+      tourismBonus: 75,
+      requirementHint: 'Peak architectural era achieved!',
+    };
+  }
+
+  if (id === 'steam_city') {
+    const pct = Math.max(12, Math.min(99, Math.round(((eraScore - 55) / (135 - 55)) * 100)));
+    return {
+      id: 'steam_city',
+      label: 'Brass Steam City',
+      subtitle: 'Ornate brass plaza arches, industrial steam vents & bustling rail era',
+      nextEraLabel: 'Solar Neo-Metropolis',
+      progressPct: params.eraOverride === 'auto' ? pct : 65,
+      goldBonusPerTurn: 20,
+      tourismBonus: 28,
+      requirementHint: 'Build 10+ structures, unlock 2 Techs, or open Subway Metro for Era 3.',
+    };
+  }
+
+  const pct = Math.max(8, Math.min(99, Math.round((eraScore / 55) * 100)));
+  return {
+    id: 'village',
+    label: 'Cozy Timber Village',
+    subtitle: 'Warm timber lanterns, cobble squares & founding frontier charm',
+    nextEraLabel: 'Brass Steam City',
+    progressPct: params.eraOverride === 'auto' ? pct : 35,
+    goldBonusPerTurn: 0,
+    tourismBonus: 0,
+    requirementHint: 'Complete 5+ buildings, extend the Rail Loop, or unlock a Tech for Era 2.',
+  };
+}
+
+const ELECTION_PLATFORMS: Record<
+  ElectionPlatformId,
+  { title: string; buffSummary: string; color: string; slogans: string[] }
+> = {
+  transit: {
+    title: 'Transit & Growth Pact',
+    buffSummary: '+28g/turn Rail & Metro Dividend + +25 Daily Tourists',
+    color: '#0ea5e9',
+    slogans: [
+      'Faster rails, deeper metros, and booming coastal trade!',
+      'Every street linked by clockwork transit and skyways!',
+    ],
+  },
+  green: {
+    title: 'Green Sanctuary Charter',
+    buffSummary: '+15 Eco Score, +16g/turn Green Grant & +3 Morale/turn',
+    color: '#10b981',
+    slogans: [
+      'Solar roofs, lush gardens, and clean skies for every citizen!',
+      'Grow a verdant metropolis where nature and skyline thrive!',
+    ],
+  },
+  industry: {
+    title: 'Fortress & Industry Boom',
+    buffSummary: '+36g/turn Civic Industry Surge & fortified defenses',
+    color: '#f59e0b',
+    slogans: [
+      'Strong walls, roaring workshops, and overflowing vaults!',
+      'Prosperity built on steel, craft, and ironclad order!',
+    ],
+  },
+  festival: {
+    title: 'Festival Metropolis',
+    buffSummary: '+22g/turn Culture Gold, +60 Daily Tourists & +4 Morale/turn',
+    color: '#ec4899',
+    slogans: [
+      'Lanterns every night, cruise ships at dawn, joy in every plaza!',
+      'Make our town the most celebrated destination on the map!',
+    ],
+  },
+};
+
+export function generateTownElection(
+  agents: AgentRecord[],
+  turnCount: number,
+): TownElectionState {
+  const mayor = agents.find((a) => a.id === 'mayor_sterling') ?? agents[0];
+  const others = agents.filter((a) => a.id !== mayor?.id);
+  const pickA = others[(turnCount + 1) % Math.max(1, others.length)] ?? agents[1] ?? mayor;
+  const pickB = others[(turnCount + 3) % Math.max(1, others.length)] ?? agents[2] ?? mayor;
+
+  const platformOrder: ElectionPlatformId[] = ['transit', 'green', 'industry', 'festival'];
+  const p0 = platformOrder[turnCount % 4];
+  const p1 = platformOrder[(turnCount + 1) % 4];
+  const p2 = platformOrder[(turnCount + 2) % 4];
+
+  const makeCandidate = (
+    agent: AgentRecord,
+    platformId: ElectionPlatformId,
+    idx: number,
+  ): ElectionCandidate => {
+    const meta = ELECTION_PLATFORMS[platformId];
+    return {
+      id: `${agent.id}_${platformId}`,
+      name: agent.name,
+      role: agent.role,
+      platformId,
+      platformTitle: meta.title,
+      slogan: meta.slogans[(turnCount + idx) % meta.slogans.length],
+      buffSummary: meta.buffSummary,
+      votes: 0,
+      color: meta.color,
+    };
+  };
+
+  return {
+    id: `election_${turnCount}_${Date.now()}`,
+    turnStarted: turnCount,
+    candidates: [
+      makeCandidate(mayor, p0, 0),
+      makeCandidate(pickA, p1, 1),
+      makeCandidate(pickB, p2, 2),
+    ],
+    status: 'open',
+    winnerId: null,
+  };
+}
+
+export function tallyCitizenElectionVote(params: {
+  election: TownElectionState;
+  morale: number;
+  ecoScore: number;
+  population: number;
+  playerVoteCandidateId?: string | null;
+}): { concluded: TownElectionState; mandate: ActiveMayorMandate; winner: ElectionCandidate } {
+  const totalVoters = Math.max(45, params.population + 35);
+  const scored = params.election.candidates.map((c, idx) => {
+    let weight = 30 + ((params.election.turnStarted * 7 + idx * 13) % 18);
+    if (c.platformId === 'green' && params.ecoScore < 72) weight += 16;
+    if (c.platformId === 'festival' && params.morale < 75) weight += 18;
+    if (c.platformId === 'transit' && params.population >= 60) weight += 14;
+    if (c.platformId === 'industry') weight += 11;
+    if (params.playerVoteCandidateId && c.id === params.playerVoteCandidateId) {
+      weight += 65; // Player's deciding ballot swings the election cleanly
+    }
+    return { candidate: c, weight };
+  });
+
+  const weightSum = scored.reduce((sum, s) => sum + s.weight, 0) || 1;
+  const updatedCandidates: ElectionCandidate[] = scored.map((s) => ({
+    ...s.candidate,
+    votes: Math.max(8, Math.round((s.weight / weightSum) * totalVoters)),
+  }));
+
+  let winner = updatedCandidates[0];
+  for (const c of updatedCandidates) {
+    if (c.votes > winner.votes) winner = c;
+  }
+
+  const concluded: TownElectionState = {
+    ...params.election,
+    candidates: updatedCandidates,
+    status: 'concluded',
+    winnerId: winner.id,
+  };
+
+  const mandate: ActiveMayorMandate = {
+    mayorName: winner.name,
+    platformId: winner.platformId,
+    platformTitle: winner.platformTitle,
+    buffSummary: winner.buffSummary,
+    turnsLeft: 15,
+    color: winner.color,
+  };
+
+  return { concluded, mandate, winner };
+}
+
+export function computeMandateBonus(mandate: ActiveMayorMandate | null): {
+  goldBonusPerTurn: number;
+  moraleBonusPerTurn: number;
+  ecoBonus: number;
+  tourismBonus: number;
+} {
+  if (!mandate || mandate.turnsLeft <= 0) {
+    return { goldBonusPerTurn: 0, moraleBonusPerTurn: 0, ecoBonus: 0, tourismBonus: 0 };
+  }
+  switch (mandate.platformId) {
+    case 'transit':
+      return { goldBonusPerTurn: 28, moraleBonusPerTurn: 1, ecoBonus: 0, tourismBonus: 25 };
+    case 'green':
+      return { goldBonusPerTurn: 16, moraleBonusPerTurn: 3, ecoBonus: 15, tourismBonus: 15 };
+    case 'industry':
+      return { goldBonusPerTurn: 36, moraleBonusPerTurn: 0, ecoBonus: 0, tourismBonus: 10 };
+    case 'festival':
+      return { goldBonusPerTurn: 22, moraleBonusPerTurn: 4, ecoBonus: 5, tourismBonus: 60 };
+    default:
+      return { goldBonusPerTurn: 0, moraleBonusPerTurn: 0, ecoBonus: 0, tourismBonus: 0 };
+  }
+}
+
+export function createRadioHeadline(
+  turn: number,
+  tag: RadioNewsItem['tag'],
+  text: string,
+): RadioNewsItem {
+  return {
+    id: `radio_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    turn,
+    tag,
+    text,
+    createdAtMs: Date.now(),
+  };
+}
+
+export function generateContextualRadioHeadline(params: {
+  townName: string;
+  turn: number;
+  population: number;
+  treasuryGold: number;
+  morale: number;
+  eraLabel: string;
+  subwayBuilt: boolean;
+  harborUnlocked: boolean;
+  islandResortBuilt: boolean;
+  activeMandate: ActiveMayorMandate | null;
+}): RadioNewsItem {
+  const pool: Array<{ tag: RadioNewsItem['tag']; text: string }> = [
+    {
+      tag: 'ECONOMY',
+      text: `${params.townName} Treasury stands at ${params.treasuryGold}g with ${params.population} citizens thriving in the ${params.eraLabel}.`,
+    },
+    {
+      tag: 'CIVIC',
+      text: `Town Square Bulletin: Citizen Morale holds at ${params.morale}% as AI specialists coordinate new projects.`,
+    },
+  ];
+
+  if (params.subwayBuilt) {
+    pool.push({
+      tag: 'METRO',
+      text: `Underground Metro Report: Twin electric subway trains running on time beneath ${params.townName} — tap X-Ray to inspect!`,
+    });
+  }
+  if (params.harborUnlocked) {
+    pool.push({
+      tag: 'HARBOR',
+      text: `Coastal Harbor Watch: Grand Ocean Cruise Ship spotted docking past the striped lighthouse with +110 eager tourists!`,
+    });
+  }
+  if (params.islandResortBuilt) {
+    pool.push({
+      tag: 'HARBOR',
+      text: `Offshore Paradise Island Resort reports 100% cabana occupancy as visitors stroll across the harbor arch bridge.`,
+    });
+  }
+  if (params.activeMandate) {
+    pool.push({
+      tag: 'ELECTION',
+      text: `Council Desk: ${params.activeMandate.mayorName}'s ${params.activeMandate.platformTitle} has ${params.activeMandate.turnsLeft} turns remaining.`,
+    });
+  }
+
+  const pick = pool[params.turn % pool.length];
+  return createRadioHeadline(params.turn, pick.tag, pick.text);
+}
+
 
 
 

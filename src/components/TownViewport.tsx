@@ -9,6 +9,7 @@ import {
   Compass,
   Copy,
   Cross,
+  Crosshair,
   Crown,
   Eye,
   EyeOff,
@@ -16,12 +17,14 @@ import {
   Footprints,
   Hammer,
   HeartPulse,
+  Layers,
   Map as MapIcon,
   MapPin,
   MessageCircle,
   Moon,
   Pencil,
   Plane,
+  Radio,
   Shield,
   SlidersHorizontal,
   Swords,
@@ -29,6 +32,7 @@ import {
   TrainFront,
   Trash2,
   UserCheck,
+  Volume2,
   Wheat,
   X,
   Zap,
@@ -67,9 +71,12 @@ import {
   type HeatmapMode,
   type LampMood,
   type LocationId,
+  type MiniGameMode,
   type PlotId,
+  type RadioNewsItem,
   type StructureType,
   type TimeOfDay,
+  type TownEraId,
   type TownNeedsSummary,
   type TownStructure,
   type TownTheme,
@@ -119,6 +126,8 @@ interface TownViewportProps {
     | { type: 'signal_relay'; nonce: number }
     | { type: 'raider_camp'; nonce: number }
     | { type: 'enemy_city'; nonce: number }
+    | { type: 'harbor'; nonce: number }
+    | { type: 'underground'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null;
   signalRelayPulseNonce?: number;
@@ -205,6 +214,27 @@ interface TownViewportProps {
   onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
   onBusRadarUpdate?: (pos: { x: number; z: number; atStop: boolean } | null) => void;
   onUserOrbitStart?: () => void;
+  // Batch 5: Subway X-Ray, Coastal Harbor, Living Eras, Live Radio & 3D Mini-Games
+  subwayBuilt?: boolean;
+  undergroundXray?: boolean;
+  onToggleUndergroundXray?: () => void;
+  harborUnlocked?: boolean;
+  islandResortBuilt?: boolean;
+  islandDefenseBuilt?: boolean;
+  townEra?: TownEraId;
+  activeMiniGame?: MiniGameMode;
+  miniGameScore?: number;
+  miniGameTimeLeft?: number;
+  trainThrottle?: number;
+  onChangeTrainThrottle?: (mult: number) => void;
+  onTrainStationStopAttempt?: (inZone: boolean, distanceMeters: number) => void;
+  onTrainHorn?: () => void;
+  onMiniGameTargetHit?: (kind: 'crate' | 'drone', points: number) => void;
+  onExitMiniGame?: () => void;
+  radioTickerEnabled?: boolean;
+  radioHeadline?: RadioNewsItem | null;
+  onDismissRadioTicker?: () => void;
+  onBroadcastRadioNow?: () => void;
 }
 
 const ACTIVITY_ICON_MAP: Record<AgentActivityIcon, typeof Hammer> = {
@@ -346,6 +376,26 @@ export function TownViewport({
   onRaiderRadarUpdate,
   onBusRadarUpdate,
   onUserOrbitStart,
+  subwayBuilt = false,
+  undergroundXray = false,
+  onToggleUndergroundXray,
+  harborUnlocked = false,
+  islandResortBuilt = false,
+  islandDefenseBuilt = false,
+  townEra = 'village',
+  activeMiniGame = 'none',
+  miniGameScore = 0,
+  miniGameTimeLeft = 0,
+  trainThrottle = 1.0,
+  onChangeTrainThrottle,
+  onTrainStationStopAttempt,
+  onTrainHorn,
+  onMiniGameTargetHit,
+  onExitMiniGame,
+  radioTickerEnabled = false,
+  radioHeadline = null,
+  onDismissRadioTicker,
+  onBroadcastRadioNow,
 }: TownViewportProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<TownSceneController | null>(null);
@@ -360,6 +410,11 @@ export function TownViewport({
   const [renameDraft, setRenameDraft] = useState('');
   const [confirmDemolish, setConfirmDemolish] = useState(false);
   const [sprintActive, setSprintActive] = useState(false);
+  const [trainTelemetry, setTrainTelemetry] = useState({
+    distanceMeters: 42,
+    inStationZone: false,
+    speedKmh: 0,
+  });
 
   const latestTownDataRef = useRef({
     townId,
@@ -419,6 +474,7 @@ export function TownViewport({
     onRaiderImpact,
     onDefenseHitCamp,
     onEnemyAircraftDowned,
+    onMiniGameTargetHit,
   });
   callbacksRef.current = {
     onSelectAgent,
@@ -438,6 +494,7 @@ export function TownViewport({
     onRaiderImpact,
     onDefenseHitCamp,
     onEnemyAircraftDowned,
+    onMiniGameTargetHit,
   };
 
   useEffect(() => {
@@ -469,6 +526,7 @@ export function TownViewport({
         onRaiderImpact: (x, z, source) => callbacksRef.current.onRaiderImpact?.(x, z, source),
         onDefenseHitCamp: (dmg) => callbacksRef.current.onDefenseHitCamp?.(dmg),
         onEnemyAircraftDowned: (kind) => callbacksRef.current.onEnemyAircraftDowned?.(kind),
+        onMiniGameTargetHit: (kind, pts) => callbacksRef.current.onMiniGameTargetHit?.(kind, pts),
         onLabelUpdate: (positions: Record<AgentId, ProjectedLabel>) => {
           for (const [id, pos] of Object.entries(positions)) {
             const el = labelRefs.current[id];
@@ -804,10 +862,60 @@ export function TownViewport({
       controllerRef.current.focusRaiderCamp();
     } else if (focusRequest.type === 'enemy_city') {
       controllerRef.current.focusEnemyCity();
+    } else if (focusRequest.type === 'harbor') {
+      controllerRef.current.focusHarbor();
+    } else if (focusRequest.type === 'underground') {
+      controllerRef.current.focusUnderground();
     } else {
       controllerRef.current.resetCamera();
     }
   }, [focusRequest]);
+
+  // Batch 5 3D sync effects
+  useEffect(() => {
+    controllerRef.current?.setSubwayBuilt(subwayBuilt);
+  }, [subwayBuilt, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setUndergroundXray(undergroundXray);
+  }, [undergroundXray, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setHarborUnlocked(harborUnlocked);
+  }, [harborUnlocked, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setIslandResortBuilt(islandResortBuilt);
+  }, [islandResortBuilt, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setIslandDefenseBuilt(islandDefenseBuilt);
+  }, [islandDefenseBuilt, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setTownEra(townEra);
+  }, [townEra, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setMiniGameMode(activeMiniGame);
+  }, [activeMiniGame, currentTownKey]);
+
+  useEffect(() => {
+    if (activeMiniGame === 'train_driver') {
+      controllerRef.current?.setTrainManualThrottle(trainThrottle);
+    } else {
+      controllerRef.current?.setTrainManualThrottle(null);
+    }
+  }, [activeMiniGame, trainThrottle]);
+
+  useEffect(() => {
+    if (activeMiniGame !== 'train_driver') return;
+    const id = window.setInterval(() => {
+      const prox = controllerRef.current?.getTrainStationProximity();
+      if (prox) setTrainTelemetry(prox);
+    }, 200);
+    return () => window.clearInterval(id);
+  }, [activeMiniGame]);
 
   // Lightweight pointer-captured touch joystick for Free-Roam Walk Mode
   const updateJoystickFromEvent = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1592,6 +1700,194 @@ export function TownViewport({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Underground X-Ray Quick Exit Pill */}
+      {undergroundXray && !zenMode && activeMiniGame === 'none' && onToggleUndergroundXray && (
+        <div className="pointer-events-none fixed top-16 left-1/2 z-30 -translate-x-1/2">
+          <button
+            type="button"
+            onClick={onToggleUndergroundXray}
+            className="pointer-events-auto inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-cyan-400/50 bg-slate-950/92 px-3.5 text-xs font-semibold whitespace-nowrap text-cyan-100 shadow-xl hover:bg-slate-900"
+          >
+            <Layers className="h-3.5 w-3.5 text-cyan-300" />
+            <span>X-Ray Underground Active · Return to Surface</span>
+          </button>
+        </div>
+      )}
+
+      {/* Live Town Radio Broadcast Ticker (1-line compact, dismissible, hidden in Zen/Mini-Game) */}
+      {radioTickerEnabled && radioHeadline && !zenMode && activeMiniGame === 'none' && (
+        <div className="pointer-events-none fixed right-2 bottom-[74px] left-2 z-20 flex justify-center md:bottom-3 md:left-4 md:right-4">
+          <div className="pointer-events-auto flex max-w-2xl items-center gap-2 rounded-xl border border-white/15 bg-slate-950/92 px-2.5 py-1.5 text-[11px] text-slate-100 shadow-lg">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-amber-300">
+              <Radio className="h-3 w-3" />
+              {radioHeadline.tag}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-slate-200">{radioHeadline.text}</span>
+            {onBroadcastRadioNow && (
+              <button
+                type="button"
+                onClick={onBroadcastRadioNow}
+                title="Read headline aloud"
+                aria-label="Read headline aloud"
+                className="flex min-h-[30px] min-w-[30px] shrink-0 items-center justify-center rounded-lg text-slate-300 hover:bg-white/10 hover:text-amber-300"
+              >
+                <Volume2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {onDismissRadioTicker && (
+              <button
+                type="button"
+                onClick={onDismissRadioTicker}
+                title="Hide Radio Ticker"
+                aria-label="Hide Radio Ticker"
+                className="flex min-h-[30px] min-w-[30px] shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Interactive 3D Mini-Game Mobile-First Floating Play HUD */}
+      {activeMiniGame !== 'none' && (
+        <div className="pointer-events-none fixed right-2 bottom-4 left-2 z-40 flex justify-center">
+          <div className="pointer-events-auto w-full max-w-md space-y-2 rounded-2xl border border-amber-400/45 bg-slate-950/95 p-3 text-xs text-slate-100 shadow-2xl">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-amber-300">
+                  {activeMiniGame === 'train_driver'
+                    ? 'Express Train Driver'
+                    : activeMiniGame === 'turret_defense'
+                      ? 'Turret Air Defense'
+                      : 'Drone Sky Treasure Hunt'}
+                </div>
+                <div className="text-[11px] text-slate-300 tabular-nums">
+                  Score: <strong className="text-white">{miniGameScore}</strong> · Time:{' '}
+                  <strong className="text-cyan-300">{miniGameTimeLeft}s</strong>
+                  {activeMiniGame === 'train_driver' && (
+                    <>
+                      {' '}
+                      · {trainTelemetry.speedKmh} km/h · Station:{' '}
+                      <strong
+                        className={
+                          trainTelemetry.inStationZone ? 'text-emerald-300' : 'text-amber-200'
+                        }
+                      >
+                        {trainTelemetry.distanceMeters}m
+                      </strong>
+                    </>
+                  )}
+                </div>
+              </div>
+              {onExitMiniGame && (
+                <button
+                  type="button"
+                  onClick={onExitMiniGame}
+                  className="inline-flex min-h-[44px] shrink-0 items-center gap-1 rounded-xl border border-white/15 bg-slate-900 px-3 text-xs font-semibold text-slate-200 hover:bg-slate-800"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  <span>Finish</span>
+                </button>
+              )}
+            </div>
+
+            {activeMiniGame === 'train_driver' && (
+              <div className="grid grid-cols-4 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChangeTrainThrottle?.(0);
+                    onTrainStationStopAttempt?.(
+                      trainTelemetry.inStationZone,
+                      trainTelemetry.distanceMeters,
+                    );
+                  }}
+                  className={`min-h-[44px] rounded-xl font-semibold ${
+                    trainTelemetry.inStationZone
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'border border-rose-400/40 bg-rose-500/20 text-rose-100'
+                  }`}
+                >
+                  {trainTelemetry.inStationZone ? 'STOP!' : 'Brake'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeTrainThrottle?.(1.0)}
+                  className={`min-h-[44px] rounded-xl font-semibold ${
+                    trainThrottle > 0.2 && trainThrottle < 1.5
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'border border-white/15 bg-slate-900 text-slate-200'
+                  }`}
+                >
+                  Cruise
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeTrainThrottle?.(2.1)}
+                  className={`min-h-[44px] rounded-xl font-semibold ${
+                    trainThrottle >= 1.5
+                      ? 'bg-cyan-500 text-slate-950'
+                      : 'border border-white/15 bg-slate-900 text-slate-200'
+                  }`}
+                >
+                  Turbo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onTrainHorn?.()}
+                  className="min-h-[44px] rounded-xl border border-amber-400/35 bg-amber-500/15 font-semibold text-amber-200 hover:bg-amber-500/25"
+                >
+                  Horn
+                </button>
+              </div>
+            )}
+
+            {activeMiniGame === 'turret_defense' && (
+              <div className="flex items-center gap-2">
+                <span className="flex-1 text-[11px] text-slate-300">
+                  Tap glowing red drones in 3D or fire auto-lock volley!
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = controllerRef.current?.triggerFireDefenseVolley();
+                    if (res && res.points > 0) {
+                      onMiniGameTargetHit?.('drone', res.points);
+                    }
+                  }}
+                  className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-xl bg-rose-500 px-4 font-semibold whitespace-nowrap text-white hover:bg-rose-400"
+                >
+                  <Crosshair className="h-4 w-4" />
+                  <span>Fire Volley</span>
+                </button>
+              </div>
+            )}
+
+            {activeMiniGame === 'drone_hunt' && (
+              <div className="flex items-center gap-2">
+                <span className="flex-1 text-[11px] text-slate-300">
+                  Tap glowing golden sky crates in 3D or auto-scan!
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = controllerRef.current?.triggerCollectNearestCrate();
+                    if (res && res.collected) {
+                      onMiniGameTargetHit?.('crate', res.points);
+                    }
+                  }}
+                  className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-xl bg-amber-500 px-4 font-semibold whitespace-nowrap text-slate-950 hover:bg-amber-400"
+                >
+                  <Target className="h-4 w-4" />
+                  <span>Scan & Collect</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

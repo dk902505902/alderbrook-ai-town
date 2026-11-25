@@ -174,8 +174,80 @@ class TownSoundscape {
     this.playTone(783.99, 0.42, 'sine', 0.09, 0.16);
   }
 
+  public playTrainHorn(): void {
+    const prev = this.enabled;
+    if (!prev) this.enabled = true;
+    // Classic warm steam/express dual-tone chord (D4 + F#4 + A4)
+    this.playTone(293.66, 0.48, 'sawtooth', 0.055, 0);
+    this.playTone(369.99, 0.46, 'triangle', 0.06, 0.01);
+    this.playTone(440.0, 0.44, 'triangle', 0.045, 0.02);
+    this.playTone(293.66, 0.34, 'sawtooth', 0.045, 0.56);
+    this.playTone(369.99, 0.32, 'triangle', 0.05, 0.57);
+    if (!prev) this.enabled = false;
+  }
+
+  public playLaserZap(): void {
+    const prev = this.enabled;
+    if (!prev) this.enabled = true;
+    const ctx = this.ensureContext();
+    if (ctx) {
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(920, now);
+      osc.frequency.exponentialRampToValueAtTime(190, now + 0.16);
+      const scaled = Math.max(0.0002, 0.08 * this.masterVolume);
+      gain.gain.setValueAtTime(scaled, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.17);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.18);
+    }
+    if (!prev) this.enabled = false;
+  }
+
+  public playCratePickup(): void {
+    const prev = this.enabled;
+    if (!prev) this.enabled = true;
+    this.playTone(587.33, 0.14, 'triangle', 0.09, 0);
+    this.playTone(880.0, 0.22, 'sine', 0.09, 0.07);
+    this.playTone(1174.66, 0.26, 'sine', 0.08, 0.14);
+    if (!prev) this.enabled = false;
+  }
+
+  public playElectionFanfare(): void {
+    if (!this.enabled) return;
+    this.playTone(392.0, 0.18, 'triangle', 0.08, 0);
+    this.playTone(493.88, 0.18, 'triangle', 0.08, 0.11);
+    this.playTone(587.33, 0.22, 'triangle', 0.09, 0.22);
+    this.playTone(783.99, 0.45, 'sine', 0.1, 0.34);
+  }
+
+  public speakRadioHeadline(text: string, voiceEnabled: boolean): void {
+    if (!voiceEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1.04;
+      utter.pitch = 1.02;
+      utter.volume = Math.max(0.15, Math.min(1, this.masterVolume));
+      window.speechSynthesis.speak(utter);
+    } catch {
+      // Ignore browser speech synthesis restrictions
+    }
+  }
+
   public dispose(): void {
     this.stopAmbient();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignore
+      }
+    }
     if (this.ctx) {
       void this.ctx.close();
       this.ctx = null;

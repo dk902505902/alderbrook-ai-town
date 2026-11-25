@@ -27,6 +27,8 @@ export interface TownRailwayHandle {
   setInterTownRailBuilt: (enabled: boolean, targetTownName?: string) => void;
   setTrainFleet: (blueprints: TrainBlueprint[]) => void;
   setCameraTrainIndex: (index: number) => void;
+  setManualDriveThrottle: (mult: number | null) => void;
+  getStationProximity: () => { distanceMeters: number; inStationZone: boolean; speedKmh: number };
   update: (delta: number, elapsed: number) => void;
   applyTheme: (theme: TownTheme) => void;
   setGraphicsQuality: (quality: GraphicsQuality) => void;
@@ -1409,6 +1411,10 @@ export function buildTownRailway(
   let interTownCycle = 0;
   let triggerToggle = false;
   let lastStoppedAt: 'alderbrook' | 'frontier' | null = null;
+  let manualDriveThrottle: number | null = null;
+  let manualHeadU = (STATION_U + 0.52) % 1;
+  let lastHeadU = STATION_U;
+  let lastLinearSpeed = 0;
 
   const placeCarOnCurve = (
     curve: THREE.CatmullRomCurve3,
@@ -1546,6 +1552,22 @@ export function buildTownRailway(
     setCameraTrainIndex: (index: number) => {
       activeCameraTrainIdx = Math.max(0, Math.min(2, Math.floor(index)));
     },
+    setManualDriveThrottle: (mult: number | null) => {
+      if (mult !== null && manualDriveThrottle === null) {
+        // Start slightly upstream from Alderbrook Station so player immediately sees the track ahead
+        manualHeadU = (STATION_U + 0.62) % 1;
+      }
+      manualDriveThrottle = mult;
+    },
+    getStationProximity: () => {
+      const targetStationU = railSpurEnabled ? extMainStationU : STATION_U;
+      const rawDiff = ((targetStationU - lastHeadU) % 1 + 1) % 1;
+      const distFrac = Math.min(rawDiff, 1 - rawDiff);
+      const distanceMeters = Math.round(distFrac * trackLength);
+      const inStationZone = distanceMeters <= 12;
+      const speedKmh = Math.round(lastLinearSpeed * 18);
+      return { distanceMeters, inStationZone, speedKmh };
+    },
     setGraphicsQuality: (quality: GraphicsQuality) => {
       activeQuality = quality;
       const enableShadows = quality === 'high';
@@ -1578,7 +1600,16 @@ export function buildTownRailway(
       const leadSpeedMult = Math.max(0.6, Math.min(2.2, fleet[0]?.blueprint.speed ?? 1.0));
       const effectiveDelta = delta * leadSpeedMult;
 
-      if (railSpurEnabled) {
+      if (manualDriveThrottle !== null) {
+        // Manual Train Driver Mini-Game control on inner loop
+        activeCurve = trackCurve;
+        activeLen = trackLength;
+        const speedU = Math.max(0, manualDriveThrottle) * 0.042;
+        manualHeadU = (manualHeadU + delta * speedU) % 1;
+        headU = manualHeadU;
+        linearSpeed = speedU * trackLength;
+        isStoppedAtMain = manualDriveThrottle <= 0.01 && Math.abs(((STATION_U - headU + 1.5) % 1) - 0.5) < 0.09;
+      } else if (railSpurEnabled) {
         // Drive the lead train continuously on the connected outer railway loop!
         activeCurve = extendedLoopCurve;
         activeLen = extendedTrackLength;
@@ -1616,6 +1647,8 @@ export function buildTownRailway(
         mainStopElapsed = sched.stopElapsed;
       }
 
+      lastHeadU = headU;
+      lastLinearSpeed = linearSpeed;
       const isStoppedAny = isStoppedAtMain || isStoppedAtFrontier;
       lastStoppedAt = isStoppedAtMain ? 'alderbrook' : isStoppedAtFrontier ? 'frontier' : null;
 

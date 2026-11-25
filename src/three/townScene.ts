@@ -27,8 +27,10 @@ import {
   type HeatmapMode,
   type LampMood,
   type LocationId,
+  type MiniGameMode,
   type PlotId,
   type TimeOfDay,
+  type TownEraId,
   type TownNeedsSummary,
   type TownStructure,
   type TownTheme,
@@ -64,6 +66,10 @@ import {
   buildTownInfrastructureSystem,
   type TownInfrastructureHandle,
 } from './townInfrastructure.ts';
+import {
+  buildTownExpansionSystems,
+  type TownExpansionSystemsHandle,
+} from './townExpansionSystems.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import { buildTownVehiclesSystem, type TownVehiclesHandle } from './townVehicles.ts';
 import {
@@ -112,6 +118,7 @@ export interface TownSceneCallbacks {
   onRaiderImpact?: (x: number, z: number, source: 'ground' | 'helicopter' | 'jet') => void;
   onDefenseHitCamp?: (damage: number) => void;
   onEnemyAircraftDowned?: (kind: 'helicopter' | 'jet') => void;
+  onMiniGameTargetHit?: (kind: 'crate' | 'drone', points: number) => void;
 }
 
 interface LandmarkConfig {
@@ -1675,6 +1682,9 @@ export class TownSceneController {
   private crowdHandle: TownCrowdHandle | null = null;
   private vehiclesHandle: TownVehiclesHandle | null = null;
   private infraHandle: TownInfrastructureHandle | null = null;
+  private expansionSystemsHandle: TownExpansionSystemsHandle | null = null;
+  private undergroundXrayActive = false;
+  private harborUnlockedFlag = false;
   private smoothedFps = 60;
   private lifeHandle: TownLifeHandle | null = null;
   private heatmapGroup: THREE.Group | null = null;
@@ -1915,6 +1925,8 @@ export class TownSceneController {
     this.disposables.push(this.vehiclesHandle);
     this.infraHandle = buildTownInfrastructureSystem(this.scene);
     this.disposables.push(this.infraHandle);
+    this.expansionSystemsHandle = buildTownExpansionSystems(this.scene);
+    this.disposables.push(this.expansionSystemsHandle);
     this.buildHeatmapOverlay();
     this.lifeHandle = buildTownLifeAndDecor(this.sharedShadowTex);
     this.scene.add(this.lifeHandle.group);
@@ -2448,6 +2460,7 @@ export class TownSceneController {
     this.crowdHandle?.setGraphicsQuality(quality);
     this.vehiclesHandle?.setGraphicsQuality(quality);
     this.infraHandle?.setGraphicsQuality(quality);
+    this.expansionSystemsHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.raiderHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
@@ -2810,6 +2823,106 @@ export class TownSceneController {
 
   public setWonderCount(count: number): void {
     this.infraHandle?.setWonderCount(count);
+  }
+
+  public setSubwayBuilt(built: boolean): void {
+    this.expansionSystemsHandle?.setSubwayBuilt(built);
+  }
+
+  public setUndergroundXray(enabled: boolean): void {
+    this.undergroundXrayActive = enabled;
+    this.expansionSystemsHandle?.setUndergroundXray(enabled);
+    const applySurfaceAlpha = (mat: THREE.MeshStandardMaterial | undefined, alpha: number) => {
+      if (!mat) return;
+      mat.transparent = enabled;
+      mat.opacity = enabled ? alpha : 1.0;
+      mat.depthWrite = !enabled;
+      mat.needsUpdate = true;
+    };
+    applySurfaceAlpha(this.groundMat, 0.26);
+    applySurfaceAlpha(this.plazaMat, 0.34);
+    applySurfaceAlpha(this.pathMat, 0.34);
+    this.controls.maxPolarAngle = enabled ? Math.PI / 1.98 : Math.PI / 2.25;
+  }
+
+  public setHarborUnlocked(unlocked: boolean): void {
+    this.harborUnlockedFlag = unlocked;
+    this.expansionSystemsHandle?.setHarborUnlocked(unlocked);
+    if (unlocked && this.maxPanRadius < 56) {
+      this.maxPanRadius = 56;
+    }
+  }
+
+  public setIslandResortBuilt(built: boolean): void {
+    this.expansionSystemsHandle?.setIslandResortBuilt(built);
+  }
+
+  public setIslandDefenseBuilt(built: boolean): void {
+    this.expansionSystemsHandle?.setIslandDefenseBuilt(built);
+  }
+
+  public setTownEra(era: TownEraId): void {
+    this.expansionSystemsHandle?.setTownEra(era);
+  }
+
+  public setMiniGameMode(mode: MiniGameMode): void {
+    this.expansionSystemsHandle?.setMiniGameMode(mode);
+    if (mode !== 'train_driver') {
+      this.railwayHandle?.setManualDriveThrottle(null);
+    }
+  }
+
+  public setTrainManualThrottle(mult: number | null): void {
+    this.railwayHandle?.setManualDriveThrottle(mult);
+  }
+
+  public getTrainStationProximity(): { distanceMeters: number; inStationZone: boolean; speedKmh: number } {
+    return (
+      this.railwayHandle?.getStationProximity() ?? {
+        distanceMeters: 45,
+        inStationZone: false,
+        speedKmh: 0,
+      }
+    );
+  }
+
+  public triggerFireDefenseVolley(): { hitCount: number; points: number } {
+    return this.expansionSystemsHandle?.triggerFireDefenseVolley() ?? { hitCount: 0, points: 0 };
+  }
+
+  public triggerCollectNearestCrate(): { collected: boolean; points: number; remaining: number } {
+    return (
+      this.expansionSystemsHandle?.triggerCollectNearestCrate() ?? {
+        collected: false,
+        points: 0,
+        remaining: 0,
+      }
+    );
+  }
+
+  public focusHarbor(): void {
+    if (!this.expansionSystemsHandle) return;
+    if (this.cameraMode !== 'orbit') {
+      this.setCameraMode('orbit');
+    }
+    this.povReturnActive = false;
+    this.followActive = false;
+    this.focusedCutawayId = null;
+    this.maxPanRadius = Math.max(this.maxPanRadius, 56);
+    this.cameraTargetGoal = this.expansionSystemsHandle.harborFocusTarget.clone();
+    this.cameraPosGoal = this.expansionSystemsHandle.harborCameraPos.clone();
+  }
+
+  public focusUnderground(): void {
+    if (!this.expansionSystemsHandle) return;
+    if (this.cameraMode !== 'orbit') {
+      this.setCameraMode('orbit');
+    }
+    this.povReturnActive = false;
+    this.followActive = false;
+    this.focusedCutawayId = null;
+    this.cameraTargetGoal = this.expansionSystemsHandle.undergroundFocusTarget.clone();
+    this.cameraPosGoal = this.expansionSystemsHandle.undergroundCameraPos.clone();
   }
 
   public setAutoTurntable(enabled: boolean): void {
@@ -3810,6 +3923,27 @@ export class TownSceneController {
       this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       this.raycaster.setFromCamera(this.pointer, this.camera);
 
+      // Interactive 3D Mini-Game Target Raycasting (Sky Treasure Crates & Raider Drones)
+      const miniTargets = this.expansionSystemsHandle?.getInteractiveTargets() ?? [];
+      if (miniTargets.length > 0 && this.expansionSystemsHandle) {
+        const miniHits = this.raycaster.intersectObjects(miniTargets, true);
+        const visMiniHit = miniHits.find((h) => {
+          let c: THREE.Object3D | null = h.object;
+          while (c) {
+            if (!c.visible) return false;
+            c = c.parent;
+          }
+          return true;
+        });
+        if (visMiniHit) {
+          const res = this.expansionSystemsHandle.tryHitTargetObject(visMiniHit.object);
+          if (res) {
+            this.callbacks.onMiniGameTargetHit?.(res.kind, res.points);
+            return;
+          }
+        }
+      }
+
       const hits = this.raycaster.intersectObjects(this.clickableObjects, true);
       const visibleHit = hits.find((hit) => {
         let cur: THREE.Object3D | null = hit.object;
@@ -4611,6 +4745,15 @@ export class TownSceneController {
       if (this.infraHandle) {
         this.infraHandle.update(delta, elapsed);
       }
+      if (this.expansionSystemsHandle) {
+        this.expansionSystemsHandle.update(
+          delta,
+          elapsed,
+          this.timeOfDay === 'night' || this.townTheme === 'fantasy_night',
+        );
+      }
+      void this.undergroundXrayActive;
+      void this.harborUnlockedFlag;
       if (delta > 0.002 && delta < 0.5) {
         this.smoothedFps = THREE.MathUtils.lerp(this.smoothedFps, Math.min(60, 1 / delta), 0.1);
       }

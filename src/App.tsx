@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Anchor,
   Award,
   BatteryCharging,
   Building2,
@@ -17,8 +18,10 @@ import {
   FastForward,
   Flame,
   Footprints,
+  Gamepad2,
   Gauge,
   HelpCircle,
+  Layers,
   LogOut,
   Map as MapIcon,
   MessageSquareText,
@@ -113,15 +116,18 @@ import {
   compileTownGazette,
   computeCreditRating,
   computeEcoScore,
+  computeMandateBonus,
   computeResourceRates,
   computeTourismSummary,
   computeTownEconomy,
+  computeTownEra,
   computeTownNeedsMetrics,
   computeTownRank,
   computeTownTrophies,
   computeTradeTrainPayout,
   computeUtilityGrid,
   computeWeatherForecast,
+  createRadioHeadline,
   decodeBlueprintShareCode,
   DECOR_PACKS,
   DISTRICT_ZONE_META,
@@ -131,9 +137,16 @@ import {
   formatAgentBondsForPrompt,
   formatTownReportCard,
   generateCitizenSentiments,
+  generateContextualRadioHeadline,
   generateCouncilDebate,
   generateCouncilProposals,
+  generateTownElection,
   getDemolishSalvageGold,
+  HARBOR_CRUISE_REVENUE_PER_TURN,
+  HARBOR_UNLOCK_COST_GOLD,
+  ISLAND_DEFENSE_COST_GOLD,
+  ISLAND_RESORT_COST_GOLD,
+  ISLAND_RESORT_REVENUE_PER_TURN,
   MEGAPROJECT_CATALOG,
   parseTownImport,
   pickEmergencyEvent,
@@ -141,6 +154,10 @@ import {
   recordSocialInteraction,
   serializeTownExport,
   stepMarketPrices,
+  SUBWAY_BUILD_COST_CRYSTAL,
+  SUBWAY_BUILD_COST_GOLD,
+  SUBWAY_REVENUE_PER_TURN,
+  tallyCitizenElectionVote,
   TECH_UPGRADES,
   TOWN_POLICIES,
   TRADE_PACT_CATALOG,
@@ -223,8 +240,10 @@ import {
   type HiredWorkerSpec,
   type LocationId,
   type MilestoneId,
+  type MiniGameMode,
   type PlotId,
   type PolicyId,
+  type RadioNewsItem,
   type RemoteBridgeConfig,
   type RemoteCommandRecord,
   type RemoteCommandType,
@@ -234,6 +253,7 @@ import {
   type TimeOfDay,
   type TownAdvancedState,
   type TownCheckpointSlot,
+  type TownEraId,
   type TownEvent,
   type TownEventOption,
   type TownHistoryPoint,
@@ -729,9 +749,22 @@ export default function App() {
     | { type: 'signal_relay'; nonce: number }
     | { type: 'raider_camp'; nonce: number }
     | { type: 'enemy_city'; nonce: number }
+    | { type: 'harbor'; nonce: number }
+    | { type: 'underground'; nonce: number }
     | { type: 'reset'; nonce: number }
     | null
   >(null);
+
+  // Batch 5: Underground X-Ray & Interactive 3D Mini-Games
+  const [undergroundXray, setUndergroundXray] = useState(false);
+  const [activeMiniGame, setActiveMiniGame] = useState<MiniGameMode>('none');
+  const [miniGameScore, setMiniGameScore] = useState(0);
+  const [miniGameTimeLeft, setMiniGameTimeLeft] = useState(0);
+  const [trainThrottle, setTrainThrottle] = useState(1.0);
+  const miniGameScoreRef = useRef(0);
+  miniGameScoreRef.current = miniGameScore;
+  const activeMiniGameRef = useRef<MiniGameMode>('none');
+  activeMiniGameRef.current = activeMiniGame;
 
   // Desktop sidebar collapse states
   const [leftOpen, setLeftOpen] = useState(true);
@@ -1577,7 +1610,24 @@ export default function App() {
         }
       }
       const turnMedalGold = snap.advanced.awardedMedalAgentIds.length * 12;
-      const turnExtraGold = turnWonderGold + turnPactGold + turnEco.dividendGold + turnMedalGold;
+      const turnMandateBonus = computeMandateBonus(snap.advanced.activeMandate);
+      const turnEraNow = computeTownEra({
+        structures: nextStructures,
+        unlockedTechs: snap.advanced.unlockedTechs,
+        completedWonders: turnCompletedWonders,
+        subwayBuilt: snap.advanced.subwayBuilt,
+        harborUnlocked: snap.advanced.harborUnlocked,
+        railSpurBuilt: snap.railSpurBuilt,
+        eraOverride: snap.advanced.eraOverride,
+      });
+      const turnBatch5Gold =
+        (snap.advanced.subwayBuilt ? SUBWAY_REVENUE_PER_TURN : 0) +
+        (snap.advanced.harborUnlocked ? HARBOR_CRUISE_REVENUE_PER_TURN : 0) +
+        (snap.advanced.islandResortBuilt ? ISLAND_RESORT_REVENUE_PER_TURN : 0) +
+        turnEraNow.goldBonusPerTurn +
+        turnMandateBonus.goldBonusPerTurn;
+      const turnExtraGold =
+        turnWonderGold + turnPactGold + turnEco.dividendGold + turnMedalGold + turnBatch5Gold;
 
       const turnEcon = computeTownEconomy(
         nextStructures,
@@ -1605,6 +1655,9 @@ export default function App() {
       }
       if (turnTaxHolidayActive) {
         nextMetrics.morale = Math.min(100, nextMetrics.morale + 6);
+      }
+      if (turnMandateBonus.moraleBonusPerTurn > 0) {
+        nextMetrics.morale = Math.min(100, nextMetrics.morale + turnMandateBonus.moraleBonusPerTurn);
       }
       if (snap.advanced.activeFestival) {
         nextMetrics.morale = Math.min(
@@ -1742,6 +1795,51 @@ export default function App() {
           }
         }
       }
+      const nextActiveMandate = snap.advanced.activeMandate
+        ? snap.advanced.activeMandate.turnsLeft <= 1
+          ? null
+          : {
+              ...snap.advanced.activeMandate,
+              turnsLeft: snap.advanced.activeMandate.turnsLeft - 1,
+            }
+        : null;
+      let nextActiveElection = snap.advanced.activeElection;
+      let nextRadioHeadlines = snap.advanced.radioHeadlines;
+      if (
+        nextTurnNumber >= 15 &&
+        nextTurnNumber - snap.advanced.lastElectionTurn >= 15 &&
+        (!nextActiveElection || nextActiveElection.status === 'concluded')
+      ) {
+        nextActiveElection = generateTownElection(nextAgentsList, nextTurnNumber);
+        const electHeadline = createRadioHeadline(
+          nextTurnNumber,
+          'ELECTION',
+          `Polls Open in ${snap.townName}! ${nextActiveElection.candidates.map((c) => c.name).join(', ')} are campaigning in Town Studio -> Council.`,
+        );
+        nextRadioHeadlines = [electHeadline, ...nextRadioHeadlines].slice(0, 14);
+        if (snap.advanced.radioVoiceEnabled) {
+          soundscape.speakRadioHeadline(electHeadline.text, true);
+        }
+      } else if (nextTurnNumber % 3 === 0) {
+        const housingCount = computeTownHousingCapacity(nextStructures).dummyPopulation;
+        const freshNews = generateContextualRadioHeadline({
+          townName: snap.townName,
+          turn: nextTurnNumber,
+          population: nextAgentsList.length + housingCount,
+          treasuryGold: nextTreasury,
+          morale: nextMetrics.morale,
+          eraLabel: turnEraNow.label,
+          subwayBuilt: snap.advanced.subwayBuilt,
+          harborUnlocked: snap.advanced.harborUnlocked,
+          islandResortBuilt: snap.advanced.islandResortBuilt,
+          activeMandate: nextActiveMandate,
+        });
+        nextRadioHeadlines = [freshNews, ...nextRadioHeadlines].slice(0, 14);
+        if (snap.advanced.radioVoiceEnabled) {
+          soundscape.speakRadioHeadline(freshNews.text, true);
+        }
+      }
+
       setAdvanced((prev) => ({
         ...prev,
         marketPrices: nextMarketPrices,
@@ -1750,6 +1848,9 @@ export default function App() {
         activeFestival: nextActiveFestival,
         savingsVaultGold: nextVaultGold,
         taxHolidayTurnsLeft: nextTaxHolidayTurns,
+        activeMandate: nextActiveMandate,
+        activeElection: nextActiveElection,
+        radioHeadlines: nextRadioHeadlines,
       }));
       const nextHistory = appendHistoryPoint(snap.history, {
         turn: nextTurnNumber,
@@ -2064,8 +2165,42 @@ export default function App() {
     ],
   );
 
+  const mandateBonus = useMemo(
+    () => computeMandateBonus(advanced.activeMandate),
+    [advanced.activeMandate],
+  );
+
+  const townEraSummary = useMemo(
+    () =>
+      computeTownEra({
+        structures,
+        unlockedTechs: advanced.unlockedTechs,
+        completedWonders,
+        subwayBuilt: advanced.subwayBuilt,
+        harborUnlocked: advanced.harborUnlocked,
+        railSpurBuilt,
+        eraOverride: advanced.eraOverride,
+      }),
+    [
+      structures,
+      advanced.unlockedTechs,
+      completedWonders,
+      advanced.subwayBuilt,
+      advanced.harborUnlocked,
+      railSpurBuilt,
+      advanced.eraOverride,
+    ],
+  );
+
   const extraEconomyGold = useMemo(() => {
-    let total = ecoScore.dividendGold + advanced.awardedMedalAgentIds.length * 12;
+    let total =
+      ecoScore.dividendGold +
+      advanced.awardedMedalAgentIds.length * 12 +
+      (advanced.subwayBuilt ? SUBWAY_REVENUE_PER_TURN : 0) +
+      (advanced.harborUnlocked ? HARBOR_CRUISE_REVENUE_PER_TURN : 0) +
+      (advanced.islandResortBuilt ? ISLAND_RESORT_REVENUE_PER_TURN : 0) +
+      townEraSummary.goldBonusPerTurn +
+      mandateBonus.goldBonusPerTurn;
     for (const mp of MEGAPROJECT_CATALOG) {
       if ((advanced.megaprojectProgress[mp.id] ?? 0) >= 100) {
         total += mp.goldBonusPerTurn;
@@ -2079,6 +2214,11 @@ export default function App() {
   }, [
     ecoScore.dividendGold,
     advanced.awardedMedalAgentIds.length,
+    advanced.subwayBuilt,
+    advanced.harborUnlocked,
+    advanced.islandResortBuilt,
+    townEraSummary.goldBonusPerTurn,
+    mandateBonus.goldBonusPerTurn,
     advanced.megaprojectProgress,
     advanced.activeTradePacts,
   ]);
@@ -6696,6 +6836,7 @@ export default function App() {
     let hist = snap.history;
     let morale = snap.metrics.morale;
 
+    let mandateState = snap.advanced.activeMandate;
     for (let i = 1; i <= turns; i += 1) {
       const tNum = snap.turnCount + i;
       const effTax = taxHol > 0 ? 0 : snap.taxRate;
@@ -6721,6 +6862,12 @@ export default function App() {
       if (vaultGold > 0) vaultGold = Math.round(vaultGold * 1.04);
       morale = Math.max(0, Math.min(100, morale + econ.taxMoraleEffect + (taxHol > 0 ? 4 : 0)));
       if (taxHol > 0) taxHol -= 1;
+      if (mandateState) {
+        mandateState =
+          mandateState.turnsLeft <= 1
+            ? null
+            : { ...mandateState, turnsLeft: mandateState.turnsLeft - 1 };
+      }
       const rates = computeResourceRates(snap.structures, snap.unlockedBiomes, snap.activePolicies);
       res = {
         timber: res.timber + rates.timber,
@@ -6756,6 +6903,7 @@ export default function App() {
       activeLoan: loan,
       savingsVaultGold: vaultGold,
       taxHolidayTurnsLeft: taxHol,
+      activeMandate: mandateState,
     }));
     soundscape.playBuildCompleteChime();
   }, [extraEconomyGold, tourism.revenuePerTurn]);
@@ -7601,8 +7749,377 @@ export default function App() {
     return 'Downloaded full town backup .JSON file!';
   }, [handleExportTownJson, triggerHaptic]);
 
+  // ============================================================================
+  // Batch 5 Handlers: Subway X-Ray, Coastal Harbor, Elections, Radio, Mini-Games
+  // ============================================================================
+
+  const pushRadioHeadline = useCallback(
+    (tag: RadioNewsItem['tag'], text: string, forceSpeak = false) => {
+      const item = createRadioHeadline(stateRef.current.turnCount, tag, text);
+      setAdvanced((prev) => ({
+        ...prev,
+        radioHeadlines: [item, ...prev.radioHeadlines].slice(0, 14),
+      }));
+      if (forceSpeak || stateRef.current.advanced.radioVoiceEnabled) {
+        soundscape.speakRadioHeadline(text, true);
+      }
+    },
+    [],
+  );
+
+  const handleBuildSubway = useCallback((): string => {
+    const snap = stateRef.current;
+    if (snap.advanced.subwayBuilt) return 'Underground Subway Metro is already open!';
+    if (snap.treasuryGold < SUBWAY_BUILD_COST_GOLD) {
+      return `Need ${SUBWAY_BUILD_COST_GOLD}g to excavate Subway Metro (have ${snap.treasuryGold}g).`;
+    }
+    if (snap.resources.crystal < SUBWAY_BUILD_COST_CRYSTAL) {
+      return `Need ${SUBWAY_BUILD_COST_CRYSTAL} Crystal for Metro power rails (have ${snap.resources.crystal}).`;
+    }
+    setTreasuryGold((g) => Math.max(0, g - SUBWAY_BUILD_COST_GOLD));
+    setResources((r) => ({ ...r, crystal: Math.max(0, r.crystal - SUBWAY_BUILD_COST_CRYSTAL) }));
+    setAdvanced((prev) => ({ ...prev, subwayBuilt: true }));
+    setUndergroundXray(true);
+    setStudioDrawerOpen(false);
+    setCameraMode('orbit');
+    setFocusRequest({ type: 'underground', nonce: Date.now() });
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    soundscape.playTrainHorn();
+    triggerHaptic(22);
+    pushRadioHeadline(
+      'METRO',
+      `GRAND OPENING! ${snap.townName} Underground Subway Metro is live with twin electric trains (+${SUBWAY_REVENUE_PER_TURN}g/turn)!`,
+    );
+    flashQuickToast('Subway Metro opened! X-Ray view activated.');
+    return `Opened Underground Subway Metro (+${SUBWAY_REVENUE_PER_TURN}g/turn)!`;
+  }, [flashQuickToast, pushRadioHeadline, triggerHaptic]);
+
+  const handleToggleUndergroundXray = useCallback(() => {
+    triggerHaptic(12);
+    setUndergroundXray((prev) => {
+      const next = !prev;
+      flashQuickToast(next ? 'Underground X-Ray ON: streets transparent!' : 'Returned to surface view.');
+      return next;
+    });
+  }, [flashQuickToast, triggerHaptic]);
+
+  const handleFocusUnderground = useCallback(() => {
+    triggerHaptic(12);
+    setUndergroundXray(true);
+    setCameraMode('orbit');
+    setPovVillagerId(null);
+    setStudioDrawerOpen(false);
+    setMobileQuickOpen(false);
+    setFocusRequest({ type: 'underground', nonce: Date.now() });
+    flashQuickToast('Inspecting Underground Subway & Utility Mains');
+  }, [flashQuickToast, triggerHaptic]);
+
+  const handleUnlockHarbor = useCallback((): string => {
+    const snap = stateRef.current;
+    if (snap.advanced.harborUnlocked) return 'Coastal Harbor & Cruise Port is already open!';
+    if (snap.treasuryGold < HARBOR_UNLOCK_COST_GOLD) {
+      return `Need ${HARBOR_UNLOCK_COST_GOLD}g to build Coastal Harbor (have ${snap.treasuryGold}g).`;
+    }
+    setTreasuryGold((g) => Math.max(0, g - HARBOR_UNLOCK_COST_GOLD));
+    setAdvanced((prev) => ({ ...prev, harborUnlocked: true }));
+    setStudioDrawerOpen(false);
+    setCameraMode('orbit');
+    setFocusRequest({ type: 'harbor', nonce: Date.now() });
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    soundscape.playTrainHorn();
+    triggerHaptic(22);
+    pushRadioHeadline(
+      'HARBOR',
+      `AHOY! ${snap.townName} Coastal Harbor & Striped Lighthouse opened! Grand Cruise Ship now docking (+${HARBOR_CRUISE_REVENUE_PER_TURN}g/turn)!`,
+    );
+    flashQuickToast('Coastal Harbor unlocked! Flying to SE Bay.');
+    return `Unlocked Coastal Harbor, Lighthouse & Grand Cruise Ship (+${HARBOR_CRUISE_REVENUE_PER_TURN}g/turn)!`;
+  }, [flashQuickToast, pushRadioHeadline, triggerHaptic]);
+
+  const handleBuildIslandResort = useCallback((): string => {
+    const snap = stateRef.current;
+    if (!snap.advanced.harborUnlocked) return 'Unlock Coastal Harbor first!';
+    if (snap.advanced.islandResortBuilt) return 'Offshore Paradise Island Resort is already built!';
+    if (snap.treasuryGold < ISLAND_RESORT_COST_GOLD) {
+      return `Need ${ISLAND_RESORT_COST_GOLD}g for Island Resort (have ${snap.treasuryGold}g).`;
+    }
+    setTreasuryGold((g) => Math.max(0, g - ISLAND_RESORT_COST_GOLD));
+    setAdvanced((prev) => ({ ...prev, islandResortBuilt: true }));
+    setFocusRequest({ type: 'harbor', nonce: Date.now() });
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    triggerHaptic(20);
+    pushRadioHeadline(
+      'HARBOR',
+      `Luxury Paradise Island Resort opened across the harbor arch bridge (+${ISLAND_RESORT_REVENUE_PER_TURN}g/turn)!`,
+    );
+    return `Built Offshore Paradise Island Resort (+${ISLAND_RESORT_REVENUE_PER_TURN}g/turn)!`;
+  }, [pushRadioHeadline, triggerHaptic]);
+
+  const handleBuildIslandDefense = useCallback((): string => {
+    const snap = stateRef.current;
+    if (!snap.advanced.harborUnlocked) return 'Unlock Coastal Harbor first!';
+    if (snap.advanced.islandDefenseBuilt) return 'Coastal Missile Battery is already armed!';
+    if (snap.treasuryGold < ISLAND_DEFENSE_COST_GOLD) {
+      return `Need ${ISLAND_DEFENSE_COST_GOLD}g for Coastal Missile Battery (have ${snap.treasuryGold}g).`;
+    }
+    setTreasuryGold((g) => Math.max(0, g - ISLAND_DEFENSE_COST_GOLD));
+    setAdvanced((prev) => ({ ...prev, islandDefenseBuilt: true }));
+    setMetrics((m) => ({ ...m, orderLevel: Math.min(100, m.orderLevel + 10) }));
+    setFocusRequest({ type: 'harbor', nonce: Date.now() });
+    soundscape.playBuildCompleteChime();
+    triggerHaptic(20);
+    pushRadioHeadline(
+      'HARBOR',
+      `Coastal Missile Battery & Radar Dome armed on Paradise Island (+10 Town Order)!`,
+    );
+    return 'Armed Coastal Missile Battery & Radar Dome (+10 Order)!';
+  }, [pushRadioHeadline, triggerHaptic]);
+
+  const handleFocusHarbor = useCallback(() => {
+    triggerHaptic(12);
+    setUndergroundXray(false);
+    setCameraMode('orbit');
+    setPovVillagerId(null);
+    setStudioDrawerOpen(false);
+    setMobileQuickOpen(false);
+    setFocusRequest({ type: 'harbor', nonce: Date.now() });
+    flashQuickToast('Camera jumped to Coastal Harbor & Offshore Island');
+  }, [flashQuickToast, triggerHaptic]);
+
+  const handleCallElection = useCallback((): string => {
+    const snap = stateRef.current;
+    const election = generateTownElection(snap.agents, snap.turnCount);
+    setAdvanced((prev) => ({
+      ...prev,
+      activeElection: election,
+    }));
+    soundscape.playElectionFanfare();
+    triggerHaptic(18);
+    pushRadioHeadline(
+      'ELECTION',
+      `ELECTION CALLED! ${election.candidates.map((c) => `${c.name} (${c.platformTitle})`).join(' vs ')} — cast your deciding vote now!`,
+    );
+    return 'Election ballots are open! Cast your vote or let citizens tally.';
+  }, [pushRadioHeadline, triggerHaptic]);
+
+  const handleVoteElection = useCallback(
+    (candidateId: string | null): string => {
+      const snap = stateRef.current;
+      if (!snap.advanced.activeElection || snap.advanced.activeElection.status !== 'open') {
+        return 'No open election right now.';
+      }
+      const housingCount = computeTownHousingCapacity(snap.structures).dummyPopulation;
+      const result = tallyCitizenElectionVote({
+        election: snap.advanced.activeElection,
+        morale: snap.metrics.morale,
+        ecoScore: ecoScore.score,
+        population: snap.agents.length + housingCount,
+        playerVoteCandidateId: candidateId,
+      });
+      setAdvanced((prev) => ({
+        ...prev,
+        activeElection: result.concluded,
+        activeMandate: result.mandate,
+        lastElectionTurn: snap.turnCount,
+      }));
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playElectionFanfare();
+      triggerHaptic(22);
+      pushRadioHeadline(
+        'ELECTION',
+        `ELECTION WINNER! ${result.winner.name} wins with ${result.winner.votes} votes — ${result.winner.platformTitle} active for 15 turns!`,
+      );
+      flashQuickToast(`${result.winner.name} elected! ${result.winner.platformTitle} active.`);
+      return `${result.winner.name} won (${result.winner.votes} votes)! ${result.winner.platformTitle} active for 15 turns.`;
+    },
+    [ecoScore.score, flashQuickToast, pushRadioHeadline, triggerHaptic],
+  );
+
+  const handleBroadcastRadioNow = useCallback(() => {
+    const snap = stateRef.current;
+    const latest = snap.advanced.radioHeadlines[0];
+    if (latest) {
+      soundscape.speakRadioHeadline(latest.text, true);
+      flashQuickToast(`On Air: ${latest.tag}`);
+      return;
+    }
+    const housingCount = computeTownHousingCapacity(snap.structures).dummyPopulation;
+    const fresh = generateContextualRadioHeadline({
+      townName: snap.townName,
+      turn: snap.turnCount,
+      population: snap.agents.length + housingCount,
+      treasuryGold: snap.treasuryGold,
+      morale: snap.metrics.morale,
+      eraLabel: townEraSummary.label,
+      subwayBuilt: snap.advanced.subwayBuilt,
+      harborUnlocked: snap.advanced.harborUnlocked,
+      islandResortBuilt: snap.advanced.islandResortBuilt,
+      activeMandate: snap.advanced.activeMandate,
+    });
+    setAdvanced((prev) => ({
+      ...prev,
+      radioHeadlines: [fresh, ...prev.radioHeadlines].slice(0, 14),
+    }));
+    soundscape.speakRadioHeadline(fresh.text, true);
+    flashQuickToast('Broadcasted live Town Radio bulletin!');
+  }, [flashQuickToast, townEraSummary.label]);
+
+  const finishMiniGame = useCallback(
+    (mode: MiniGameMode, finalScore: number) => {
+      if (mode === 'none') return;
+      setActiveMiniGame('none');
+      setMiniGameTimeLeft(0);
+      setTrainThrottle(1.0);
+      if (mode === 'train_driver') {
+        setCameraMode('orbit');
+      }
+      const rewardGold = Math.max(15, Math.min(260, Math.round(finalScore * 1.15)));
+      const rewardCrystal = finalScore >= 120 ? 3 : finalScore >= 60 ? 2 : finalScore >= 25 ? 1 : 0;
+      setTreasuryGold((g) => g + rewardGold);
+      if (rewardCrystal > 0) {
+        setResources((r) => ({ ...r, crystal: r.crystal + rewardCrystal }));
+      }
+      setAdvanced((prev) => ({
+        ...prev,
+        miniGameBestScores: {
+          ...prev.miniGameBestScores,
+          [mode]: Math.max(prev.miniGameBestScores[mode] ?? 0, finalScore),
+        },
+      }));
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+      triggerHaptic(22);
+      const label =
+        mode === 'train_driver'
+          ? 'Express Train Driver'
+          : mode === 'turret_defense'
+            ? 'Turret Sky Defense'
+            : 'Sky Treasure Hunt';
+      const rewardText = `${label} finished! Score ${finalScore} -> +${rewardGold}g${rewardCrystal > 0 ? ` & +${rewardCrystal} Crystal` : ''}!`;
+      flashQuickToast(rewardText);
+      pushRadioHeadline('BREAKING', rewardText);
+    },
+    [flashQuickToast, pushRadioHeadline, triggerHaptic],
+  );
+
+  useEffect(() => {
+    if (activeMiniGame === 'none') return;
+    const timer = window.setInterval(() => {
+      setMiniGameTimeLeft((prev) => {
+        if (prev <= 1) {
+          window.clearInterval(timer);
+          const modeNow = activeMiniGameRef.current;
+          const scoreNow = miniGameScoreRef.current;
+          window.setTimeout(() => finishMiniGame(modeNow, scoreNow), 0);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeMiniGame, finishMiniGame]);
+
+  const handleStartMiniGame = useCallback(
+    (mode: Exclude<MiniGameMode, 'none'>) => {
+      triggerHaptic(18);
+      setStudioDrawerOpen(false);
+      setMobileQuickOpen(false);
+      setMobileTab(null);
+      setUndergroundXray(false);
+      setMiniGameScore(0);
+      setMiniGameTimeLeft(45);
+      setActiveMiniGame(mode);
+      if (mode === 'train_driver') {
+        setTrainThrottle(1.0);
+        setCameraMode('train_cab');
+        soundscape.playTrainHorn();
+        flashQuickToast('Drive Express Train! Stop cleanly inside Station Zone for +40 pts.');
+      } else if (mode === 'turret_defense') {
+        setCameraMode('orbit');
+        setFocusRequest({ type: 'reset', nonce: Date.now() });
+        soundscape.playLaserZap();
+        flashQuickToast('Turret Defense live! Tap red Raider Drones or Fire Volley!');
+      } else {
+        setCameraMode('orbit');
+        setFocusRequest({ type: 'reset', nonce: Date.now() });
+        soundscape.playCratePickup();
+        flashQuickToast('Sky Treasure Hunt live! Tap glowing golden crates or Magnet Collect!');
+      }
+    },
+    [flashQuickToast, triggerHaptic],
+  );
+
+  const handleMiniGameTargetHit = useCallback(
+    (kind: 'crate' | 'drone', points: number) => {
+      setMiniGameScore((s) => s + points);
+      triggerHaptic(14);
+      if (kind === 'drone') {
+        soundscape.playLaserZap();
+      } else {
+        soundscape.playCratePickup();
+      }
+    },
+    [triggerHaptic],
+  );
+
+  const handleTrainStationStopAttempt = useCallback(
+    (inZone: boolean, distanceMeters: number) => {
+      if (inZone) {
+        setMiniGameScore((s) => s + 40);
+        soundscape.playBuildCompleteChime();
+        soundscape.playTrainHorn();
+        triggerHaptic(22);
+        flashQuickToast('Perfect Station Stop! +40 pts — throttle up for next loop!');
+      } else {
+        soundscape.playTrainHorn();
+        triggerHaptic(10);
+        flashQuickToast(`Too far from station (${distanceMeters}m)! Wait until inside 12m zone.`);
+      }
+    },
+    [flashQuickToast, triggerHaptic],
+  );
+
+  const handleExitMiniGame = useCallback(() => {
+    finishMiniGame(activeMiniGameRef.current, miniGameScoreRef.current);
+  }, [finishMiniGame]);
+
   const paletteQuickActions = useMemo<PaletteActionItem[]>(
     () => [
+      {
+        id: 'qa-xray',
+        category: 'Camera',
+        title: undergroundXray ? 'Exit Underground X-Ray' : 'Inspect Underground Subway & Pipes',
+        subtitle: advanced.subwayBuilt ? 'See glowing water/power mains & twin metro trains' : 'X-Ray utility mains beneath the streets',
+        run: undergroundXray ? handleToggleUndergroundXray : handleFocusUnderground,
+      },
+      {
+        id: 'qa-harbor',
+        category: 'Camera',
+        title: 'Fly to Coastal Harbor & Offshore Island',
+        subtitle: advanced.harborUnlocked ? 'Lighthouse, Grand Cruise Ship & Paradise Island' : 'Preview SE Bay & open Harbor in Metro & Harbor',
+        run: handleFocusHarbor,
+      },
+      {
+        id: 'qa-minigame',
+        category: 'Action',
+        title: 'Play 3D Sky Treasure Hunt Mini-Game',
+        subtitle: '45s interactive 3D challenge · Earn real Gold & Crystal',
+        run: () => handleStartMiniGame('drone_hunt'),
+      },
+      {
+        id: 'qa-election',
+        category: 'Action',
+        title: 'Call Live Villager Election',
+        subtitle: '3 AI candidates · 15-turn Civic Mandate bonus',
+        run: () => {
+          handleCallElection();
+          setStudioInitialTab('council');
+          setStudioDrawerOpen(true);
+        },
+      },
       {
         id: 'qa-fireworks',
         category: 'Action',
@@ -7826,6 +8343,31 @@ export default function App() {
           setFollowActive(false);
           setAutoTurntable(false);
         }}
+        subwayBuilt={advanced.subwayBuilt}
+        undergroundXray={undergroundXray}
+        onToggleUndergroundXray={handleToggleUndergroundXray}
+        harborUnlocked={advanced.harborUnlocked}
+        islandResortBuilt={advanced.islandResortBuilt}
+        islandDefenseBuilt={advanced.islandDefenseBuilt}
+        townEra={townEraSummary.id}
+        activeMiniGame={activeMiniGame}
+        miniGameScore={miniGameScore}
+        miniGameTimeLeft={miniGameTimeLeft}
+        trainThrottle={trainThrottle}
+        onChangeTrainThrottle={setTrainThrottle}
+        onTrainStationStopAttempt={handleTrainStationStopAttempt}
+        onTrainHorn={() => {
+          triggerHaptic(14);
+          soundscape.playTrainHorn();
+        }}
+        onMiniGameTargetHit={handleMiniGameTargetHit}
+        onExitMiniGame={handleExitMiniGame}
+        radioTickerEnabled={advanced.radioTickerEnabled && activeMiniGame === 'none'}
+        radioHeadline={advanced.radioHeadlines[0] ?? null}
+        onDismissRadioTicker={() =>
+          setAdvanced((prev) => ({ ...prev, radioTickerEnabled: false }))
+        }
+        onBroadcastRadioNow={handleBroadcastRadioNow}
       />
 
       {!zenMode && (
@@ -8989,6 +9531,63 @@ export default function App() {
                 <BatteryCharging className="h-4 w-4" />
                 <span>Battery</span>
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handleFocusUnderground();
+                }}
+                className={`flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border text-[10px] font-semibold ${
+                  undergroundXray
+                    ? 'border-cyan-400 bg-cyan-500 text-slate-950'
+                    : 'border-cyan-400/35 bg-cyan-500/15 text-cyan-200'
+                }`}
+              >
+                <Layers className="h-4 w-4" />
+                <span>X-Ray</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (advanced.harborUnlocked) {
+                    handleFocusHarbor();
+                  } else {
+                    triggerHaptic(12);
+                    setMobileQuickOpen(false);
+                    setStudioInitialTab('frontier');
+                    setStudioDrawerOpen(true);
+                  }
+                }}
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-sky-400/35 bg-sky-500/15 text-[10px] font-semibold text-sky-200"
+              >
+                <Anchor className="h-4 w-4" />
+                <span>Harbor</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  setMobileQuickOpen(false);
+                  setStudioInitialTab('play');
+                  setStudioDrawerOpen(true);
+                }}
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 text-[10px] font-semibold text-amber-200"
+              >
+                <Gamepad2 className="h-4 w-4" />
+                <span>Play 3D</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  setMobileQuickOpen(false);
+                  setStudioInitialTab('council');
+                  setStudioDrawerOpen(true);
+                }}
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-emerald-400/35 bg-emerald-500/15 text-[10px] font-semibold text-emerald-200"
+              >
+                <Radio className="h-4 w-4" />
+                <span>Vote/FM</span>
+              </button>
             </div>
           </div>
         )}
@@ -9587,6 +10186,39 @@ export default function App() {
         onSurpriseAtmosphere={handleSurpriseAtmosphere}
         onResetVisuals={handleResetVisuals}
         onDownloadBackupJson={handleDownloadBackupJson}
+        subwayBuilt={advanced.subwayBuilt}
+        undergroundXray={undergroundXray}
+        onBuildSubway={handleBuildSubway}
+        onToggleUndergroundXray={handleToggleUndergroundXray}
+        onFocusUnderground={handleFocusUnderground}
+        harborUnlocked={advanced.harborUnlocked}
+        islandResortBuilt={advanced.islandResortBuilt}
+        islandDefenseBuilt={advanced.islandDefenseBuilt}
+        onUnlockHarbor={handleUnlockHarbor}
+        onBuildIslandResort={handleBuildIslandResort}
+        onBuildIslandDefense={handleBuildIslandDefense}
+        onFocusHarbor={handleFocusHarbor}
+        activeElection={advanced.activeElection}
+        activeMandate={advanced.activeMandate}
+        onCallElection={handleCallElection}
+        onVoteElection={handleVoteElection}
+        radioTickerEnabled={advanced.radioTickerEnabled}
+        radioVoiceEnabled={advanced.radioVoiceEnabled}
+        radioHeadlines={advanced.radioHeadlines}
+        onToggleRadioTicker={(next) =>
+          setAdvanced((prev) => ({ ...prev, radioTickerEnabled: next }))
+        }
+        onToggleRadioVoice={(next) =>
+          setAdvanced((prev) => ({ ...prev, radioVoiceEnabled: next }))
+        }
+        onBroadcastRadioNow={handleBroadcastRadioNow}
+        townEraSummary={townEraSummary}
+        eraOverride={advanced.eraOverride}
+        onChangeEraOverride={(next) =>
+          setAdvanced((prev) => ({ ...prev, eraOverride: next }))
+        }
+        miniGameBestScores={advanced.miniGameBestScores}
+        onStartMiniGame={handleStartMiniGame}
       />
 
       {/* Universal Quick Command Palette (Ctrl+K / Search) */}
