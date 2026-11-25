@@ -12,6 +12,8 @@ import {
 interface PlotBlueprintStudioProps {
   open: boolean;
   plotId: PlotId | null;
+  initialBlueprint?: BuildingBlueprint | null;
+  isRemodel?: boolean;
   onClose: () => void;
   onBuildOnPlot: (
     plotId: PlotId,
@@ -102,19 +104,26 @@ const QUICK_PRESETS: Array<{
 export function PlotBlueprintStudio({
   open,
   plotId,
+  initialBlueprint = null,
+  isRemodel = false,
   onClose,
   onBuildOnPlot,
 }: PlotBlueprintStudioProps) {
   const [prompt, setPrompt] = useState('5-Story Terrace Apartment');
   const [blueprint, setBlueprint] = useState<BuildingBlueprint>(() =>
-    generateFallbackBuildingBlueprint('5-Story Terrace Apartment'),
+    initialBlueprint ? { ...initialBlueprint } : generateFallbackBuildingBlueprint('5-Story Terrace Apartment'),
   );
 
   useEffect(() => {
     if (!open) return;
-    setPrompt('5-Story Terrace Apartment');
-    setBlueprint(generateFallbackBuildingBlueprint('5-Story Terrace Apartment'));
-  }, [open, plotId]);
+    if (initialBlueprint) {
+      setPrompt(initialBlueprint.name);
+      setBlueprint({ ...initialBlueprint });
+    } else {
+      setPrompt('5-Story Terrace Apartment');
+      setBlueprint(generateFallbackBuildingBlueprint('5-Story Terrace Apartment'));
+    }
+  }, [open, plotId, initialBlueprint]);
 
   if (!open || !plotId) return null;
 
@@ -150,7 +159,7 @@ export function PlotBlueprintStudio({
               {plotMeta.label} · {plotMeta.biome ? `${plotMeta.biome} district` : 'Town Core'}
             </div>
             <h2 className="truncate font-display text-base font-semibold text-white">
-              Plot Blueprint Studio
+              {isRemodel ? 'Remodel Building Blueprint' : 'Plot Blueprint Studio'}
             </h2>
           </div>
           <button

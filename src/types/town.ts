@@ -366,6 +366,169 @@ export type ShareCodePayload =
       trains: TrainBlueprint[];
     };
 
+export type DistrictZoneType = 'mixed' | 'residential' | 'commercial' | 'civic' | 'tech';
+
+export interface UtilityGridSummary {
+  powerProducedMW: number;
+  powerUsedMW: number;
+  powerSurplusMW: number;
+  waterProducedKL: number;
+  waterUsedKL: number;
+  waterSurplusKL: number;
+  status: 'optimal' | 'strained' | 'shortage';
+  efficiencyMult: number;
+}
+
+export type TechUpgradeId =
+  | 'smart_grid'
+  | 'high_speed_bogies'
+  | 'prefab_floors'
+  | 'hydroponics'
+  | 'auto_turrets'
+  | 'solar_roofs'
+  | 'trade_tariffs'
+  | 'civic_transit';
+
+export interface TechUpgradeMeta {
+  id: TechUpgradeId;
+  label: string;
+  costGold: number;
+  costCrystal: number;
+  effect: string;
+}
+
+export interface MunicipalLoanState {
+  id: string;
+  label: string;
+  principal: number;
+  remaining: number;
+  perTurnPayment: number;
+  turnsLeft: number;
+}
+
+export type PriceTrend = 'up' | 'down' | 'flat';
+
+export interface MarketPricesState {
+  timber: number;
+  stone: number;
+  harvest: number;
+  crystal: number;
+  trends: Record<'timber' | 'stone' | 'harvest' | 'crystal', PriceTrend>;
+}
+
+export interface CivicQuestItem {
+  id: string;
+  title: string;
+  detail: string;
+  progress: number;
+  target: number;
+  rewardGold: number;
+  rewardCrystal: number;
+  completed: boolean;
+  claimed: boolean;
+}
+
+export interface AutopilotRules {
+  autoClaimQuests: boolean;
+  autoBalanceTax: boolean;
+  autoUpgradeBuildings: boolean;
+  autoBuildHousing: boolean;
+}
+
+export interface CameraBookmark {
+  id: string;
+  name: string;
+  pos: [number, number, number];
+  target: [number, number, number];
+  fov: number;
+}
+
+export type AgentShiftMode = 'normal' | 'overtime' | 'rest';
+
+export interface CitizenSentimentItem {
+  id: string;
+  mood: 'happy' | 'neutral' | 'concern';
+  speaker: string;
+  text: string;
+  fixAction?: 'tax' | 'housing' | 'utilities' | 'food' | 'safety';
+}
+
+export interface TownCheckpointSlot {
+  id: string;
+  label: string;
+  savedAtMs: number;
+  turnCount: number;
+  treasuryGold: number;
+  structures: TownStructure[];
+  resources: TownResources;
+  metrics: TownMetrics;
+  unlockedBiomes: BiomeId[];
+  trainBlueprints: TrainBlueprint[];
+  taxRate: number;
+  zoneMap: Partial<Record<PlotId, DistrictZoneType>>;
+}
+
+export type LampMood = 'warm' | 'amber' | 'cyber' | 'emerald';
+
+export type FestivalKind = 'harvest_fair' | 'lantern_night' | 'rail_expo' | 'tech_summit';
+
+export type CameraNudgeAction = 'left' | 'right' | 'zoom_in' | 'zoom_out' | 'top_down';
+
+export interface ActiveFestivalState {
+  kind: FestivalKind;
+  label: string;
+  turnsLeft: number;
+  goldBonusPerTurn: number;
+  moraleBonusPerTurn: number;
+  crystalBonusPerTurn: number;
+}
+
+export interface MayorTodoItem {
+  id: string;
+  text: string;
+  done: boolean;
+  createdAtMs: number;
+}
+
+export interface TourismSummary {
+  dailyVisitors: number;
+  revenuePerTurn: number;
+  starRating: number;
+  topAttraction: string;
+}
+
+export interface CreditRatingSummary {
+  grade: 'AAA' | 'AA' | 'A' | 'B' | 'C';
+  label: string;
+  interestRatePct: number;
+  advice: string;
+}
+
+export interface TownAdvancedState {
+  zoneMap: Partial<Record<PlotId, DistrictZoneType>>;
+  unlockedTechs: TechUpgradeId[];
+  activeLoan: MunicipalLoanState | null;
+  claimedQuestIds: string[];
+  cameraBookmarks: CameraBookmark[];
+  autopilot: AutopilotRules;
+  marketPrices: MarketPricesState;
+  agentShifts: Partial<Record<AgentId, AgentShiftMode>>;
+  checkpoints: TownCheckpointSlot[];
+  cargoDispatchedCount: number;
+  fireworksCount: number;
+  dronePatrolEnabled: boolean;
+  balloonsEnabled: boolean;
+  auroraEnabled: boolean;
+  deliveryVanEnabled: boolean;
+  lampMood: LampMood;
+  hapticsEnabled: boolean;
+  showNameplates: boolean;
+  townMotto: string;
+  emblemColor: string;
+  todos: MayorTodoItem[];
+  activeFestival: ActiveFestivalState | null;
+}
+
 export interface TownEventOption {
   id: string;
   label: string;

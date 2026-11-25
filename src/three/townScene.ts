@@ -15,13 +15,17 @@ import {
   type AgentId,
   type AgentRecord,
   type BiomeId,
+  type CameraBookmark,
   type CameraMode,
+  type CameraNudgeAction,
   type DecorPackId,
+  type DistrictZoneType,
   type EnemyCityState,
   type EnemyRaidState,
   type GraphicsQuality,
   type HatStyle,
   type HeatmapMode,
+  type LampMood,
   type LocationId,
   type PlotId,
   type TimeOfDay,
@@ -29,6 +33,7 @@ import {
   type TownStructure,
   type TownTheme,
   type TrainBlueprint,
+  type UtilityGridSummary,
   type WeatherMode,
 } from '../types/town.ts';
 import {
@@ -55,6 +60,10 @@ import {
 } from './townRaiders.ts';
 export type { RaiderRadarSnapshot } from './townRaiders.ts';
 import { buildTownShuttleBus, type TownBusHandle } from './townBus.ts';
+import {
+  buildTownInfrastructureSystem,
+  type TownInfrastructureHandle,
+} from './townInfrastructure.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
 import { buildTownVehiclesSystem, type TownVehiclesHandle } from './townVehicles.ts';
 import {
@@ -1665,6 +1674,8 @@ export class TownSceneController {
   private busHandle!: TownBusHandle;
   private crowdHandle: TownCrowdHandle | null = null;
   private vehiclesHandle: TownVehiclesHandle | null = null;
+  private infraHandle: TownInfrastructureHandle | null = null;
+  private smoothedFps = 60;
   private lifeHandle: TownLifeHandle | null = null;
   private heatmapGroup: THREE.Group | null = null;
   private heatmapMode: HeatmapMode = 'off';
@@ -1898,6 +1909,8 @@ export class TownSceneController {
     this.disposables.push(this.crowdHandle);
     this.vehiclesHandle = buildTownVehiclesSystem(this.scene);
     this.disposables.push(this.vehiclesHandle);
+    this.infraHandle = buildTownInfrastructureSystem(this.scene);
+    this.disposables.push(this.infraHandle);
     this.buildHeatmapOverlay();
     this.lifeHandle = buildTownLifeAndDecor(this.sharedShadowTex);
     this.scene.add(this.lifeHandle.group);
@@ -2430,6 +2443,7 @@ export class TownSceneController {
     this.busHandle?.setGraphicsQuality(quality);
     this.crowdHandle?.setGraphicsQuality(quality);
     this.vehiclesHandle?.setGraphicsQuality(quality);
+    this.infraHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.raiderHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
@@ -2499,6 +2513,7 @@ export class TownSceneController {
     const nightFactor =
       timeOfDay === 'night' ? 1 : timeOfDay === 'twilight' ? 0.55 : timeOfDay === 'dawn' ? 0.25 : 0;
     this.vehiclesHandle?.setNightFactor(nightFactor);
+    this.infraHandle?.setNightFactor(nightFactor);
     this.updateFireflyState();
   }
 
@@ -2708,6 +2723,134 @@ export class TownSceneController {
 
   public setTrainCameraIndex(index: number): void {
     this.railwayHandle?.setCameraTrainIndex(index);
+  }
+
+  public setUtilityOverlay(
+    visible: boolean,
+    structures: TownStructure[],
+    grid: UtilityGridSummary,
+  ): void {
+    this.infraHandle?.setUtilityOverlayVisible(visible, structures, grid);
+  }
+
+  public setZoneOverlay(
+    visible: boolean,
+    zoneMap: Partial<Record<PlotId, DistrictZoneType>>,
+  ): void {
+    this.infraHandle?.setZoneOverlayVisible(
+      visible,
+      zoneMap,
+      getAvailablePlotIds(this.unlockedBiomes),
+    );
+  }
+
+  public setDronePatrolEnabled(enabled: boolean): void {
+    this.infraHandle?.setDronePatrolEnabled(enabled);
+  }
+
+  public setBalloonsEnabled(enabled: boolean): void {
+    this.infraHandle?.setBalloonsEnabled(enabled);
+  }
+
+  public setAuroraEnabled(enabled: boolean): void {
+    this.infraHandle?.setAuroraEnabled(enabled);
+  }
+
+  public setDeliveryVanEnabled(enabled: boolean): void {
+    this.infraHandle?.setDeliveryVanEnabled(enabled);
+  }
+
+  public setBeaconPlot(plotId: PlotId | null): void {
+    if (!plotId || !PLOT_META[plotId]) {
+      this.infraHandle?.setBeaconTarget(null);
+      return;
+    }
+    const meta = PLOT_META[plotId];
+    this.infraHandle?.setBeaconTarget({ x: meta.x, z: meta.z });
+  }
+
+  public setLampMood(mood: LampMood): void {
+    this.infraHandle?.setLampMood(mood);
+  }
+
+  public getCurrentFps(): number {
+    return Math.max(1, Math.min(60, Math.round(this.smoothedFps)));
+  }
+
+  public nudgeOrbitCamera(action: CameraNudgeAction): void {
+    this.setCameraMode('orbit');
+    this.followActive = false;
+    const target = this.controls.target.clone();
+    const offset = this.camera.position.clone().sub(target);
+    if (action === 'top_down') {
+      this.cameraTargetGoal = target.clone();
+      this.cameraPosGoal = new THREE.Vector3(target.x, 42, target.z + 8);
+      return;
+    }
+    if (action === 'left' || action === 'right') {
+      const ang = action === 'left' ? -0.52 : 0.52;
+      const cos = Math.cos(ang);
+      const sin = Math.sin(ang);
+      const nx = offset.x * cos - offset.z * sin;
+      const nz = offset.x * sin + offset.z * cos;
+      offset.x = nx;
+      offset.z = nz;
+    } else if (action === 'zoom_in') {
+      const len = offset.length();
+      offset.setLength(Math.max(10, len * 0.78));
+    } else if (action === 'zoom_out') {
+      const len = offset.length();
+      offset.setLength(Math.min(58, len * 1.26));
+    }
+    this.cameraTargetGoal = target;
+    this.cameraPosGoal = target.clone().add(offset);
+  }
+
+  public launchFireworks(): void {
+    this.infraHandle?.launchFireworks();
+  }
+
+  public setCameraFov(fov: number): void {
+    const clamped = THREE.MathUtils.clamp(fov, 30, 72);
+    if (Math.abs(this.camera.fov - clamped) > 0.1) {
+      this.camera.fov = clamped;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  public setSunAngle(azimuthDeg: number): void {
+    const rad = THREE.MathUtils.degToRad(azimuthDeg);
+    this.sunLight.position.set(Math.cos(rad) * 26, 22 + Math.sin(rad * 0.5) * 6, Math.sin(rad) * 26);
+  }
+
+  public captureCameraBookmark(name: string): CameraBookmark {
+    return {
+      id: `cam-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      name: name.trim().slice(0, 28) || 'Saved View',
+      pos: [
+        Number(this.camera.position.x.toFixed(2)),
+        Number(this.camera.position.y.toFixed(2)),
+        Number(this.camera.position.z.toFixed(2)),
+      ],
+      target: [
+        Number(this.controls.target.x.toFixed(2)),
+        Number(this.controls.target.y.toFixed(2)),
+        Number(this.controls.target.z.toFixed(2)),
+      ],
+      fov: Math.round(this.camera.fov),
+    };
+  }
+
+  public glideToCameraBookmark(bookmark: CameraBookmark): void {
+    this.setCameraMode('orbit');
+    this.setCameraFov(bookmark.fov || 46);
+    this.cameraPosGoal = new THREE.Vector3(bookmark.pos[0], bookmark.pos[1], bookmark.pos[2]);
+    this.cameraTargetGoal = new THREE.Vector3(
+      bookmark.target[0],
+      bookmark.target[1],
+      bookmark.target[2],
+    );
+    this.followActive = false;
   }
 
   private buildHeatmapOverlay(): void {
@@ -3087,6 +3230,7 @@ export class TownSceneController {
     this.expansionHandle?.setUnlockedBiomes(params.unlockedBiomes);
     this.expansionHandle?.setRoads(params.roads);
     this.vehiclesHandle?.setUnlockedBiomes(params.unlockedBiomes);
+    this.infraHandle?.setUnlockedBiomes(params.unlockedBiomes);
     this.vehiclesHandle?.setVisible(
       params.isMainTown || params.unlockedBiomes.length > 0 || params.structures.length > 0,
     );
@@ -3161,6 +3305,7 @@ export class TownSceneController {
     this.expansionHandle?.setUnlockedBiomes(unlockedBiomes);
     this.expansionHandle?.setRoads(roads);
     this.vehiclesHandle?.setUnlockedBiomes(unlockedBiomes);
+    this.infraHandle?.setUnlockedBiomes(unlockedBiomes);
     this.vehiclesHandle?.setVisible(
       !this.isCleanFrontier || unlockedBiomes.length > 0 || this.lastStructures.length > 0,
     );
@@ -4404,6 +4549,13 @@ export class TownSceneController {
 
       if (this.vehiclesHandle) {
         this.vehiclesHandle.update(delta, elapsed);
+      }
+
+      if (this.infraHandle) {
+        this.infraHandle.update(delta, elapsed);
+      }
+      if (delta > 0.002 && delta < 0.5) {
+        this.smoothedFps = THREE.MathUtils.lerp(this.smoothedFps, Math.min(60, 1 / delta), 0.1);
       }
 
       if (this.heatmapGroup?.visible && this.heatmapMode !== 'off') {

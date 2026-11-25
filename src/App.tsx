@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Award,
+  BatteryCharging,
   Building2,
   Bus,
   Camera,
@@ -11,7 +12,9 @@ import {
   Cloud,
   Compass,
   Crown,
+  EyeOff,
   FastForward,
+  Flame,
   Footprints,
   Gauge,
   HelpCircle,
@@ -24,7 +27,10 @@ import {
   Play,
   Plus,
   Radio,
+  RotateCcw,
+  RotateCw,
   ScrollText,
+  Search,
   Settings,
   SlidersHorizontal,
   Sparkles,
@@ -36,9 +42,12 @@ import {
   VolumeX,
   X,
   Zap,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { AIProvidersModal } from './components/AIProvidersModal.tsx';
+import { CommandPaletteModal, type PaletteActionItem } from './components/CommandPaletteModal.tsx';
 import { DecreePanel } from './components/DecreePanel.tsx';
 import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
@@ -64,6 +73,7 @@ import {
 import { auth, googleAuthProvider } from './lib/firebase.ts';
 import { soundscape } from './lib/soundscape.ts';
 import {
+  createDefaultAdvancedState,
   createFreshTownState,
   createNewLocalTown,
   createNewTownInFirestore,
@@ -100,15 +110,23 @@ import {
 import {
   appendHistoryPoint,
   compileTownGazette,
+  computeCreditRating,
   computeResourceRates,
+  computeTourismSummary,
   computeTownEconomy,
   computeTownNeedsMetrics,
   computeTownRank,
   computeTradeTrainPayout,
+  computeUtilityGrid,
   decodeBlueprintShareCode,
   DECOR_PACKS,
+  DISTRICT_ZONE_META,
+  evaluateCivicQuests,
   evaluateTownMilestones,
+  FESTIVAL_CATALOG,
   formatAgentBondsForPrompt,
+  formatTownReportCard,
+  generateCitizenSentiments,
   generateCouncilDebate,
   generateCouncilProposals,
   getDemolishSalvageGold,
@@ -117,6 +135,8 @@ import {
   pickTownEvent,
   recordSocialInteraction,
   serializeTownExport,
+  stepMarketPrices,
+  TECH_UPGRADES,
   TOWN_POLICIES,
 } from './lib/townSystems.ts';
 import {
@@ -163,15 +183,23 @@ import {
   TOWN_THEME_META,
   type AgentId,
   type AgentRecord,
+  type AgentShiftMode,
   type AgentTurnResponse,
   type AIProviderConfig,
+  type AutopilotRules,
   type BiomeId,
   type BuildingBlueprint,
+  type CameraBookmark,
   type CameraMode,
+  type CameraNudgeAction,
+  type CitizenSentimentItem,
+  type DistrictZoneType,
   type EnemyBuildingId,
   type EnemyCityState,
   type EnemyRaidState,
+  type FestivalKind,
   type ImaginedTownBlueprint,
+  type LampMood,
   type RaiderTactic,
   type CliAgentActivity,
   type CouncilDebateOption,
@@ -193,7 +221,10 @@ import {
   type RemoteCommandType,
   type SignalRelayConfig,
   type StructureType,
+  type TechUpgradeId,
   type TimeOfDay,
+  type TownAdvancedState,
+  type TownCheckpointSlot,
   type TownEvent,
   type TownEventOption,
   type TownHistoryPoint,
@@ -577,13 +608,55 @@ export default function App() {
   const [taxRate, setTaxRate] = useState<number>(
     () => loadTownExtrasLocal(initialLocal.current?.townId ?? LOCAL_MAIN_TOWN_ID).taxRate,
   );
+  const [advanced, setAdvanced] = useState<TownAdvancedState>(
+    () => loadTownExtrasLocal(initialLocal.current?.townId ?? LOCAL_MAIN_TOWN_ID).advanced,
+  );
   const [heatmapMode, setHeatmapMode] = useState<HeatmapMode>('off');
+  const [showUtilityOverlay, setShowUtilityOverlay] = useState(false);
+  const [showZoneOverlay, setShowZoneOverlay] = useState(false);
+  const [fireworksNonce, setFireworksNonce] = useState(0);
+  const [cameraFov, setCameraFov] = useState(46);
+  const [sunAngle, setSunAngle] = useState(38);
+  const [zenMode, setZenMode] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [cameraBookmarkRequest, setCameraBookmarkRequest] = useState<{
+    bookmark: CameraBookmark;
+    nonce: number;
+  } | null>(null);
+  const bookmarkCaptureFnRef = useRef<((name: string) => CameraBookmark | null) | null>(null);
+  const fpsFnRef = useRef<(() => number) | null>(null);
+  const [liveFps, setLiveFps] = useState(60);
+  const [beaconPlotId, setBeaconPlotId] = useState<PlotId | null>(null);
+  const [sunTimelapse, setSunTimelapse] = useState(false);
+  const [cameraNudgeRequest, setCameraNudgeRequest] = useState<{
+    action: CameraNudgeAction;
+    nonce: number;
+  } | null>(null);
+  const [mobileQuickOpen, setMobileQuickOpen] = useState(false);
+  const [quickToast, setQuickToast] = useState<string | null>(null);
   const [activeTrainCameraIdx, setActiveTrainCameraIdx] = useState<number>(0);
   const [studioDrawerOpen, setStudioDrawerOpen] = useState(false);
   const [studioInitialTab, setStudioInitialTab] = useState<StudioTab>('economy');
   const [plotStudioPlotId, setPlotStudioPlotId] = useState<PlotId | null>(null);
+  const [plotStudioRemodel, setPlotStudioRemodel] = useState(false);
   const [activeDebate, setActiveDebate] = useState<CouncilDebateProposal | null>(null);
   const [activeEmergency, setActiveEmergency] = useState<EmergencyEventState | null>(null);
+  const [undoStack, setUndoStack] = useState<
+    Array<{
+      structures: TownStructure[];
+      zoneMap: Partial<Record<PlotId, DistrictZoneType>>;
+      treasuryGold: number;
+      resources: TownResources;
+    }>
+  >([]);
+  const [redoStack, setRedoStack] = useState<
+    Array<{
+      structures: TownStructure[];
+      zoneMap: Partial<Record<PlotId, DistrictZoneType>>;
+      treasuryGold: number;
+      resources: TownResources;
+    }>
+  >([]);
   const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>(() =>
     loadGraphicsQuality(),
   );
@@ -740,11 +813,17 @@ export default function App() {
         : extras.trainBlueprints,
     );
     setTaxRate(extras.taxRate);
+    setAdvanced(extras.advanced ?? createDefaultAdvancedState());
     setHeatmapMode('off');
+    setShowUtilityOverlay(false);
+    setShowZoneOverlay(false);
     setActiveTrainCameraIdx(0);
     setPlotStudioPlotId(null);
+    setPlotStudioRemodel(false);
     setActiveDebate(null);
     setActiveEmergency(null);
+    setUndoStack([]);
+    setRedoStack([]);
     setSelectedPlotId(null);
     setSelectedAgentId('mayor_sterling');
     setRecentSpeakerId(null);
@@ -875,11 +954,11 @@ export default function App() {
     saveEnemyCityLocal(activeTownId, enemyCity);
   }, [activeTownId, enemyCity]);
 
-  // Persist procedural building blueprints, train fleet & tax rate sidecar across reloads
+  // Persist procedural building blueprints, train fleet, tax rate & 20-feature advanced extras across reloads
   useEffect(() => {
     if (!activeTownId) return;
-    saveTownExtrasLocal(activeTownId, structures, trainBlueprints, taxRate);
-  }, [activeTownId, structures, trainBlueprints, taxRate]);
+    saveTownExtrasLocal(activeTownId, structures, trainBlueprints, taxRate, advanced);
+  }, [activeTownId, structures, trainBlueprints, taxRate, advanced]);
 
   useEffect(() => {
     return () => {
@@ -963,6 +1042,7 @@ export default function App() {
     townTheme,
     trainBlueprints,
     taxRate,
+    advanced,
     activeDebate,
     activeEmergency,
     turnIntervalSeconds,
@@ -1006,6 +1086,7 @@ export default function App() {
     townTheme,
     trainBlueprints,
     taxRate,
+    advanced,
     activeDebate,
     activeEmergency,
     turnIntervalSeconds,
@@ -1434,8 +1515,16 @@ export default function App() {
       const nextAgentIndex =
         (snap.activeAgentIndex + 1) % Math.max(1, nextAgentsList.length);
 
-      // Update Town Treasury & 4-Resource Supply Chain from live economy
+      // Update Town Treasury, Tourism, Festival, Utility Grid, Market Exchange, Loans & Autopilot
       const nextWeatherForEcon = weatherShift ? weatherShift.weather : snap.weather;
+      const turnTourism = computeTourismSummary({
+        structures: nextStructures,
+        unlockedBiomes: snap.unlockedBiomes,
+        decorPacks: snap.decorPacks,
+        balloonsEnabled: snap.advanced.balloonsEnabled,
+        fireworksCount: 0,
+        activeFestival: snap.advanced.activeFestival,
+      });
       const turnEcon = computeTownEconomy(
         nextStructures,
         nextAgentsList,
@@ -1446,22 +1535,148 @@ export default function App() {
         snap.decorPacks,
         snap.taxRate,
         Math.max(1, snap.trainBlueprints.length),
+        snap.advanced.unlockedTechs,
+        snap.advanced.zoneMap,
+        snap.advanced.activeLoan,
+        snap.advanced.agentShifts,
+        snap.advanced.activeFestival,
+        turnTourism.revenuePerTurn,
       );
       if (turnEcon.taxMoraleEffect !== 0) {
         nextMetrics.morale = Math.max(0, Math.min(100, nextMetrics.morale + turnEcon.taxMoraleEffect));
       }
-      const nextTreasury = Math.max(0, snap.treasuryGold + turnEcon.netPerTurn);
+      if (snap.advanced.activeFestival) {
+        nextMetrics.morale = Math.min(
+          100,
+          nextMetrics.morale + snap.advanced.activeFestival.moraleBonusPerTurn,
+        );
+      }
+      if (snap.advanced.unlockedTechs.includes('civic_transit') && nextMetrics.morale < 68) {
+        nextMetrics.morale = Math.min(68, nextMetrics.morale + 2);
+      }
+      let nextTreasury = Math.max(0, snap.treasuryGold + turnEcon.netPerTurn);
       const turnResRates = computeResourceRates(
         nextStructures,
         snap.unlockedBiomes,
         snap.activePolicies,
       );
+      const techZoneBonus = Object.values(snap.advanced.zoneMap).some((z) => z === 'tech') ? 1 : 0;
+      const hydroBonus = snap.advanced.unlockedTechs.includes('hydroponics') ? 2 : 0;
+      const festCrystalBonus = snap.advanced.activeFestival?.crystalBonusPerTurn ?? 0;
       const nextResources: TownResources = {
         timber: snap.resources.timber + turnResRates.timber,
         stone: snap.resources.stone + turnResRates.stone,
-        harvest: snap.resources.harvest + turnResRates.harvest,
-        crystal: snap.resources.crystal + turnResRates.crystal,
+        harvest: snap.resources.harvest + turnResRates.harvest + hydroBonus,
+        crystal: snap.resources.crystal + turnResRates.crystal + techZoneBonus + festCrystalBonus,
       };
+      // Advance fluctuating Market Exchange prices, Festival timer & service active Municipal Loan
+      const nextMarketPrices = stepMarketPrices(
+        snap.advanced.marketPrices,
+        nextResources,
+        nextWeatherForEcon,
+        nextTurnNumber,
+        snap.advanced.unlockedTechs,
+      );
+      let nextLoan = snap.advanced.activeLoan;
+      if (nextLoan) {
+        const remTurns = nextLoan.turnsLeft - 1;
+        const remBalance = Math.max(0, nextLoan.remaining - nextLoan.perTurnPayment);
+        nextLoan =
+          remTurns <= 0 || remBalance <= 0
+            ? null
+            : { ...nextLoan, turnsLeft: remTurns, remaining: remBalance };
+      }
+      const nextActiveFestival = snap.advanced.activeFestival
+        ? snap.advanced.activeFestival.turnsLeft <= 1
+          ? null
+          : {
+              ...snap.advanced.activeFestival,
+              turnsLeft: snap.advanced.activeFestival.turnsLeft - 1,
+            }
+        : null;
+      let nextClaimedQuests = snap.advanced.claimedQuestIds;
+      let autoTaxNext = snap.taxRate;
+      const ap = snap.advanced.autopilot;
+      if (ap.autoClaimQuests) {
+        const turnNeeds = computeTownNeedsMetrics(
+          nextStructures,
+          nextAgentsList,
+          snap.unlockedBiomes,
+          snap.taxRate,
+        );
+        const turnQuests = evaluateCivicQuests({
+          structures: nextStructures,
+          unlockedBiomes: snap.unlockedBiomes,
+          trainBlueprints: snap.trainBlueprints,
+          townNeeds: turnNeeds,
+          unlockedTechs: snap.advanced.unlockedTechs,
+          cargoDispatchedCount: snap.advanced.cargoDispatchedCount,
+          claimedQuestIds: nextClaimedQuests,
+        });
+        for (const q of turnQuests) {
+          if (q.completed && !q.claimed) {
+            nextTreasury += q.rewardGold;
+            nextResources.crystal += q.rewardCrystal;
+            nextClaimedQuests = [...nextClaimedQuests, q.id];
+          }
+        }
+      }
+      if (ap.autoBalanceTax) {
+        if (nextMetrics.morale < 65 && autoTaxNext > 6) {
+          autoTaxNext = Math.max(6, autoTaxNext - 2);
+        } else if (nextMetrics.morale > 85 && autoTaxNext < 10) {
+          autoTaxNext = Math.min(10, autoTaxNext + 1);
+        }
+        if (autoTaxNext !== snap.taxRate) {
+          setTaxRate(autoTaxNext);
+        }
+      }
+      let autopilotMutatedStructures = false;
+      if (ap.autoUpgradeBuildings && nextTreasury >= 180) {
+        const upIdx = nextStructures.findIndex((s) => s.status === 'complete' && s.tier === 1);
+        if (upIdx >= 0) {
+          nextStructures = nextStructures.map((s, idx) =>
+            idx === upIdx ? { ...s, tier: 2, updatedAtMs: now } : s,
+          );
+          nextTreasury -= 75;
+          autopilotMutatedStructures = true;
+        }
+      }
+      if (ap.autoBuildHousing && nextTreasury >= 220) {
+        const housingNow = computeTownHousingCapacity(nextStructures);
+        if (housingNow.dummyPopulation >= housingNow.housingCapacity - 4) {
+          const emptyPlot = getAvailablePlotIds(snap.unlockedBiomes).find(
+            (pid) => !nextStructures.some((s) => s.plotId === pid),
+          );
+          if (emptyPlot) {
+            const bp = generateFallbackBuildingBlueprint('Autopilot 5-Story Apartment');
+            nextStructures = [
+              ...nextStructures,
+              {
+                plotId: emptyPlot,
+                structureType: 'apartment',
+                customLabel: bp.name,
+                blueprint: bp,
+                status: 'complete',
+                progress: 100,
+                tier: 1,
+                proposedBy: 'Civic Autopilot',
+                lastBuilder: 'Architect Lyra',
+                updatedAtMs: now,
+              },
+            ];
+            nextTreasury -= 90;
+            autopilotMutatedStructures = true;
+          }
+        }
+      }
+      setAdvanced((prev) => ({
+        ...prev,
+        marketPrices: nextMarketPrices,
+        activeLoan: nextLoan,
+        claimedQuestIds: nextClaimedQuests,
+        activeFestival: nextActiveFestival,
+      }));
       const nextHistory = appendHistoryPoint(snap.history, {
         turn: nextTurnNumber,
         treasuryGold: nextTreasury,
@@ -1501,7 +1716,7 @@ export default function App() {
       }
 
       setAgents(nextAgentsList);
-      if (structureMutation) {
+      if (structureMutation || autopilotMutatedStructures) {
         setStructures(nextStructures);
       }
       setTreasuryGold(nextTreasury);
@@ -1722,6 +1937,26 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [isPlaying, runTurn]);
 
+  const tourism = useMemo(
+    () =>
+      computeTourismSummary({
+        structures,
+        unlockedBiomes,
+        decorPacks,
+        balloonsEnabled: advanced.balloonsEnabled,
+        fireworksCount: fireworksNonce,
+        activeFestival: advanced.activeFestival,
+      }),
+    [
+      structures,
+      unlockedBiomes,
+      decorPacks,
+      advanced.balloonsEnabled,
+      fireworksNonce,
+      advanced.activeFestival,
+    ],
+  );
+
   const economy = useMemo(
     () =>
       computeTownEconomy(
@@ -1734,6 +1969,12 @@ export default function App() {
         decorPacks,
         taxRate,
         Math.max(1, trainBlueprints.length),
+        advanced.unlockedTechs,
+        advanced.zoneMap,
+        advanced.activeLoan,
+        advanced.agentShifts,
+        advanced.activeFestival,
+        tourism.revenuePerTurn,
       ),
     [
       structures,
@@ -1745,12 +1986,91 @@ export default function App() {
       decorPacks,
       taxRate,
       trainBlueprints.length,
+      advanced.unlockedTechs,
+      advanced.zoneMap,
+      advanced.activeLoan,
+      advanced.agentShifts,
+      advanced.activeFestival,
+      tourism.revenuePerTurn,
     ],
   );
 
   const townNeeds = useMemo(
     () => computeTownNeedsMetrics(structures, agents, unlockedBiomes, taxRate),
     [structures, agents, unlockedBiomes, taxRate],
+  );
+
+  const utilities = useMemo(
+    () => computeUtilityGrid(structures, unlockedBiomes, advanced.unlockedTechs),
+    [structures, unlockedBiomes, advanced.unlockedTechs],
+  );
+
+  const creditRating = useMemo(
+    () =>
+      computeCreditRating({
+        treasuryGold,
+        netPerTurn: economy.netPerTurn,
+        utilityStatus: utilities.status,
+        activeLoan: advanced.activeLoan,
+        morale: metrics.morale,
+      }),
+    [treasuryGold, economy.netPerTurn, utilities.status, advanced.activeLoan, metrics.morale],
+  );
+
+  // Live Cinematic Sun Timelapse Mode
+  useEffect(() => {
+    if (!sunTimelapse) return;
+    const id = window.setInterval(() => {
+      setSunAngle((prev) => (prev + 2) % 360);
+    }, 90);
+    return () => window.clearInterval(id);
+  }, [sunTimelapse]);
+
+  // Poll live FPS only when Studio or Mobile Quick Sheet is open (zero idle overhead)
+  useEffect(() => {
+    if (!studioDrawerOpen && !mobileQuickOpen) return;
+    const sample = () => {
+      const val = fpsFnRef.current?.();
+      if (typeof val === 'number' && val > 0) setLiveFps(val);
+    };
+    sample();
+    const id = window.setInterval(sample, 1200);
+    return () => window.clearInterval(id);
+  }, [studioDrawerOpen, mobileQuickOpen]);
+
+  const quests = useMemo(
+    () =>
+      evaluateCivicQuests({
+        structures,
+        unlockedBiomes,
+        trainBlueprints,
+        townNeeds,
+        unlockedTechs: advanced.unlockedTechs,
+        cargoDispatchedCount: advanced.cargoDispatchedCount,
+        claimedQuestIds: advanced.claimedQuestIds,
+      }),
+    [
+      structures,
+      unlockedBiomes,
+      trainBlueprints,
+      townNeeds,
+      advanced.unlockedTechs,
+      advanced.cargoDispatchedCount,
+      advanced.claimedQuestIds,
+    ],
+  );
+
+  const sentiments = useMemo(
+    () =>
+      generateCitizenSentiments({
+        taxRate,
+        townNeeds,
+        utilities,
+        weather,
+        structures,
+        metrics,
+      }),
+    [taxRate, townNeeds, utilities, weather, structures, metrics],
   );
 
   const resourceRates = useMemo(
@@ -5798,8 +6118,136 @@ export default function App() {
     void handleSwitchTown(nextSavedTown.id);
   }, [nextSavedTown, handleSwitchTown]);
 
+  const pushUndoSnapshot = useCallback(() => {
+    const snap = stateRef.current;
+    setUndoStack((prev) =>
+      [
+        ...prev,
+        {
+          structures: snap.structures,
+          zoneMap: { ...snap.advanced.zoneMap },
+          treasuryGold: snap.treasuryGold,
+          resources: { ...snap.resources },
+        },
+      ].slice(-12),
+    );
+    setRedoStack([]);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      const curr = stateRef.current;
+      setRedoStack((r) =>
+        [
+          ...r,
+          {
+            structures: curr.structures,
+            zoneMap: { ...curr.advanced.zoneMap },
+            treasuryGold: curr.treasuryGold,
+            resources: { ...curr.resources },
+          },
+        ].slice(-12),
+      );
+      setStructures(last.structures);
+      setTreasuryGold(last.treasuryGold);
+      setResources(last.resources);
+      setAdvanced((a) => ({ ...a, zoneMap: last.zoneMap }));
+      soundscape.playAgentChime(2);
+      return prev.slice(0, -1);
+    });
+  }, []);
+
+  const handleRedo = useCallback(() => {
+    setRedoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const next = prev[prev.length - 1];
+      const curr = stateRef.current;
+      setUndoStack((u) =>
+        [
+          ...u,
+          {
+            structures: curr.structures,
+            zoneMap: { ...curr.advanced.zoneMap },
+            treasuryGold: curr.treasuryGold,
+            resources: { ...curr.resources },
+          },
+        ].slice(-12),
+      );
+      setStructures(next.structures);
+      setTreasuryGold(next.treasuryGold);
+      setResources(next.resources);
+      setAdvanced((a) => ({ ...a, zoneMap: next.zoneMap }));
+      soundscape.playAgentChime(2);
+      return prev.slice(0, -1);
+    });
+  }, []);
+
+  // Global keyboard shortcuts: Ctrl/Cmd+K (Command Palette), H (Zen Mode), Ctrl/Cmd+Z (Undo)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+      if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'h' || e.key === 'H') {
+          e.preventDefault();
+          setZenMode((z) => !z);
+        } else if (e.key === '/') {
+          e.preventDefault();
+          setCommandPaletteOpen(true);
+        } else if (e.key === 'Escape' && zenMode) {
+          setZenMode(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleUndo, handleRedo, zenMode]);
+
   const handleBuildBlueprintOnPlot = useCallback(
     (plotId: PlotId, structureType: StructureType, blueprint?: BuildingBlueprint) => {
+      pushUndoSnapshot();
+      const existing = stateRef.current.structures.find((s) => s.plotId === plotId);
+      if (existing) {
+        const now = Date.now();
+        setStructures((prev) =>
+          prev.map((s) =>
+            s.plotId === plotId
+              ? {
+                  ...s,
+                  structureType,
+                  customLabel: blueprint?.name ?? s.customLabel,
+                  blueprint: blueprint ?? s.blueprint,
+                  updatedAtMs: now,
+                }
+              : s,
+          ),
+        );
+        soundscape.playBuildCompleteChime();
+        setFocusRequest({ type: 'plot', id: plotId, nonce: now });
+        return;
+      }
       void handleMayorBuildStructure(
         structureType,
         blueprint?.name,
@@ -5810,8 +6258,479 @@ export default function App() {
       );
       setFocusRequest({ type: 'plot', id: plotId, nonce: Date.now() });
     },
-    [handleMayorBuildStructure],
+    [handleMayorBuildStructure, pushUndoSnapshot],
   );
+
+  const handleSetPlotZone = useCallback(
+    (plotId: PlotId, zone: DistrictZoneType) => {
+      pushUndoSnapshot();
+      setAdvanced((prev) => ({
+        ...prev,
+        zoneMap: { ...prev.zoneMap, [plotId]: zone },
+      }));
+      soundscape.playAgentChime(2);
+    },
+    [pushUndoSnapshot],
+  );
+
+  const handleCloneStructure = useCallback(
+    (fromPlotId: PlotId) => {
+      const snap = stateRef.current;
+      const src = snap.structures.find((s) => s.plotId === fromPlotId);
+      if (!src) return;
+      const openPlot = getAvailablePlotIds(snap.unlockedBiomes).find(
+        (pid) => !snap.structures.some((s) => s.plotId === pid),
+      );
+      if (!openPlot) {
+        setErrorBanner('No open plots available to clone this building — expand a biome first.');
+        return;
+      }
+      pushUndoSnapshot();
+      const now = Date.now();
+      const cloned: TownStructure = {
+        ...src,
+        plotId: openPlot,
+        customLabel: src.customLabel ? `${src.customLabel} II`.slice(0, 40) : undefined,
+        blueprint: src.blueprint
+          ? { ...src.blueprint, name: `${src.blueprint.name} II`.slice(0, 40) }
+          : undefined,
+        status: 'complete',
+        progress: 100,
+        updatedAtMs: now,
+      };
+      setStructures((prev) => [...prev, cloned]);
+      setSelectedPlotId(openPlot);
+      setFocusRequest({ type: 'plot', id: openPlot, nonce: now });
+      soundscape.playBuildCompleteChime();
+    },
+    [pushUndoSnapshot],
+  );
+
+  const handleRelocateStructure = useCallback(
+    (fromPlotId: PlotId, toPlotId: PlotId) => {
+      if (fromPlotId === toPlotId) return;
+      const snap = stateRef.current;
+      const src = snap.structures.find((s) => s.plotId === fromPlotId);
+      if (!src) return;
+      pushUndoSnapshot();
+      const target = snap.structures.find((s) => s.plotId === toPlotId);
+      const now = Date.now();
+      setStructures((prev) =>
+        prev.map((s) => {
+          if (s.plotId === fromPlotId) return { ...s, plotId: toPlotId, updatedAtMs: now };
+          if (target && s.plotId === toPlotId) return { ...s, plotId: fromPlotId, updatedAtMs: now };
+          return s;
+        }),
+      );
+      setAgents((prev) =>
+        prev.map((a) => {
+          if (a.assignedPlotId === fromPlotId) return { ...a, assignedPlotId: toPlotId };
+          if (target && a.assignedPlotId === toPlotId) return { ...a, assignedPlotId: fromPlotId };
+          return a;
+        }),
+      );
+      setSelectedPlotId(toPlotId);
+      setFocusRequest({ type: 'plot', id: toPlotId, nonce: now });
+      soundscape.playAgentChime(2);
+    },
+    [pushUndoSnapshot],
+  );
+
+  const handleBuildDistrictKit = useCallback(
+    (kit: 'residential' | 'commerce' | 'fortress'): string => {
+      const snap = stateRef.current;
+      const costMap = { residential: 140, commerce: 150, fortress: 160 } as const;
+      const cost = costMap[kit];
+      if (snap.treasuryGold < cost) {
+        return `Need ${cost}g Treasury to build this district kit (have ${snap.treasuryGold}g).`;
+      }
+      const emptyPlots = getAvailablePlotIds(snap.unlockedBiomes).filter(
+        (pid) => !snap.structures.some((s) => s.plotId === pid),
+      );
+      if (emptyPlots.length < 2) {
+        return 'Need at least 2 open plots — unlock another biome first.';
+      }
+      pushUndoSnapshot();
+      const [p1, p2] = emptyPlots;
+      const now = Date.now();
+      const specs: Array<{
+        plotId: PlotId;
+        structureType: StructureType;
+        zone: DistrictZoneType;
+        bp?: BuildingBlueprint;
+      }> =
+        kit === 'residential'
+          ? [
+              {
+                plotId: p1,
+                structureType: 'apartment',
+                zone: 'residential',
+                bp: generateFallbackBuildingBlueprint('5-Story Maple Residences'),
+              },
+              {
+                plotId: p2,
+                structureType: 'bakery',
+                zone: 'residential',
+              },
+            ]
+          : kit === 'commerce'
+            ? [
+                {
+                  plotId: p1,
+                  structureType: 'windmill',
+                  zone: 'commercial',
+                },
+                {
+                  plotId: p2,
+                  structureType: 'custom',
+                  zone: 'commercial',
+                  bp: generateFallbackBuildingBlueprint('4-Story Trade Exchange Plaza'),
+                },
+              ]
+            : [
+                {
+                  plotId: p1,
+                  structureType: 'hospital',
+                  zone: 'civic',
+                },
+                {
+                  plotId: p2,
+                  structureType: 'triple_gun_tower',
+                  zone: 'civic',
+                },
+              ];
+
+      const newStructs: TownStructure[] = specs.map((sp, i) => ({
+        plotId: sp.plotId,
+        structureType: sp.structureType,
+        customLabel: sp.bp?.name,
+        blueprint: sp.bp,
+        status: 'complete',
+        progress: 100,
+        tier: 1,
+        proposedBy: 'District Kit',
+        lastBuilder: 'Architect Lyra',
+        updatedAtMs: now + i,
+      }));
+      setStructures((prev) => [...prev, ...newStructs]);
+      setTreasuryGold((g) => Math.max(0, g - cost));
+      setAdvanced((prev) => ({
+        ...prev,
+        zoneMap: {
+          ...prev.zoneMap,
+          [specs[0].plotId]: specs[0].zone,
+          [specs[1].plotId]: specs[1].zone,
+        },
+      }));
+      setFocusRequest({ type: 'plot', id: p1, nonce: now });
+      soundscape.playBuildCompleteChime();
+      return `Built ${kit} district kit on ${PLOT_META[p1].shortLabel} & ${PLOT_META[p2].shortLabel}!`;
+    },
+    [pushUndoSnapshot],
+  );
+
+  const handleTradeResource = useCallback(
+    (resource: keyof TownResources, side: 'buy' | 'sell', amount: number): string => {
+      const snap = stateRef.current;
+      const unitPrice = snap.advanced.marketPrices[resource];
+      const total = unitPrice * amount;
+      if (side === 'buy') {
+        if (snap.treasuryGold < total) {
+          return `Need ${total}g to buy ${amount} ${resource} (have ${snap.treasuryGold}g).`;
+        }
+        setTreasuryGold((g) => g - total);
+        setResources((r) => ({ ...r, [resource]: r[resource] + amount }));
+        soundscape.playAgentChime(2);
+        return `Bought ${amount} ${resource} for ${total}g.`;
+      }
+      if (snap.resources[resource] < amount) {
+        return `Not enough ${resource} to sell ${amount} (have ${snap.resources[resource]}).`;
+      }
+      setResources((r) => ({ ...r, [resource]: Math.max(0, r[resource] - amount) }));
+      setTreasuryGold((g) => g + total);
+      soundscape.playBuildCompleteChime();
+      return `Sold ${amount} ${resource} for +${total}g!`;
+    },
+    [],
+  );
+
+  const handleTakeLoan = useCallback(
+    (amount: 250 | 600): string => {
+      const snap = stateRef.current;
+      if (snap.advanced.activeLoan) {
+        return 'Pay off your active municipal bond before issuing a new one.';
+      }
+      const turns = amount === 250 ? 10 : 12;
+      const rateMult = 1 + creditRating.interestRatePct / 100;
+      const totalDue = Math.round(amount * rateMult);
+      const perTurn = Math.ceil(totalDue / turns);
+      setTreasuryGold((g) => g + amount);
+      setAdvanced((prev) => ({
+        ...prev,
+        activeLoan: {
+          id: `bond-${Date.now()}`,
+          label: amount === 250 ? 'Civic Development Bond' : 'Metropolitan Expansion Bond',
+          principal: amount,
+          remaining: totalDue,
+          perTurnPayment: perTurn,
+          turnsLeft: turns,
+        },
+      }));
+      soundscape.playBuildCompleteChime();
+      return `Issued +${amount}g Bond at ${creditRating.interestRatePct}% (${creditRating.grade} · ${perTurn}g/turn).`;
+    },
+    [creditRating.grade, creditRating.interestRatePct],
+  );
+
+  const handlePayOffLoan = useCallback((): string => {
+    const snap = stateRef.current;
+    const loan = snap.advanced.activeLoan;
+    if (!loan) return 'No active municipal bond.';
+    if (snap.treasuryGold < loan.remaining) {
+      return `Need ${loan.remaining}g to pay off bond early (have ${snap.treasuryGold}g).`;
+    }
+    setTreasuryGold((g) => g - loan.remaining);
+    setAdvanced((prev) => ({ ...prev, activeLoan: null }));
+    soundscape.playBuildCompleteChime();
+    return `Paid off ${loan.remaining}g Municipal Bond in full!`;
+  }, []);
+
+  const handleClaimQuest = useCallback(
+    (questId: string) => {
+      const target = quests.find((q) => q.id === questId);
+      if (!target || !target.completed || target.claimed) return;
+      setTreasuryGold((g) => g + target.rewardGold);
+      setResources((r) => ({ ...r, crystal: r.crystal + target.rewardCrystal }));
+      setAdvanced((prev) => ({
+        ...prev,
+        claimedQuestIds: prev.claimedQuestIds.includes(questId)
+          ? prev.claimedQuestIds
+          : [...prev.claimedQuestIds, questId],
+      }));
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+    },
+    [quests],
+  );
+
+  const handleFastForwardTurns = useCallback((turns: 5 | 10) => {
+    const snap = stateRef.current;
+    let gold = snap.treasuryGold;
+    let res = { ...snap.resources };
+    let prices = snap.advanced.marketPrices;
+    let loan = snap.advanced.activeLoan;
+    let hist = snap.history;
+    let morale = snap.metrics.morale;
+
+    for (let i = 1; i <= turns; i += 1) {
+      const tNum = snap.turnCount + i;
+      const econ = computeTownEconomy(
+        snap.structures,
+        snap.agents,
+        snap.weather,
+        snap.railSpurBuilt,
+        gold,
+        snap.activePolicies,
+        snap.decorPacks,
+        snap.taxRate,
+        Math.max(1, snap.trainBlueprints.length),
+        snap.advanced.unlockedTechs,
+        snap.advanced.zoneMap,
+        loan,
+        snap.advanced.agentShifts,
+      );
+      gold = Math.max(0, gold + econ.netPerTurn);
+      morale = Math.max(0, Math.min(100, morale + econ.taxMoraleEffect));
+      const rates = computeResourceRates(snap.structures, snap.unlockedBiomes, snap.activePolicies);
+      res = {
+        timber: res.timber + rates.timber,
+        stone: res.stone + rates.stone,
+        harvest: res.harvest + rates.harvest,
+        crystal: res.crystal + rates.crystal,
+      };
+      prices = stepMarketPrices(prices, res, snap.weather, tNum, snap.advanced.unlockedTechs);
+      if (loan) {
+        const remTurns = loan.turnsLeft - 1;
+        const remBal = Math.max(0, loan.remaining - loan.perTurnPayment);
+        loan = remTurns <= 0 || remBal <= 0 ? null : { ...loan, turnsLeft: remTurns, remaining: remBal };
+      }
+      hist = appendHistoryPoint(hist, {
+        turn: tNum,
+        treasuryGold: gold,
+        prosperity: snap.metrics.prosperity,
+        orderLevel: snap.metrics.orderLevel,
+        morale,
+        population: snap.agents.length,
+        buildings: snap.structures.filter((s) => s.status === 'complete').length,
+      });
+    }
+
+    setTurnCount((t) => t + turns);
+    setTreasuryGold(gold);
+    setResources(res);
+    setMetrics((m) => ({ ...m, morale }));
+    setHistory(hist);
+    setAdvanced((prev) => ({ ...prev, marketPrices: prices, activeLoan: loan }));
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleUnlockTech = useCallback((techId: TechUpgradeId): string => {
+    const snap = stateRef.current;
+    if (snap.advanced.unlockedTechs.includes(techId)) return 'Already researched.';
+    const meta = TECH_UPGRADES.find((t) => t.id === techId);
+    if (!meta) return 'Unknown technology.';
+    if (snap.treasuryGold < meta.costGold || snap.resources.crystal < meta.costCrystal) {
+      return `Need ${meta.costGold}g & ${meta.costCrystal} Crystal.`;
+    }
+    setTreasuryGold((g) => g - meta.costGold);
+    setResources((r) => ({ ...r, crystal: Math.max(0, r.crystal - meta.costCrystal) }));
+    setAdvanced((prev) => ({
+      ...prev,
+      unlockedTechs: [...prev.unlockedTechs, techId],
+    }));
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    return `Researched ${meta.label}!`;
+  }, []);
+
+  const handleLaunchFireworks = useCallback(() => {
+    setFireworksNonce((n) => n + 1);
+    setMetrics((prev) => ({ ...prev, morale: Math.min(100, prev.morale + 4) }));
+    setAdvanced((prev) => ({ ...prev, fireworksCount: prev.fireworksCount + 1 }));
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleSentimentFix = useCallback(
+    (action: NonNullable<CitizenSentimentItem['fixAction']>) => {
+      if (action === 'tax') {
+        setTaxRate(8);
+        setMetrics((m) => ({ ...m, morale: Math.min(100, m.morale + 3) }));
+        soundscape.playAgentChime(2);
+      } else if (action === 'utilities') {
+        setShowUtilityOverlay(true);
+        setStudioInitialTab('utilities');
+        setStudioDrawerOpen(true);
+      } else if (action === 'housing') {
+        const empty = getAvailablePlotIds(stateRef.current.unlockedBiomes).find(
+          (pid) => !stateRef.current.structures.some((s) => s.plotId === pid),
+        );
+        if (empty) {
+          handleBuildBlueprintOnPlot(
+            empty,
+            'apartment',
+            generateFallbackBuildingBlueprint('5-Story Sunlit Apartment'),
+          );
+        }
+      } else if (action === 'food') {
+        const empty = getAvailablePlotIds(stateRef.current.unlockedBiomes).find(
+          (pid) => !stateRef.current.structures.some((s) => s.plotId === pid),
+        );
+        if (empty) {
+          handleBuildBlueprintOnPlot(empty, 'bakery');
+        }
+      } else if (action === 'safety') {
+        setAdvanced((prev) => ({ ...prev, dronePatrolEnabled: true }));
+        const empty = getAvailablePlotIds(stateRef.current.unlockedBiomes).find(
+          (pid) => !stateRef.current.structures.some((s) => s.plotId === pid),
+        );
+        if (empty) {
+          handleBuildBlueprintOnPlot(empty, 'hospital');
+        }
+      }
+    },
+    [handleBuildBlueprintOnPlot],
+  );
+
+  const handleSetAgentShift = useCallback((agentId: AgentId, mode: AgentShiftMode) => {
+    setAdvanced((prev) => ({
+      ...prev,
+      agentShifts: { ...prev.agentShifts, [agentId]: mode },
+    }));
+  }, []);
+
+  const handleTownCoffeeBreak = useCallback(() => {
+    if (stateRef.current.treasuryGold < 20) {
+      setErrorBanner('Need 20g Treasury to sponsor a Town Coffee Break.');
+      return;
+    }
+    setTreasuryGold((g) => Math.max(0, g - 20));
+    setMetrics((m) => ({ ...m, morale: Math.min(100, m.morale + 6) }));
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleSaveCameraBookmark = useCallback((name: string) => {
+    const bm = bookmarkCaptureFnRef.current?.(name);
+    if (!bm) return;
+    setAdvanced((prev) => ({
+      ...prev,
+      cameraBookmarks: [bm, ...prev.cameraBookmarks].slice(0, 6),
+    }));
+    soundscape.playAgentChime(2);
+  }, []);
+
+  const handleGlideCameraBookmark = useCallback((bm: CameraBookmark) => {
+    setCameraMode('orbit');
+    setPovVillagerId(null);
+    setFollowActive(false);
+    setCameraFov(bm.fov);
+    setCameraBookmarkRequest({ bookmark: bm, nonce: Date.now() });
+  }, []);
+
+  const handleDeleteCameraBookmark = useCallback((id: string) => {
+    setAdvanced((prev) => ({
+      ...prev,
+      cameraBookmarks: prev.cameraBookmarks.filter((b) => b.id !== id),
+    }));
+  }, []);
+
+  const handleSaveCheckpoint = useCallback((label: string) => {
+    const snap = stateRef.current;
+    const slot: TownCheckpointSlot = {
+      id: `cp-${Date.now()}`,
+      label: label.trim().slice(0, 28) || `Turn ${snap.turnCount}`,
+      savedAtMs: Date.now(),
+      turnCount: snap.turnCount,
+      treasuryGold: snap.treasuryGold,
+      taxRate: snap.taxRate,
+      resources: { ...snap.resources },
+      metrics: { ...snap.metrics },
+      unlockedBiomes: [...snap.unlockedBiomes],
+      trainBlueprints: [...snap.trainBlueprints],
+      structures: snap.structures,
+      zoneMap: { ...snap.advanced.zoneMap },
+    };
+    setAdvanced((prev) => ({
+      ...prev,
+      checkpoints: [slot, ...prev.checkpoints].slice(0, 3),
+    }));
+    soundscape.playBuildCompleteChime();
+  }, []);
+
+  const handleLoadCheckpoint = useCallback(
+    (id: string) => {
+      const slot = stateRef.current.advanced.checkpoints.find((c) => c.id === id);
+      if (!slot) return;
+      pushUndoSnapshot();
+      setStructures(slot.structures);
+      setTreasuryGold(slot.treasuryGold);
+      setResources({ ...slot.resources });
+      setMetrics({ ...slot.metrics });
+      setUnlockedBiomes([...slot.unlockedBiomes]);
+      setTrainBlueprints([...slot.trainBlueprints]);
+      setTaxRate(slot.taxRate);
+      setAdvanced((prev) => ({ ...prev, zoneMap: { ...slot.zoneMap } }));
+      soundscape.playBuildCompleteChime();
+    },
+    [pushUndoSnapshot],
+  );
+
+  const handleDeleteCheckpoint = useCallback((id: string) => {
+    setAdvanced((prev) => ({
+      ...prev,
+      checkpoints: prev.checkpoints.filter((c) => c.id !== id),
+    }));
+  }, []);
 
   const handleDispatchCargo = useCallback(
     (targetTownId: string, resource: keyof TownResources): string => {
@@ -5826,12 +6745,15 @@ export default function App() {
         harvest: 10,
         crystal: 18,
       };
-      const mult = snap.interTownRailBuilt ? 1.35 : snap.railSpurBuilt ? 1.15 : 1.0;
+      const mult =
+        (snap.interTownRailBuilt ? 1.35 : snap.railSpurBuilt ? 1.15 : 1.0) *
+        (snap.advanced.unlockedTechs.includes('trade_tariffs') ? 1.25 : 1.0);
       const payout = Math.round(unitMap[resource] * 6 * mult);
       const destName =
         snap.savedTowns.find((t) => t.id === targetTownId)?.name ?? 'Regional Rail Exchange';
       setResources((prev) => ({ ...prev, [resource]: Math.max(0, prev[resource] - 6) }));
       setTreasuryGold((prev) => prev + payout);
+      setAdvanced((prev) => ({ ...prev, cargoDispatchedCount: prev.cargoDispatchedCount + 1 }));
       setTriggerTrainNonce((n) => n + 1);
       soundscape.playBuildCompleteChime();
       const now = Date.now();
@@ -5992,6 +6914,280 @@ export default function App() {
     [handleCreateNewTown, handleDesignTrain, handleMayorBuildStructure],
   );
 
+  // Batch 3 Handlers: Haptics, Quick-Orbit, Bulk Upgrade, Auto-Assign, Festivals, Checklist, Battery Saver & Report Card
+  const triggerHaptic = useCallback((ms = 14) => {
+    if (!stateRef.current.advanced.hapticsEnabled) return;
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate(ms);
+      }
+    } catch {
+      // Ignore unsupported devices
+    }
+  }, []);
+
+  const flashQuickToast = useCallback((msg: string) => {
+    setQuickToast(msg);
+    window.setTimeout(() => setQuickToast((prev) => (prev === msg ? null : prev)), 2800);
+  }, []);
+
+  const handleCameraNudge = useCallback(
+    (action: CameraNudgeAction) => {
+      triggerHaptic(10);
+      setCameraMode('orbit');
+      setPovVillagerId(null);
+      setCameraNudgeRequest({ action, nonce: Date.now() });
+    },
+    [triggerHaptic],
+  );
+
+  const handleBulkUpgradeTier1 = useCallback((): string => {
+    const snap = stateRef.current;
+    const eligible = snap.structures.filter((s) => s.status === 'complete' && s.tier === 1);
+    if (eligible.length === 0) return 'All completed buildings are already Tier 2+.';
+    const cost = eligible.length * 70;
+    if (snap.treasuryGold < cost) {
+      return `Need ${cost}g to upgrade ${eligible.length} buildings (have ${snap.treasuryGold}g).`;
+    }
+    pushUndoSnapshot();
+    const now = Date.now();
+    setTreasuryGold((g) => Math.max(0, g - cost));
+    setStructures((prev) =>
+      prev.map((s) =>
+        s.status === 'complete' && s.tier === 1 ? { ...s, tier: 2, updatedAtMs: now } : s,
+      ),
+    );
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    triggerHaptic(22);
+    return `Upgraded ${eligible.length} buildings to Tier 2 (-${cost}g)!`;
+  }, [pushUndoSnapshot, triggerHaptic]);
+
+  const handleAutoAssignVillagers = useCallback((): string => {
+    const snap = stateRef.current;
+    const assignedPlots = new Set(
+      snap.agents.map((a) => a.assignedPlotId).filter((pid): pid is PlotId => Boolean(pid)),
+    );
+    const unstaffedPlots = snap.structures
+      .filter((s) => s.status === 'complete' && !assignedPlots.has(s.plotId))
+      .map((s) => s.plotId);
+    const idleAgents = snap.agents.filter((a) => !a.assignedPlotId);
+    if (unstaffedPlots.length === 0) return 'Every completed building already has assigned staff.';
+    if (idleAgents.length === 0) return 'All AI villagers are already assigned to buildings.';
+    const pairs = Math.min(unstaffedPlots.length, idleAgents.length);
+    const assignMap = new Map<AgentId, PlotId>();
+    for (let i = 0; i < pairs; i += 1) {
+      assignMap.set(idleAgents[i].id, unstaffedPlots[i]);
+    }
+    setAgents((prev) =>
+      prev.map((a) => {
+        const pid = assignMap.get(a.id);
+        if (!pid) return a;
+        return { ...a, assignedPlotId: pid, activePlotId: pid };
+      }),
+    );
+    soundscape.playAgentChime(2);
+    triggerHaptic(18);
+    return `Auto-assigned ${pairs} idle villager${pairs === 1 ? '' : 's'} to unstaffed buildings!`;
+  }, [triggerHaptic]);
+
+  const handleLaunchFestival = useCallback(
+    (kind: FestivalKind): string => {
+      const snap = stateRef.current;
+      const spec = FESTIVAL_CATALOG.find((f) => f.kind === kind);
+      if (!spec) return 'Unknown festival.';
+      if (snap.treasuryGold < spec.costGold) {
+        return `Need ${spec.costGold}g to host ${spec.label} (have ${snap.treasuryGold}g).`;
+      }
+      setTreasuryGold((g) => Math.max(0, g - spec.costGold));
+      setAdvanced((prev) => ({
+        ...prev,
+        activeFestival: {
+          kind: spec.kind,
+          label: spec.label,
+          turnsLeft: spec.turns,
+          goldBonusPerTurn: spec.goldBonusPerTurn,
+          moraleBonusPerTurn: spec.moraleBonusPerTurn,
+          crystalBonusPerTurn: spec.crystalBonusPerTurn,
+        },
+      }));
+      setFireworksNonce((n) => n + 1);
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+      triggerHaptic(24);
+      return `${spec.label} launched for ${spec.turns} turns!`;
+    },
+    [triggerHaptic],
+  );
+
+  const handleAddTodo = useCallback(
+    (text: string) => {
+      const clean = text.trim().slice(0, 80);
+      if (!clean) return;
+      setAdvanced((prev) => ({
+        ...prev,
+        todos: [
+          { id: `todo-${Date.now()}`, text: clean, done: false, createdAtMs: Date.now() },
+          ...prev.todos,
+        ].slice(0, 20),
+      }));
+      triggerHaptic(10);
+    },
+    [triggerHaptic],
+  );
+
+  const handleToggleTodo = useCallback(
+    (id: string) => {
+      setAdvanced((prev) => ({
+        ...prev,
+        todos: prev.todos.map((t) => (t.id === id ? { ...t, done: !t.done } : t)),
+      }));
+      triggerHaptic(10);
+    },
+    [triggerHaptic],
+  );
+
+  const handleDeleteTodo = useCallback((id: string) => {
+    setAdvanced((prev) => ({
+      ...prev,
+      todos: prev.todos.filter((t) => t.id !== id),
+    }));
+  }, []);
+
+  const handleEnableBatterySaver = useCallback((): string => {
+    handleChangeGraphicsQuality('low');
+    setSunTimelapse(false);
+    setAdvanced((prev) => ({
+      ...prev,
+      dronePatrolEnabled: false,
+      auroraEnabled: false,
+      deliveryVanEnabled: false,
+    }));
+    triggerHaptic(16);
+    flashQuickToast('Battery Saver On · Low GFX & lite background traffic');
+    return 'Battery Saver enabled (Low GFX, paused Drone/Aurora/Van for max FPS).';
+  }, [flashQuickToast, handleChangeGraphicsQuality, triggerHaptic]);
+
+  const handleCopyReportCard = useCallback(async (): Promise<string> => {
+    const snap = stateRef.current;
+    const housing = computeTownHousingCapacity(snap.structures);
+    const report = formatTownReportCard({
+      townName: snap.townName,
+      motto: snap.advanced.townMotto,
+      turnCount: snap.turnCount,
+      treasuryGold: snap.treasuryGold,
+      netPerTurn: economy.netPerTurn,
+      prosperity: snap.metrics.prosperity,
+      morale: snap.metrics.morale,
+      buildings: snap.structures.filter((s) => s.status === 'complete').length,
+      aiAgents: snap.agents.length,
+      crowdPop: housing.dummyPopulation,
+      crowdCap: housing.housingCapacity,
+      trains: Math.max(1, snap.trainBlueprints.length),
+      tourism,
+      credit: creditRating,
+    });
+    try {
+      await navigator.clipboard.writeText(report);
+      triggerHaptic(14);
+      return 'Copied Town Report Card to clipboard!';
+    } catch {
+      return 'Clipboard blocked — open Share tab to export.';
+    }
+  }, [creditRating, economy.netPerTurn, tourism, triggerHaptic]);
+
+  const paletteQuickActions = useMemo<PaletteActionItem[]>(
+    () => [
+      {
+        id: 'qa-fireworks',
+        category: 'Action',
+        title: 'Launch 3D Fireworks Show',
+        subtitle: 'Sky burst over Town Square · +4 Morale',
+        run: handleLaunchFireworks,
+      },
+      {
+        id: 'qa-zen',
+        category: 'Camera',
+        title: zenMode ? 'Exit Zen Mode' : 'Enter Zen Mode (Hide HUD)',
+        subtitle: 'Clean full-screen 3D postcard view (Shortcut: H)',
+        run: () => setZenMode((z) => !z),
+      },
+      {
+        id: 'qa-sim5',
+        category: 'Action',
+        title: 'Fast-Forward +5 Turns',
+        subtitle: 'Simulate 5 turns of economy, market prices & loans',
+        run: () => handleFastForwardTurns(5),
+      },
+      {
+        id: 'qa-util',
+        category: 'Action',
+        title: showUtilityOverlay ? 'Hide Power & Water Grid' : 'Show Power & Water Grid',
+        subtitle: 'Toggle 3D underground supply lines',
+        run: () => setShowUtilityOverlay((v) => !v),
+      },
+      {
+        id: 'qa-zones',
+        category: 'Action',
+        title: showZoneOverlay ? 'Hide District Zones' : 'Show District Zones',
+        subtitle: 'Toggle 3D plot zoning color borders',
+        run: () => setShowZoneOverlay((v) => !v),
+      },
+      {
+        id: 'qa-walk',
+        category: 'Camera',
+        title: 'Walk Street Level (Free-Roam)',
+        subtitle: 'WASD or touch joystick walking mode',
+        run: () => handleChangeCameraMode('free_roam'),
+      },
+      {
+        id: 'qa-market',
+        category: 'Action',
+        title: 'Open Resource Market & Bonds',
+        subtitle: 'Trade Timber, Stone, Harvest, Crystal & Loans',
+        run: () => {
+          setStudioInitialTab('market');
+          setStudioDrawerOpen(true);
+        },
+      },
+      {
+        id: 'qa-tech',
+        category: 'Action',
+        title: 'Open Civic Tech Tree & Autopilot',
+        subtitle: 'Research 8 permanent town upgrades',
+        run: () => {
+          setStudioInitialTab('tech');
+          setStudioDrawerOpen(true);
+        },
+      },
+      ...(undoStack.length > 0
+        ? [
+            {
+              id: 'qa-undo',
+              category: 'Undo',
+              title: 'Undo Last Town Edit',
+              subtitle: `${undoStack.length} snapshot(s) in history (Ctrl+Z)`,
+              run: handleUndo,
+            },
+          ]
+        : []),
+    ],
+    [
+      handleLaunchFireworks,
+      zenMode,
+      handleFastForwardTurns,
+      showUtilityOverlay,
+      showZoneOverlay,
+      handleChangeCameraMode,
+      undoStack.length,
+      handleUndo,
+    ],
+  );
+
+  const remodelingStructure = plotStudioPlotId
+    ? structures.find((s) => s.plotId === plotStudioPlotId) ?? null
+    : null;
+
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-slate-950 text-slate-100">
       {/* Full-Screen 3D Town Canvas */}
@@ -6060,17 +7256,57 @@ export default function App() {
         activeTrainCameraIdx={activeTrainCameraIdx}
         onOpenPlotStudio={(pid) => {
           setSelectedPlotId(null);
+          setPlotStudioRemodel(false);
           setPlotStudioPlotId(pid);
         }}
+        onRemodelPlot={(pid) => {
+          setSelectedPlotId(null);
+          setPlotStudioRemodel(true);
+          setPlotStudioPlotId(pid);
+        }}
+        onCloneStructure={handleCloneStructure}
+        onRelocateStructure={handleRelocateStructure}
+        onSetPlotZone={handleSetPlotZone}
         onBuildBlueprintOnPlot={handleBuildBlueprintOnPlot}
         onRegisterSnapshotFn={(fn) => {
           snapshotFnRef.current = fn;
         }}
+        showUtilityOverlay={showUtilityOverlay}
+        utilityGrid={utilities}
+        showZoneOverlay={showZoneOverlay}
+        zoneMap={advanced.zoneMap}
+        dronePatrolEnabled={advanced.dronePatrolEnabled}
+        balloonsEnabled={advanced.balloonsEnabled}
+        auroraEnabled={advanced.auroraEnabled}
+        deliveryVanEnabled={advanced.deliveryVanEnabled}
+        beaconPlotId={beaconPlotId}
+        onPinBeacon={(pid) => {
+          setBeaconPlotId(pid);
+          triggerHaptic(12);
+        }}
+        lampMood={advanced.lampMood}
+        showNameplates={advanced.showNameplates}
+        cameraNudgeRequest={cameraNudgeRequest}
+        onRegisterFpsFn={(fn) => {
+          fpsFnRef.current = fn;
+        }}
+        fireworksNonce={fireworksNonce}
+        cameraFov={cameraFov}
+        sunAngle={sunAngle}
+        cameraBookmarkRequest={cameraBookmarkRequest}
+        onRegisterBookmarkCaptureFn={(fn) => {
+          bookmarkCaptureFnRef.current = fn;
+        }}
+        zenMode={zenMode}
+        onExitZenMode={() => setZenMode(false)}
         onMinimapUpdate={setMinimapCoords}
         onRaiderRadarUpdate={setRaiderRadar}
         onBusRadarUpdate={setBusRadarPos}
         onUserOrbitStart={() => setFollowActive(false)}
       />
+
+      {!zenMode && (
+      <>
 
       {/* Non-Blocking Live Emergency or Council Debate Quick Banner */}
       {activeEmergency && !studioDrawerOpen && !selectedPlotId && (
@@ -6626,16 +7862,31 @@ export default function App() {
               setStudioInitialTab('economy');
               setStudioDrawerOpen(true);
             }}
-            title="Town Studio: Tax, Heatmap, Rail Fleet, Council, Share Codes & Walk"
+            title="Town Studio: Economy, Utilities, Market, Tech, Rail, Council, Citizens, Camera & Checkpoints"
             aria-label="Open Town Studio"
             className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
-              studioDrawerOpen || heatmapMode !== 'off' || activeDebate || activeEmergency
+              studioDrawerOpen ||
+              heatmapMode !== 'off' ||
+              showUtilityOverlay ||
+              showZoneOverlay ||
+              activeDebate ||
+              activeEmergency
                 ? 'bg-amber-500/20 text-amber-200'
                 : 'text-slate-300 hover:bg-white/5 hover:text-white'
             }`}
           >
             <SlidersHorizontal className="h-4 w-4 text-amber-300" />
             <span className="hidden sm:inline">Studio</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setCommandPaletteOpen(true)}
+            title="Quick Command Search (Ctrl+K or /)"
+            aria-label="Quick Command Search"
+            className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap text-slate-300 transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Search className="h-4 w-4 text-cyan-300" />
+            <span className="hidden lg:inline">Search</span>
           </button>
           <button
             type="button"
@@ -7006,19 +8257,172 @@ export default function App() {
           </div>
         )}
 
+        {/* Mobile One-Thumb Quick-Actions Bottom Sheet */}
+        {mobileQuickOpen && !mobileTab && (
+          <div className="flex max-h-[68dvh] flex-col rounded-t-3xl border-t border-white/15 bg-slate-950/95 px-4 pt-2.5 pb-3 shadow-2xl">
+            <div className="mx-auto mb-2 h-1.5 w-10 rounded-full bg-slate-700" aria-hidden="true" />
+            <div className="mb-2.5 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-display text-sm font-semibold text-white">Quick Actions</div>
+                <div className="font-mono-tabular text-[10px] text-slate-400">
+                  {liveFps} FPS · {creditRating.grade} Credit · ★ {tourism.starRating.toFixed(1)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileQuickOpen(false)}
+                aria-label="Close quick actions"
+                className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {quickToast && (
+              <div className="mb-2 rounded-xl border border-emerald-400/30 bg-emerald-500/15 px-3 py-1.5 text-[11px] font-medium text-emerald-200">
+                {quickToast}
+              </div>
+            )}
+
+            {/* One-Thumb Camera Quick-Orbit Strip */}
+            <div className="mb-2.5 grid grid-cols-5 gap-1.5">
+              {(
+                [
+                  { action: 'left' as CameraNudgeAction, label: 'Left', Icon: RotateCcw },
+                  { action: 'right' as CameraNudgeAction, label: 'Right', Icon: RotateCw },
+                  { action: 'zoom_in' as CameraNudgeAction, label: 'In', Icon: ZoomIn },
+                  { action: 'zoom_out' as CameraNudgeAction, label: 'Out', Icon: ZoomOut },
+                  { action: 'top_down' as CameraNudgeAction, label: 'Top', Icon: Compass },
+                ] as const
+              ).map(({ action, label, Icon }) => (
+                <button
+                  key={action}
+                  type="button"
+                  onClick={() => handleCameraNudge(action)}
+                  className="flex min-h-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-white/15 bg-slate-900 text-[10px] font-semibold text-slate-200 active:bg-amber-500 active:text-slate-950"
+                >
+                  <Icon className="h-4 w-4" />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* 8 Thumb-Friendly 48px Action Tiles */}
+            <div className="grid grid-cols-4 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  setMobileQuickOpen(false);
+                  setStudioInitialTab('economy');
+                  setStudioDrawerOpen(true);
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 text-[10px] font-semibold text-amber-200"
+              >
+                <SlidersHorizontal className="h-4 w-4" />
+                <span>Studio</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(18);
+                  handleLaunchFireworks();
+                  flashQuickToast('Launched 3D Fireworks!');
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <Flame className="h-4 w-4 text-amber-300" />
+                <span>Fireworks</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  handleCapturePostcard();
+                  flashQuickToast('Snapped 3D Postcard Photo!');
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <Camera className="h-4 w-4 text-cyan-300" />
+                <span>Photo</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  setMobileQuickOpen(false);
+                  handleChangeCameraMode(cameraMode === 'free_roam' ? 'orbit' : 'free_roam');
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <Footprints className="h-4 w-4 text-emerald-300" />
+                <span>{cameraMode === 'free_roam' ? 'Orbit' : 'Walk'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(14);
+                  handleFastForwardTurns(5);
+                  flashQuickToast('Simulated +5 economic turns!');
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <FastForward className="h-4 w-4 text-amber-300" />
+                <span>+5 Turns</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  setMobileQuickOpen(false);
+                  setZenMode(true);
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <EyeOff className="h-4 w-4 text-slate-300" />
+                <span>Zen HUD</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  setMobileQuickOpen(false);
+                  setCommandPaletteOpen(true);
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <Search className="h-4 w-4 text-sky-300" />
+                <span>Search</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handleEnableBatterySaver();
+                }}
+                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-emerald-400/35 bg-emerald-500/15 text-[10px] font-semibold text-emerald-200"
+              >
+                <BatteryCharging className="h-4 w-4" />
+                <span>Battery</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Mobile Bottom Tab Bar */}
         <nav
           aria-label="Town panels"
-          className="grid grid-cols-4 border-t border-white/10 bg-slate-950/95 px-1.5 py-1"
+          className="grid grid-cols-5 border-t border-white/10 bg-slate-950/95 px-1 py-1"
         >
           <button
             type="button"
             onClick={() => {
+              triggerHaptic(10);
               setMobileTab(null);
+              setMobileQuickOpen(false);
               setTownHallPromptOpen(false);
               setMayorChatOpen(true);
             }}
-            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
+            className={`flex min-h-[46px] flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-semibold whitespace-nowrap transition-colors ${
               mayorChatOpen
                 ? 'bg-amber-500 text-slate-950'
                 : 'text-amber-300 hover:bg-amber-500/15'
@@ -7029,8 +8433,12 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => handleMobileTabToggle('hierarchy')}
-            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
+            onClick={() => {
+              triggerHaptic(10);
+              setMobileQuickOpen(false);
+              handleMobileTabToggle('hierarchy');
+            }}
+            className={`flex min-h-[46px] flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-semibold whitespace-nowrap transition-colors ${
               mobileTab === 'hierarchy'
                 ? 'bg-amber-500/15 text-amber-300'
                 : 'text-slate-300 hover:text-white'
@@ -7041,8 +8449,12 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => handleMobileTabToggle('log')}
-            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
+            onClick={() => {
+              triggerHaptic(10);
+              setMobileQuickOpen(false);
+              handleMobileTabToggle('log');
+            }}
+            className={`flex min-h-[46px] flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-semibold whitespace-nowrap transition-colors ${
               mobileTab === 'log'
                 ? 'bg-amber-500/15 text-amber-300'
                 : 'text-slate-300 hover:text-white'
@@ -7053,8 +8465,12 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => handleMobileTabToggle('decree')}
-            className={`flex min-h-[44px] items-center justify-center gap-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-colors ${
+            onClick={() => {
+              triggerHaptic(10);
+              setMobileQuickOpen(false);
+              handleMobileTabToggle('decree');
+            }}
+            className={`flex min-h-[46px] flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-semibold whitespace-nowrap transition-colors ${
               mobileTab === 'decree'
                 ? 'bg-amber-500/15 text-amber-300'
                 : 'text-slate-300 hover:text-white'
@@ -7063,8 +8479,26 @@ export default function App() {
             <MessageSquareText className="h-4 w-4" />
             <span>Decree</span>
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic(10);
+              setMobileTab(null);
+              setMobileQuickOpen((v) => !v);
+            }}
+            className={`flex min-h-[46px] flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-semibold whitespace-nowrap transition-colors ${
+              mobileQuickOpen
+                ? 'bg-cyan-500/20 text-cyan-200'
+                : 'text-cyan-300 hover:bg-cyan-500/10'
+            }`}
+          >
+            <Sparkles className="h-4 w-4" />
+            <span>Quick</span>
+          </button>
         </nav>
       </div>
+      </>
+      )}
 
       {/* AI Providers & Web Search Settings Modal */}
       <AIProvidersModal
@@ -7296,15 +8730,20 @@ export default function App() {
         onImportJson={handleImportTownJson}
       />
 
-      {/* Interactive Plot Blueprint Studio */}
+      {/* Interactive Plot Blueprint Studio (New Build & Live Remodel) */}
       <PlotBlueprintStudio
         open={Boolean(plotStudioPlotId)}
         plotId={plotStudioPlotId}
-        onClose={() => setPlotStudioPlotId(null)}
+        initialBlueprint={plotStudioRemodel ? remodelingStructure?.blueprint ?? null : null}
+        isRemodel={plotStudioRemodel}
+        onClose={() => {
+          setPlotStudioPlotId(null);
+          setPlotStudioRemodel(false);
+        }}
         onBuildOnPlot={handleBuildBlueprintOnPlot}
       />
 
-      {/* Unified Town Studio Drawer (Economy, Heatmap, Rail Fleet, Council, Share Codes, Explore) */}
+      {/* Unified Town Studio Drawer (All 20 Features across 9 Single-Line Tabs) */}
       <TownControlDrawer
         open={studioDrawerOpen}
         initialTab={studioInitialTab}
@@ -7315,13 +8754,41 @@ export default function App() {
         timeOfDay={timeOfDay}
         unlockedBiomes={unlockedBiomes}
         structures={structures}
+        agents={agents}
         resources={resources}
+        history={history}
         economy={economy}
         townNeeds={townNeeds}
+        utilities={utilities}
         taxRate={taxRate}
         onChangeTaxRate={setTaxRate}
         heatmapMode={heatmapMode}
         onChangeHeatmapMode={setHeatmapMode}
+        showUtilityOverlay={showUtilityOverlay}
+        onToggleUtilityOverlay={setShowUtilityOverlay}
+        showZoneOverlay={showZoneOverlay}
+        onToggleZoneOverlay={setShowZoneOverlay}
+        zoneMap={advanced.zoneMap}
+        onSetPlotZone={handleSetPlotZone}
+        dronePatrolEnabled={advanced.dronePatrolEnabled}
+        onToggleDronePatrol={(next) =>
+          setAdvanced((prev) => ({ ...prev, dronePatrolEnabled: next }))
+        }
+        onBuildDistrictKit={handleBuildDistrictKit}
+        marketPrices={advanced.marketPrices}
+        onTradeResource={handleTradeResource}
+        activeLoan={advanced.activeLoan}
+        onTakeLoan={handleTakeLoan}
+        onPayOffLoan={handlePayOffLoan}
+        quests={quests}
+        onClaimQuest={handleClaimQuest}
+        onFastForwardTurns={handleFastForwardTurns}
+        unlockedTechs={advanced.unlockedTechs}
+        onUnlockTech={handleUnlockTech}
+        autopilot={advanced.autopilot}
+        onChangeAutopilot={(next: AutopilotRules) =>
+          setAdvanced((prev) => ({ ...prev, autopilot: next }))
+        }
         trainBlueprints={trainBlueprints}
         activeTrainCameraIdx={activeTrainCameraIdx}
         onSelectTrainCameraIdx={setActiveTrainCameraIdx}
@@ -7345,9 +8812,116 @@ export default function App() {
           setActiveEmergency(pickEmergencyEvent(weather, unlockedBiomes, structures))
         }
         onResolveEmergency={handleResolveEmergency}
-        onImportShareCode={handleImportShareCode}
+        onLaunchFireworks={handleLaunchFireworks}
+        sentiments={sentiments}
+        onSentimentFix={handleSentimentFix}
+        agentShifts={advanced.agentShifts}
+        onSetAgentShift={handleSetAgentShift}
+        onTownCoffeeBreak={handleTownCoffeeBreak}
         cameraMode={cameraMode}
         onChangeCameraMode={(mode) => handleChangeCameraMode(mode)}
+        cameraFov={cameraFov}
+        onChangeCameraFov={setCameraFov}
+        sunAngle={sunAngle}
+        onChangeSunAngle={setSunAngle}
+        cameraBookmarks={advanced.cameraBookmarks}
+        onSaveCameraBookmark={handleSaveCameraBookmark}
+        onGlideCameraBookmark={handleGlideCameraBookmark}
+        onDeleteCameraBookmark={handleDeleteCameraBookmark}
+        onEnterZenMode={() => {
+          setStudioDrawerOpen(false);
+          setZenMode(true);
+        }}
+        onCapturePostcard={handleCapturePostcard}
+        onImportShareCode={handleImportShareCode}
+        checkpoints={advanced.checkpoints}
+        onSaveCheckpoint={handleSaveCheckpoint}
+        onLoadCheckpoint={handleLoadCheckpoint}
+        onDeleteCheckpoint={handleDeleteCheckpoint}
+        canUndo={undoStack.length > 0}
+        canRedo={redoStack.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        balloonsEnabled={advanced.balloonsEnabled}
+        onToggleBalloons={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, balloonsEnabled: next }));
+        }}
+        auroraEnabled={advanced.auroraEnabled}
+        onToggleAurora={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, auroraEnabled: next }));
+        }}
+        deliveryVanEnabled={advanced.deliveryVanEnabled}
+        onToggleDeliveryVan={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, deliveryVanEnabled: next }));
+        }}
+        lampMood={advanced.lampMood}
+        onChangeLampMood={(mood: LampMood) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, lampMood: mood }));
+        }}
+        beaconPlotId={beaconPlotId}
+        onPinBeacon={(pid) => {
+          triggerHaptic(12);
+          setBeaconPlotId(pid);
+        }}
+        activeFestival={advanced.activeFestival}
+        onLaunchFestival={handleLaunchFestival}
+        tourism={tourism}
+        creditRating={creditRating}
+        onBulkUpgradeTier1={handleBulkUpgradeTier1}
+        onAutoAssignVillagers={handleAutoAssignVillagers}
+        sunTimelapse={sunTimelapse}
+        onToggleSunTimelapse={(next) => {
+          triggerHaptic(10);
+          setSunTimelapse(next);
+        }}
+        showNameplates={advanced.showNameplates}
+        onToggleShowNameplates={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, showNameplates: next }));
+        }}
+        onCameraNudge={handleCameraNudge}
+        hapticsEnabled={advanced.hapticsEnabled}
+        onToggleHaptics={(next) =>
+          setAdvanced((prev) => ({ ...prev, hapticsEnabled: next }))
+        }
+        todos={advanced.todos}
+        onAddTodo={handleAddTodo}
+        onToggleTodo={handleToggleTodo}
+        onDeleteTodo={handleDeleteTodo}
+        townMotto={advanced.townMotto}
+        emblemColor={advanced.emblemColor}
+        onChangeTownMotto={(motto) =>
+          setAdvanced((prev) => ({ ...prev, townMotto: motto.slice(0, 70) }))
+        }
+        onChangeEmblemColor={(hex) =>
+          setAdvanced((prev) => ({ ...prev, emblemColor: hex }))
+        }
+        liveFps={liveFps}
+        graphicsQuality={graphicsQuality}
+        onEnableBatterySaver={handleEnableBatterySaver}
+        onCopyReportCard={handleCopyReportCard}
+      />
+
+      {/* Universal Quick Command Palette (Ctrl+K / Search) */}
+      <CommandPaletteModal
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        agents={agents}
+        structures={structures}
+        cameraBookmarks={advanced.cameraBookmarks}
+        onFocusAgent={(id) => {
+          setSelectedAgentId(id);
+          setFocusRequest({ type: 'agent', id, nonce: Date.now() });
+        }}
+        onFocusPlot={(pid) => {
+          handleSelectPlot(pid);
+        }}
+        onGlideBookmark={handleGlideCameraBookmark}
+        quickActions={paletteQuickActions}
       />
 
       {/* Help & AI Integration Guide Modal */}

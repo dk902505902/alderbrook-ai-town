@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeftRight,
   Bus,
   Castle,
   Check,
   Coffee,
   Coins,
   Compass,
+  Copy,
   Cross,
   Crown,
   Eye,
@@ -14,11 +16,14 @@ import {
   Footprints,
   Hammer,
   HeartPulse,
+  Map as MapIcon,
+  MapPin,
   MessageCircle,
   Moon,
   Pencil,
   Plane,
   Shield,
+  SlidersHorizontal,
   Swords,
   Target,
   TrainFront,
@@ -30,6 +35,7 @@ import {
 } from 'lucide-react';
 import {
   classifyAgentActivity,
+  DISTRICT_ZONE_META,
   getDemolishSalvageGold,
   type AgentActivityIcon,
 } from '../lib/townSystems.ts';
@@ -41,6 +47,7 @@ import {
 } from '../three/townScene.ts';
 import {
   generateFallbackBuildingBlueprint,
+  getAvailablePlotIds,
   getStructureDisplayLabel,
   PLOT_META,
   STRUCTURE_META,
@@ -48,12 +55,16 @@ import {
   type AgentRecord,
   type BiomeId,
   type BuildingBlueprint,
+  type CameraBookmark,
   type CameraMode,
+  type CameraNudgeAction,
   type DecorPackId,
+  type DistrictZoneType,
   type EnemyCityState,
   type EnemyRaidState,
   type GraphicsQuality,
   type HeatmapMode,
+  type LampMood,
   type LocationId,
   type PlotId,
   type StructureType,
@@ -62,6 +73,7 @@ import {
   type TownStructure,
   type TownTheme,
   type TrainBlueprint,
+  type UtilityGridSummary,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -148,6 +160,31 @@ interface TownViewportProps {
   onRegisterSnapshotFn?: (
     fn: ((townName: string, subtitle?: string) => string | null) | null,
   ) => void;
+  showUtilityOverlay?: boolean;
+  utilityGrid?: UtilityGridSummary;
+  showZoneOverlay?: boolean;
+  zoneMap?: Partial<Record<PlotId, DistrictZoneType>>;
+  dronePatrolEnabled?: boolean;
+  balloonsEnabled?: boolean;
+  auroraEnabled?: boolean;
+  deliveryVanEnabled?: boolean;
+  beaconPlotId?: PlotId | null;
+  onPinBeacon?: (plotId: PlotId | null) => void;
+  lampMood?: LampMood;
+  showNameplates?: boolean;
+  cameraNudgeRequest?: { action: CameraNudgeAction; nonce: number } | null;
+  onRegisterFpsFn?: (fn: (() => number) | null) => void;
+  fireworksNonce?: number;
+  cameraFov?: number;
+  sunAngle?: number;
+  cameraBookmarkRequest?: { bookmark: CameraBookmark; nonce: number } | null;
+  onRegisterBookmarkCaptureFn?: (fn: ((name: string) => CameraBookmark | null) | null) => void;
+  zenMode?: boolean;
+  onExitZenMode?: () => void;
+  onRemodelPlot?: (plotId: PlotId) => void;
+  onCloneStructure?: (plotId: PlotId) => void;
+  onRelocateStructure?: (fromPlotId: PlotId, toPlotId: PlotId) => void;
+  onSetPlotZone?: (plotId: PlotId, zone: DistrictZoneType) => void;
   onMinimapUpdate?: (coords: Record<AgentId, AgentWorldCoord>) => void;
   onRaiderRadarUpdate?: (snapshot: RaiderRadarSnapshot | null) => void;
   onBusRadarUpdate?: (pos: { x: number; z: number; atStop: boolean } | null) => void;
@@ -240,6 +277,31 @@ export function TownViewport({
   onOpenPlotStudio,
   onBuildBlueprintOnPlot,
   onRegisterSnapshotFn,
+  showUtilityOverlay = false,
+  utilityGrid,
+  showZoneOverlay = false,
+  zoneMap = {},
+  dronePatrolEnabled = true,
+  balloonsEnabled = true,
+  auroraEnabled = true,
+  deliveryVanEnabled = true,
+  beaconPlotId = null,
+  onPinBeacon,
+  lampMood = 'warm',
+  showNameplates = true,
+  cameraNudgeRequest = null,
+  onRegisterFpsFn,
+  fireworksNonce = 0,
+  cameraFov = 46,
+  sunAngle = 38,
+  cameraBookmarkRequest = null,
+  onRegisterBookmarkCaptureFn,
+  zenMode = false,
+  onExitZenMode,
+  onRemodelPlot,
+  onCloneStructure,
+  onRelocateStructure,
+  onSetPlotZone,
   onMinimapUpdate,
   onRaiderRadarUpdate,
   onBusRadarUpdate,
@@ -312,6 +374,8 @@ export function TownViewport({
     onBusRadarUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
+    onRegisterBookmarkCaptureFn,
+    onRegisterFpsFn,
     onRaiderImpact,
     onDefenseHitCamp,
     onEnemyAircraftDowned,
@@ -329,6 +393,8 @@ export function TownViewport({
     onBusRadarUpdate,
     onUserOrbitStart,
     onRegisterSnapshotFn,
+    onRegisterBookmarkCaptureFn,
+    onRegisterFpsFn,
     onRaiderImpact,
     onDefenseHitCamp,
     onEnemyAircraftDowned,
@@ -386,6 +452,10 @@ export function TownViewport({
     callbacksRef.current.onRegisterSnapshotFn?.((name, sub) =>
       controller.captureSnapshotDataUrl(name, sub),
     );
+    callbacksRef.current.onRegisterBookmarkCaptureFn?.((name) =>
+      controller.captureCameraBookmark(name),
+    );
+    callbacksRef.current.onRegisterFpsFn?.(() => controller.getCurrentFps());
 
     const snap = latestTownDataRef.current;
     controller.loadTown({
@@ -412,6 +482,8 @@ export function TownViewport({
 
     return () => {
       callbacksRef.current.onRegisterSnapshotFn?.(null);
+      callbacksRef.current.onRegisterBookmarkCaptureFn?.(null);
+      callbacksRef.current.onRegisterFpsFn?.(null);
       controller.dispose();
       controllerRef.current = null;
       loadedTownKeyRef.current = null;
@@ -519,6 +591,63 @@ export function TownViewport({
   useEffect(() => {
     controllerRef.current?.setTrainCameraIndex(activeTrainCameraIdx);
   }, [activeTrainCameraIdx, currentTownKey]);
+
+  useEffect(() => {
+    if (!utilityGrid) return;
+    controllerRef.current?.setUtilityOverlay(showUtilityOverlay, structures, utilityGrid);
+  }, [showUtilityOverlay, structures, utilityGrid, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setZoneOverlay(showZoneOverlay, zoneMap);
+  }, [showZoneOverlay, zoneMap, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setDronePatrolEnabled(dronePatrolEnabled);
+  }, [dronePatrolEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setBalloonsEnabled(balloonsEnabled);
+  }, [balloonsEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setAuroraEnabled(auroraEnabled);
+  }, [auroraEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setDeliveryVanEnabled(deliveryVanEnabled);
+  }, [deliveryVanEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setBeaconPlot(beaconPlotId);
+  }, [beaconPlotId, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setLampMood(lampMood);
+  }, [lampMood]);
+
+  useEffect(() => {
+    if (!cameraNudgeRequest) return;
+    controllerRef.current?.nudgeOrbitCamera(cameraNudgeRequest.action);
+  }, [cameraNudgeRequest]);
+
+  useEffect(() => {
+    if (fireworksNonce > 0) {
+      controllerRef.current?.launchFireworks();
+    }
+  }, [fireworksNonce]);
+
+  useEffect(() => {
+    controllerRef.current?.setCameraFov(cameraFov);
+  }, [cameraFov]);
+
+  useEffect(() => {
+    controllerRef.current?.setSunAngle(sunAngle);
+  }, [sunAngle]);
+
+  useEffect(() => {
+    if (!cameraBookmarkRequest) return;
+    controllerRef.current?.glideToCameraBookmark(cameraBookmarkRequest.bookmark);
+  }, [cameraBookmarkRequest]);
 
   useEffect(() => {
     if (!communicationEvent) return;
@@ -635,7 +764,11 @@ export function TownViewport({
       />
 
       {/* Projected Semantic DOM Nameplates, Live Work Icons & Speech Bubbles */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+      <div
+        className={`pointer-events-none absolute inset-0 overflow-hidden transition-opacity duration-200 ${
+          zenMode || !showNameplates ? 'opacity-0' : 'opacity-100'
+        }`}
+      >
         {agents.map((agent) => {
           const isActive = agent.id === activeAgentId;
           const isSelected = agent.id === selectedAgentId;
@@ -695,7 +828,7 @@ export function TownViewport({
       </div>
 
       {/* Active Raider Alert & Ironhold Assault Bar (Compact, non-obtrusive, no backdrop-blur) */}
-      {raidState.active && cameraMode === 'orbit' && !selectedPlotId && (
+      {!zenMode && raidState.active && cameraMode === 'orbit' && !selectedPlotId && (
         <div className="fixed top-18 left-1/2 z-20 flex w-[calc(100%-1rem)] max-w-md -translate-x-1/2 flex-col gap-1.5 rounded-2xl border border-rose-500/55 bg-slate-950/95 px-2.5 py-2 shadow-2xl sm:px-3 md:top-20">
           <div className="flex items-center justify-between gap-1.5 sm:gap-2">
             <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
@@ -1015,8 +1148,8 @@ export function TownViewport({
         </div>
       )}
 
-      {/* Selected Building Plot Manager (Rename, Reassign Worker, Upgrade, 2-Tap Demolish) */}
-      {selectedPlotId && (
+      {/* Selected Building Plot Manager (Rename, Reassign Worker, Remodel, Clone, Move/Swap, Zone, Upgrade, 2-Tap Demolish) */}
+      {!zenMode && selectedPlotId && (
         <div className="fixed top-18 left-1/2 z-20 w-[calc(100%-1.5rem)] max-w-sm -translate-x-1/2 rounded-2xl border border-white/15 bg-slate-950/95 p-3.5 shadow-2xl md:top-20">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
@@ -1074,14 +1207,37 @@ export function TownViewport({
                 </div>
               )}
             </div>
-            <button
-              type="button"
-              onClick={onDismissPlot}
-              aria-label="Close plot inspector"
-              className="flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              {onPinBeacon && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onPinBeacon(beaconPlotId === selectedPlotId ? null : selectedPlotId)
+                  }
+                  title={
+                    beaconPlotId === selectedPlotId
+                      ? 'Clear 3D Waypoint Beacon'
+                      : 'Pin 3D Waypoint Beacon on this plot'
+                  }
+                  className={`inline-flex min-h-[36px] items-center gap-1 rounded-lg border px-2 text-[11px] font-semibold whitespace-nowrap transition-colors ${
+                    beaconPlotId === selectedPlotId
+                      ? 'border-cyan-400 bg-cyan-400 text-slate-950'
+                      : 'border-white/15 bg-slate-900 text-cyan-200 hover:bg-slate-800'
+                  }`}
+                >
+                  <MapPin className="h-3.5 w-3.5" />
+                  <span>{beaconPlotId === selectedPlotId ? 'Pinned' : 'Pin'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onDismissPlot}
+                aria-label="Close plot inspector"
+                className="flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           {selectedStructure ? (
@@ -1149,13 +1305,93 @@ export function TownViewport({
                 </div>
               )}
 
-              {/* Upgrade & 2-Tap Demolish Actions */}
-              <div className="flex flex-wrap items-center gap-2">
+              {/* District Zone & Move / Swap Plot Controls */}
+              <div className="grid grid-cols-2 gap-1.5">
+                {onSetPlotZone && (
+                  <label className="flex flex-col gap-0.5 text-[10px] text-slate-400">
+                    <span className="inline-flex items-center gap-1">
+                      <MapIcon className="h-3 w-3 text-cyan-300" />
+                      District Zone
+                    </span>
+                    <select
+                      value={zoneMap[selectedPlotId] ?? 'mixed'}
+                      onChange={(e) =>
+                        onSetPlotZone(selectedPlotId, e.target.value as DistrictZoneType)
+                      }
+                      className="min-h-[34px] rounded-lg border border-white/15 bg-slate-900 px-2 text-[11px] text-slate-100 focus:border-cyan-400 focus:outline-none"
+                    >
+                      {(['mixed', 'residential', 'commercial', 'civic', 'tech'] as DistrictZoneType[]).map(
+                        (z) => (
+                          <option key={z} value={z}>
+                            {DISTRICT_ZONE_META[z].label}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                )}
+
+                {onRelocateStructure && (
+                  <label className="flex flex-col gap-0.5 text-[10px] text-slate-400">
+                    <span className="inline-flex items-center gap-1">
+                      <ArrowLeftRight className="h-3 w-3 text-amber-300" />
+                      Move / Swap Plot
+                    </span>
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const target = e.target.value as PlotId;
+                        if (target && target !== selectedPlotId) {
+                          onRelocateStructure(selectedPlotId, target);
+                        }
+                      }}
+                      className="min-h-[34px] rounded-lg border border-white/15 bg-slate-900 px-2 text-[11px] text-slate-100 focus:border-amber-400 focus:outline-none"
+                    >
+                      <option value="">Choose plot...</option>
+                      {getAvailablePlotIds(unlockedBiomes)
+                        .filter((pid) => pid !== selectedPlotId)
+                        .map((pid) => {
+                          const occ = structures.find((s) => s.plotId === pid);
+                          return (
+                            <option key={pid} value={pid}>
+                              {PLOT_META[pid].shortLabel} ({occ ? `Swap ${getStructureDisplayLabel(occ)}` : 'Empty'})
+                            </option>
+                          );
+                        })}
+                    </select>
+                  </label>
+                )}
+              </div>
+
+              {/* Remodel, Clone, Upgrade & 2-Tap Demolish Actions */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {onRemodelPlot && (
+                  <button
+                    type="button"
+                    onClick={() => onRemodelPlot(selectedPlotId)}
+                    className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-1 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-2.5 text-xs font-semibold whitespace-nowrap text-cyan-100 transition-colors hover:bg-cyan-500/25"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    <span>Remodel</span>
+                  </button>
+                )}
+
+                {onCloneStructure && (
+                  <button
+                    type="button"
+                    onClick={() => onCloneStructure(selectedPlotId)}
+                    className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-1 rounded-xl border border-indigo-400/40 bg-indigo-500/15 px-2.5 text-xs font-semibold whitespace-nowrap text-indigo-100 transition-colors hover:bg-indigo-500/25"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>Clone</span>
+                  </button>
+                )}
+
                 {selectedStructure.status === 'complete' && selectedStructure.tier < 3 && (
                   <button
                     type="button"
                     onClick={() => onWhisperBuildPlot(selectedPlotId, true)}
-                    className="inline-flex min-h-[40px] flex-1 items-center justify-center gap-1.5 rounded-xl border border-amber-400/40 bg-amber-500/15 px-3 text-xs font-semibold whitespace-nowrap text-amber-200 transition-colors hover:bg-amber-500/25"
+                    className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 px-2.5 text-xs font-semibold whitespace-nowrap text-amber-200 transition-colors hover:bg-amber-500/25"
                   >
                     <Hammer className="h-3.5 w-3.5" />
                     <span>Upgrade</span>
@@ -1166,7 +1402,7 @@ export function TownViewport({
                   <button
                     type="button"
                     onClick={() => setConfirmDemolish(true)}
-                    className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-500/10 px-3 text-xs font-semibold whitespace-nowrap text-rose-200 transition-colors hover:bg-rose-500/20"
+                    className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1 rounded-xl border border-rose-400/35 bg-rose-500/10 px-2.5 text-xs font-semibold whitespace-nowrap text-rose-200 transition-colors hover:bg-rose-500/20"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     <span>Demolish (+{getDemolishSalvageGold(selectedStructure)}g)</span>
@@ -1252,6 +1488,17 @@ export function TownViewport({
             </div>
           )}
         </div>
+      )}
+
+      {zenMode && onExitZenMode && (
+        <button
+          type="button"
+          onClick={onExitZenMode}
+          className="fixed right-4 bottom-4 z-40 inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-white/25 bg-slate-950/85 px-4 text-xs font-semibold whitespace-nowrap text-white shadow-2xl transition-colors hover:bg-slate-900"
+        >
+          <Eye className="h-4 w-4 text-amber-300" />
+          <span>Exit Zen Mode (H)</span>
+        </button>
       )}
 
       {contextLost && (

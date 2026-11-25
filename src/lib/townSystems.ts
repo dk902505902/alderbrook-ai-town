@@ -16,24 +16,37 @@ import {
   sanitizeBuildingBlueprint,
   sanitizeTrainBlueprint,
   STRUCTURE_META,
+  type ActiveFestivalState,
   type AgentId,
   type AgentRecord,
+  type AgentShiftMode,
   type BiomeId,
   type BuildingBlueprint,
   type BuildingEconomyRow,
+  type CitizenSentimentItem,
+  type CivicQuestItem,
   type CouncilDebateProposal,
   type CouncilProposal,
+  type CreditRatingSummary,
   type CustomBuildingStyle,
   type DecorPackId,
   type DecorPackMeta,
+  type DistrictZoneType,
   type EmergencyEventState,
+  type FestivalKind,
   type LocationId,
+  type MarketPricesState,
   type MilestoneId,
+  type MunicipalLoanState,
   type PlotId,
   type PolicyId,
+  type PriceTrend,
   type ShareCodePayload,
   type StructureType,
+  type TechUpgradeId,
+  type TechUpgradeMeta,
   type TimeOfDay,
+  type TourismSummary,
   type TownEconomySummary,
   type TownEvent,
   type TownGazetteEdition,
@@ -50,6 +63,7 @@ import {
   type TownStructure,
   type TownTheme,
   type TrainBlueprint,
+  type UtilityGridSummary,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -170,16 +184,28 @@ export function computeTownEconomy(
   decorPacks: DecorPackId[] = [],
   taxRate = 8,
   trainCount = 1,
+  unlockedTechs: TechUpgradeId[] = [],
+  zoneMap: Partial<Record<PlotId, DistrictZoneType>> = {},
+  activeLoan: MunicipalLoanState | null = null,
+  agentShifts: Partial<Record<AgentId, AgentShiftMode>> = {},
+  activeFestival: ActiveFestivalState | null = null,
+  tourismBonus = 0,
 ): TownEconomySummary {
   const rows: BuildingEconomyRow[] = [];
   let buildingRevenue = 0;
   const hasGreenCharter = activePolicies.includes('green_charter');
   const hasOpenTrade = activePolicies.includes('open_trade');
   const hasFreeBread = activePolicies.includes('free_bread');
+  const hasHighSpeedBogies = unlockedTechs.includes('high_speed_bogies');
+  const hasPrefabFloors = unlockedTechs.includes('prefab_floors');
+  const hasTradeTariffs = unlockedTechs.includes('trade_tariffs');
   const cleanTax = Math.max(0, Math.min(20, Math.round(taxRate)));
-  const taxMult = 0.65 + (cleanTax / 20) * 0.95; // 0.65x at 0% tax, ~1.03x at 8%, 1.6x at 20%
+  const taxMult = 0.65 + (cleanTax / 20) * 0.95;
   const taxMoraleEffect =
     cleanTax <= 5 ? 3 : cleanTax <= 9 ? 1 : cleanTax <= 13 ? 0 : cleanTax <= 16 ? -2 : -4;
+
+  const overtimeCount = Object.values(agentShifts).filter((m) => m === 'overtime').length;
+  const shiftBonusMult = 1 + Math.min(0.35, overtimeCount * 0.07);
 
   for (const s of structures) {
     if (s.status !== 'complete') continue;
@@ -204,6 +230,19 @@ export function computeTownEconomy(
       note += ' · Charter +15%';
     }
 
+    const zone = zoneMap[s.plotId] ?? 'mixed';
+    let zoneMult = 1.0;
+    if (zone === 'commercial') {
+      zoneMult = 1.3;
+      note += ' · Commercial +30%';
+    } else if (zone === 'tech') {
+      zoneMult = 1.2;
+      note += ' · Tech +20%';
+    } else if (zone === 'residential' && (s.structureType === 'apartment' || (s.blueprint?.apartmentCapacity ?? 0) > 0)) {
+      zoneMult = 1.25;
+      note += ' · Residential +25%';
+    }
+
     const staffed = agents.some(
       (a) => a.assignedPlotId === s.plotId || a.activePlotId === s.plotId,
     );
@@ -212,7 +251,9 @@ export function computeTownEconomy(
       note += ' · Staffed +20%';
     }
 
-    const goldPerTurn = Math.round(base * tierBonus * weatherMult * staffMult);
+    const goldPerTurn = Math.round(
+      base * tierBonus * weatherMult * staffMult * zoneMult * shiftBonusMult,
+    );
     buildingRevenue += goldPerTurn;
     rows.push({
       plotId: s.plotId,
@@ -227,22 +268,38 @@ export function computeTownEconomy(
 
   rows.sort((a, b) => b.goldPerTurn - a.goldPerTurn);
 
-  // Crowd apartment rent + train ticket revenue + tax slider
   const housing = computeTownHousingCapacity(structures);
-  const apartmentRent = Math.round(housing.dummyPopulation * (0.45 + cleanTax * 0.04));
+  const resBonus = Object.values(zoneMap).filter((z) => z === 'residential').length * 0.06;
+  const apartmentRent = Math.round(
+    housing.dummyPopulation *
+      (0.45 + cleanTax * 0.04) *
+      (1 + resBonus) *
+      (hasPrefabFloors ? 1.25 : 1.0),
+  );
   const trainTicketRevenue = Math.round(
-    Math.max(1, Math.min(3, trainCount)) * (railSpurBuilt ? 14 : 7) +
-      housing.dummyPopulation * 0.14,
+    (Math.max(1, Math.min(3, trainCount)) * (railSpurBuilt ? 14 : 7) +
+      housing.dummyPopulation * 0.14) *
+      (hasHighSpeedBogies ? 1.35 : 1.0),
   );
   const decorTourism = decorPacks.length * 3;
   const civicBaseTax = Math.round(
     (12 + Math.min(20, Math.round(agents.length * 1.5)) + decorTourism) * taxMult,
   );
-  const railwayBonus = (railSpurBuilt ? 24 : 8) + (hasOpenTrade ? 18 : 0);
+  const railwayBonus = Math.round(
+    ((railSpurBuilt ? 24 : 8) + (hasOpenTrade ? 18 : 0)) * (hasTradeTariffs ? 1.25 : 1.0),
+  );
+  const festivalGold = activeFestival ? activeFestival.goldBonusPerTurn : 0;
   const grossIncome =
-    civicBaseTax + apartmentRent + trainTicketRevenue + railwayBonus + buildingRevenue;
+    civicBaseTax +
+    apartmentRent +
+    trainTicketRevenue +
+    railwayBonus +
+    buildingRevenue +
+    festivalGold +
+    Math.max(0, Math.round(tourismBonus));
   const policyUpkeep = (hasFreeBread ? 10 : 0) + (hasGreenCharter ? 4 : 0);
-  const workerUpkeep = Math.max(0, agents.length - 5) * 4 + 8 + policyUpkeep;
+  const loanPayment = activeLoan && activeLoan.remaining > 0 ? activeLoan.perTurnPayment : 0;
+  const workerUpkeep = Math.max(0, agents.length - 5) * 4 + 8 + policyUpkeep + loanPayment;
   const netPerTurn = grossIncome - workerUpkeep;
 
   return {
@@ -1899,3 +1956,583 @@ export function decodeBlueprintShareCode(
     return { ok: false, error: 'Could not decode share code. Make sure the full code was pasted.' };
   }
 }
+
+// ============================================================================
+// 15. District Zoning, Power/Water Utilities & Civic Tech Tree
+// ============================================================================
+
+export const DISTRICT_ZONE_META: Record<
+  DistrictZoneType,
+  { label: string; shortLabel: string; hex: string; bonus: string }
+> = {
+  mixed: {
+    label: 'Mixed Civic',
+    shortLabel: 'Mixed',
+    hex: '#94a3b8',
+    bonus: 'Balanced default district',
+  },
+  residential: {
+    label: 'Residential',
+    shortLabel: 'Res',
+    hex: '#10b981',
+    bonus: '+25% apartment rent & housing appeal',
+  },
+  commercial: {
+    label: 'Commercial',
+    shortLabel: 'Comm',
+    hex: '#f59e0b',
+    bonus: '+30% building revenue per turn',
+  },
+  civic: {
+    label: 'Civic & Safety',
+    shortLabel: 'Civic',
+    hex: '#3b82f6',
+    bonus: '+15% safety, morale & emergency resilience',
+  },
+  tech: {
+    label: 'Tech & Research',
+    shortLabel: 'Tech',
+    hex: '#06b6d4',
+    bonus: '+20% building yield & +1 Crystal/turn',
+  },
+};
+
+export const TECH_UPGRADES: TechUpgradeMeta[] = [
+  {
+    id: 'smart_grid',
+    label: 'Smart Power Grid',
+    costGold: 120,
+    costCrystal: 3,
+    effect: '-30% town power consumption',
+  },
+  {
+    id: 'solar_roofs',
+    label: 'Solar Rooftops',
+    costGold: 140,
+    costCrystal: 4,
+    effect: '+24 MW clean power capacity',
+  },
+  {
+    id: 'high_speed_bogies',
+    label: 'High-Speed Rail Bogies',
+    costGold: 150,
+    costCrystal: 4,
+    effect: '+35% train ticket revenue',
+  },
+  {
+    id: 'prefab_floors',
+    label: 'Modular Prefab Floors',
+    costGold: 160,
+    costCrystal: 5,
+    effect: '+25% apartment rent yield',
+  },
+  {
+    id: 'hydroponics',
+    label: 'Hydroponic Towers',
+    costGold: 130,
+    costCrystal: 4,
+    effect: '+30 kL water recycling & Harvest boost',
+  },
+  {
+    id: 'auto_turrets',
+    label: 'Autonomous Defense AI',
+    costGold: 170,
+    costCrystal: 5,
+    effect: '+15% Town Safety & rapid repair',
+  },
+  {
+    id: 'trade_tariffs',
+    label: 'Inter-Town Trade Charter',
+    costGold: 180,
+    costCrystal: 6,
+    effect: '+25% rail trade & market sell prices',
+  },
+  {
+    id: 'civic_transit',
+    label: 'Free Electric Tram Pass',
+    costGold: 140,
+    costCrystal: 3,
+    effect: '+8 Morale floor & faster crowd commute',
+  },
+];
+
+export function computeUtilityGrid(
+  structures: TownStructure[],
+  unlockedBiomes: BiomeId[],
+  unlockedTechs: TechUpgradeId[] = [],
+): UtilityGridSummary {
+  const completed = structures.filter((s) => s.status === 'complete');
+  let powerProducedMW = 32 + (unlockedTechs.includes('solar_roofs') ? 24 : 0);
+  let waterProducedKL = 40 + (unlockedBiomes.includes('river') ? 35 : 0) + (unlockedTechs.includes('hydroponics') ? 30 : 0);
+  let powerUsedMW = 8;
+  let waterUsedKL = 10;
+
+  for (const s of completed) {
+    const floors = s.blueprint?.floors ?? 1;
+    if (s.structureType === 'windmill') {
+      powerProducedMW += 18 * s.tier;
+    } else if (s.structureType === 'clock_tower') {
+      powerProducedMW += 10 * s.tier;
+    } else if (s.structureType === 'greenhouse' || s.structureType === 'granary') {
+      waterProducedKL += 16 * s.tier;
+      powerUsedMW += 4;
+    } else if (s.structureType === 'apartment' || (s.blueprint?.apartmentCapacity ?? 0) > 0) {
+      powerUsedMW += 4 + floors * 2;
+      waterUsedKL += 6 + floors * 3;
+    } else {
+      powerUsedMW += 5 + floors;
+      waterUsedKL += 4 + floors;
+    }
+  }
+
+  if (unlockedTechs.includes('smart_grid')) {
+    powerUsedMW = Math.max(4, Math.round(powerUsedMW * 0.7));
+  }
+
+  const powerSurplusMW = powerProducedMW - powerUsedMW;
+  const waterSurplusKL = waterProducedKL - waterUsedKL;
+  const status: UtilityGridSummary['status'] =
+    powerSurplusMW < 0 || waterSurplusKL < 0
+      ? 'shortage'
+      : powerSurplusMW < 8 || waterSurplusKL < 10
+        ? 'strained'
+        : 'optimal';
+  const efficiencyMult = status === 'optimal' ? 1.05 : status === 'strained' ? 1.0 : 0.85;
+
+  return {
+    powerProducedMW,
+    powerUsedMW,
+    powerSurplusMW,
+    waterProducedKL,
+    waterUsedKL,
+    waterSurplusKL,
+    status,
+    efficiencyMult,
+  };
+}
+
+// ============================================================================
+// 16. Dynamic Resource Market Exchange & Active Civic Quests
+// ============================================================================
+
+export function stepMarketPrices(
+  prev: MarketPricesState,
+  resources: TownResources,
+  weather: WeatherMode,
+  turnCount: number,
+  unlockedTechs: TechUpgradeId[] = [],
+): MarketPricesState {
+  const tariffBoost = unlockedTechs.includes('trade_tariffs') ? 2 : 0;
+  const calc = (
+    key: 'timber' | 'stone' | 'harvest' | 'crystal',
+    base: number,
+    minP: number,
+    maxP: number,
+    phase: number,
+  ): { price: number; trend: PriceTrend } => {
+    const wave = Math.round(Math.sin(turnCount * 0.65 + phase) * 2.4);
+    const weatherMod =
+      (weather === 'winter' && key === 'timber') || (weather === 'rain' && key === 'harvest')
+        ? 2
+        : 0;
+    const scarcityMod = resources[key] < 10 ? 2 : resources[key] > 45 ? -1 : 0;
+    const next = Math.max(minP, Math.min(maxP, base + wave + weatherMod + scarcityMod + tariffBoost));
+    const trend: PriceTrend = next > prev[key] ? 'up' : next < prev[key] ? 'down' : 'flat';
+    return { price: next, trend };
+  };
+
+  const t = calc('timber', 9, 5, 18, 0.4);
+  const s = calc('stone', 11, 6, 20, 1.7);
+  const h = calc('harvest', 10, 6, 19, 3.1);
+  const c = calc('crystal', 18, 12, 34, 4.6);
+  return {
+    timber: t.price,
+    stone: s.price,
+    harvest: h.price,
+    crystal: c.price,
+    trends: {
+      timber: t.trend,
+      stone: s.trend,
+      harvest: h.trend,
+      crystal: c.trend,
+    },
+  };
+}
+
+export function evaluateCivicQuests(params: {
+  structures: TownStructure[];
+  unlockedBiomes: BiomeId[];
+  trainBlueprints: TrainBlueprint[];
+  townNeeds: TownNeedsSummary;
+  unlockedTechs: TechUpgradeId[];
+  cargoDispatchedCount: number;
+  claimedQuestIds: string[];
+}): CivicQuestItem[] {
+  const housing = computeTownHousingCapacity(params.structures);
+  const maxFloors = params.structures.reduce(
+    (mx, s) => Math.max(mx, s.blueprint?.floors ?? 1),
+    0,
+  );
+  const claimed = new Set(params.claimedQuestIds);
+
+  const defs = [
+    {
+      id: 'q_crowd_45',
+      title: 'Grow Bustling Crowd (45+ Citizens)',
+      detail: 'Build multi-story Apartments to attract 45 crowd citizens',
+      progress: housing.dummyPopulation,
+      target: 45,
+      rewardGold: 140,
+      rewardCrystal: 3,
+    },
+    {
+      id: 'q_tall_tower',
+      title: 'Reach the Skyline (5+ Floors)',
+      detail: 'Construct any 5- or 6-story procedural building',
+      progress: maxFloors,
+      target: 5,
+      rewardGold: 120,
+      rewardCrystal: 4,
+    },
+    {
+      id: 'q_fleet_2',
+      title: 'Expand Express Rail Fleet',
+      detail: 'Operate at least 2 custom trains on your railway',
+      progress: Math.max(1, params.trainBlueprints.length),
+      target: 2,
+      rewardGold: 150,
+      rewardCrystal: 3,
+    },
+    {
+      id: 'q_cargo_2',
+      title: 'Inter-Town Freight Trader',
+      detail: 'Dispatch 2 cargo shipments from the Rail tab',
+      progress: params.cargoDispatchedCount,
+      target: 2,
+      rewardGold: 130,
+      rewardCrystal: 4,
+    },
+    {
+      id: 'q_needs_80',
+      title: 'Thriving Citizen Happiness (80%)',
+      detail: 'Achieve 80% average coverage across Housing, Food, Safety & Rec',
+      progress: params.townNeeds.overall,
+      target: 80,
+      rewardGold: 180,
+      rewardCrystal: 5,
+    },
+    {
+      id: 'q_tech_2',
+      title: 'Modern Civic Innovation',
+      detail: 'Research 2 permanent upgrades in the Civic Tech Tree',
+      progress: params.unlockedTechs.length,
+      target: 2,
+      rewardGold: 160,
+      rewardCrystal: 6,
+    },
+  ];
+
+  return defs.map((d) => ({
+    ...d,
+    progress: Math.min(d.target, d.progress),
+    completed: d.progress >= d.target,
+    claimed: claimed.has(d.id),
+  }));
+}
+
+// ============================================================================
+// 17. Live Citizen Sentiment Feed & CSV Ledger Export
+// ============================================================================
+
+export function generateCitizenSentiments(params: {
+  taxRate: number;
+  townNeeds: TownNeedsSummary;
+  utilities: UtilityGridSummary;
+  weather: WeatherMode;
+  structures: TownStructure[];
+  metrics: TownMetrics;
+}): CitizenSentimentItem[] {
+  const items: CitizenSentimentItem[] = [];
+
+  if (params.utilities.status === 'shortage') {
+    items.push({
+      id: 'sent-util-low',
+      mood: 'concern',
+      speaker: 'Grid Engineer',
+      text:
+        params.utilities.powerSurplusMW < 0
+          ? `Power grid is short by ${Math.abs(params.utilities.powerSurplusMW)} MW — build a Windmill or research Solar Roofs.`
+          : `Water pressure dropped (${params.utilities.waterSurplusKL} kL) — unlock River biome or add a Greenhouse.`,
+      fixAction: 'utilities',
+    });
+  } else {
+    items.push({
+      id: 'sent-util-ok',
+      mood: 'happy',
+      speaker: 'Square Resident',
+      text: `Steady power (+${params.utilities.powerSurplusMW} MW) and fresh water keep every apartment glowing.`,
+    });
+  }
+
+  if (params.taxRate >= 15) {
+    items.push({
+      id: 'sent-tax-high',
+      mood: 'concern',
+      speaker: 'Market Baker',
+      text: `${params.taxRate}% taxes feel steep this week — lowering toward 8–10% would lift morale fast.`,
+      fixAction: 'tax',
+    });
+  } else if (params.taxRate <= 6) {
+    items.push({
+      id: 'sent-tax-low',
+      mood: 'happy',
+      speaker: 'Commuter',
+      text: `Low ${params.taxRate}% civic tax has everyone spending freely along Market Square!`,
+    });
+  }
+
+  if (params.townNeeds.housing < 65) {
+    items.push({
+      id: 'sent-housing',
+      mood: 'concern',
+      speaker: 'New Arrival',
+      text: 'Apartments are filling up fast — a 5-story residential tower would welcome more commuters.',
+      fixAction: 'housing',
+    });
+  }
+  if (params.townNeeds.food < 65) {
+    items.push({
+      id: 'sent-food',
+      mood: 'concern',
+      speaker: 'Plaza Grocer',
+      text: 'Fresh bread and produce queues are long. Another Bakery or Greenhouse would help.',
+      fixAction: 'food',
+    });
+  }
+  if (params.townNeeds.safety < 65) {
+    items.push({
+      id: 'sent-safety',
+      mood: 'concern',
+      speaker: 'Night Watch',
+      text: 'Outer lanes feel quiet at night — a Hospital, Watchtower, or Patrol Drone keeps citizens safe.',
+      fixAction: 'safety',
+    });
+  }
+
+  if (items.length < 3) {
+    const latest = params.structures[params.structures.length - 1];
+    items.push({
+      id: 'sent-skyline',
+      mood: 'happy',
+      speaker: 'Skyline Visitor',
+      text: latest
+        ? `Everyone is talking about the new ${getStructureDisplayLabel(latest)} — great skyline addition!`
+        : `Pleasant ${params.weather} weather and ${params.metrics.morale}% morale across town today.`,
+    });
+  }
+
+  return items.slice(0, 4);
+}
+
+export function exportHistoryToCsv(townName: string, history: TownHistoryPoint[]): string {
+  const header = 'Turn,TreasuryGold,Prosperity,Order,Morale,Agents,Buildings';
+  const rows = history.map(
+    (h) =>
+      `${h.turn},${h.treasuryGold},${h.prosperity},${h.orderLevel},${h.morale},${h.population},${h.buildings}`,
+  );
+  return `# ${townName} Economic Ledger\n${header}\n${rows.join('\n')}\n`;
+}
+
+// ============================================================================
+// 18. Festival Calendar, Tourism Engine, Credit Rating & Report Card
+// ============================================================================
+
+export const FESTIVAL_CATALOG: Array<{
+  kind: FestivalKind;
+  label: string;
+  costGold: number;
+  turns: number;
+  goldBonusPerTurn: number;
+  moraleBonusPerTurn: number;
+  crystalBonusPerTurn: number;
+  summary: string;
+}> = [
+  {
+    kind: 'harvest_fair',
+    label: 'Harvest Fair',
+    costGold: 45,
+    turns: 5,
+    goldBonusPerTurn: 28,
+    moraleBonusPerTurn: 3,
+    crystalBonusPerTurn: 0,
+    summary: '+28g & +3 Morale/turn for 5 turns',
+  },
+  {
+    kind: 'lantern_night',
+    label: 'Lantern & Fireworks Week',
+    costGold: 55,
+    turns: 5,
+    goldBonusPerTurn: 18,
+    moraleBonusPerTurn: 5,
+    crystalBonusPerTurn: 1,
+    summary: '+18g, +5 Morale & +1 Crystal/turn',
+  },
+  {
+    kind: 'rail_expo',
+    label: 'Grand Rail Expo',
+    costGold: 65,
+    turns: 5,
+    goldBonusPerTurn: 42,
+    moraleBonusPerTurn: 2,
+    crystalBonusPerTurn: 0,
+    summary: '+42g ticket surge & +2 Morale/turn',
+  },
+  {
+    kind: 'tech_summit',
+    label: 'Civic Tech Summit',
+    costGold: 70,
+    turns: 5,
+    goldBonusPerTurn: 22,
+    moraleBonusPerTurn: 2,
+    crystalBonusPerTurn: 3,
+    summary: '+22g & +3 Crystal/turn for research',
+  },
+];
+
+export function computeTourismSummary(params: {
+  structures: TownStructure[];
+  unlockedBiomes: BiomeId[];
+  decorPacks: DecorPackId[];
+  balloonsEnabled: boolean;
+  fireworksCount: number;
+  activeFestival: ActiveFestivalState | null;
+}): TourismSummary {
+  const completed = params.structures.filter((s) => s.status === 'complete');
+  const tallTowers = completed.filter((s) => (s.blueprint?.floors ?? 1) >= 4).length;
+  const dailyVisitors =
+    18 +
+    completed.length * 6 +
+    tallTowers * 14 +
+    params.unlockedBiomes.length * 12 +
+    params.decorPacks.length * 15 +
+    (params.balloonsEnabled ? 22 : 0) +
+    Math.min(30, params.fireworksCount * 6) +
+    (params.activeFestival ? 38 : 0);
+
+  const revenuePerTurn = Math.round(dailyVisitors * 0.24);
+  const starRating = Math.min(5, Number((2.2 + dailyVisitors / 75).toFixed(1)));
+
+  let topAttraction = 'Alderbrook Town Square';
+  if (params.activeFestival) {
+    topAttraction = params.activeFestival.label;
+  } else if (tallTowers > 0) {
+    const tallest = [...completed].sort(
+      (a, b) => (b.blueprint?.floors ?? 1) - (a.blueprint?.floors ?? 1),
+    )[0];
+    if (tallest) topAttraction = getStructureDisplayLabel(tallest);
+  } else if (params.balloonsEnabled) {
+    topAttraction = 'Skyline Hot Air Balloons';
+  } else if (params.unlockedBiomes.includes('river')) {
+    topAttraction = 'River Crossing Ferry';
+  }
+
+  return {
+    dailyVisitors,
+    revenuePerTurn,
+    starRating,
+    topAttraction,
+  };
+}
+
+export function computeCreditRating(params: {
+  treasuryGold: number;
+  netPerTurn: number;
+  utilityStatus: 'optimal' | 'strained' | 'shortage';
+  activeLoan: MunicipalLoanState | null;
+  morale: number;
+}): CreditRatingSummary {
+  let score = 55;
+  if (params.treasuryGold >= 400) score += 18;
+  else if (params.treasuryGold >= 200) score += 10;
+  else if (params.treasuryGold < 60) score -= 14;
+
+  if (params.netPerTurn >= 80) score += 18;
+  else if (params.netPerTurn >= 30) score += 10;
+  else if (params.netPerTurn < 0) score -= 22;
+
+  if (params.utilityStatus === 'optimal') score += 8;
+  else if (params.utilityStatus === 'shortage') score -= 14;
+
+  if (params.activeLoan) score -= 8;
+  if (params.morale >= 80) score += 6;
+  else if (params.morale < 50) score -= 10;
+
+  if (score >= 90) {
+    return {
+      grade: 'AAA',
+      label: 'Prime Municipal Credit',
+      interestRatePct: 8,
+      advice: 'Top solvency — municipal bonds qualify for 8% low interest.',
+    };
+  }
+  if (score >= 76) {
+    return {
+      grade: 'AA',
+      label: 'Strong Treasury Standing',
+      interestRatePct: 10,
+      advice: 'Healthy surplus — keep utilities optimal to reach AAA.',
+    };
+  }
+  if (score >= 62) {
+    return {
+      grade: 'A',
+      label: 'Stable Civic Credit',
+      interestRatePct: 12,
+      advice: 'Steady finances — upgrade Tier 1 plots to expand surplus.',
+    };
+  }
+  if (score >= 46) {
+    return {
+      grade: 'B',
+      label: 'Watchlist Credit',
+      interestRatePct: 15,
+      advice: 'Balance taxes or resolve utility shortages before borrowing.',
+    };
+  }
+  return {
+    grade: 'C',
+    label: 'High-Risk Municipal Debt',
+    interestRatePct: 18,
+    advice: 'Boost revenue via Market trades or cargo dispatches first.',
+  };
+}
+
+export function formatTownReportCard(params: {
+  townName: string;
+  motto: string;
+  turnCount: number;
+  treasuryGold: number;
+  netPerTurn: number;
+  morale: number;
+  prosperity: number;
+  aiAgents: number;
+  crowdPop: number;
+  crowdCap: number;
+  buildings: number;
+  trains: number;
+  tourism: TourismSummary;
+  credit: CreditRatingSummary;
+}): string {
+  return [
+    `${params.townName} — Town Report Card (Turn ${params.turnCount})`,
+    `"${params.motto}"`,
+    `Credit Rating: ${params.credit.grade} (${params.credit.label})`,
+    `Treasury: ${params.treasuryGold}g (${params.netPerTurn >= 0 ? '+' : ''}${params.netPerTurn}g/turn)`,
+    `Population: ${params.aiAgents} AI Council · ${params.crowdPop}/${params.crowdCap} Crowd Citizens`,
+    `Skyline: ${params.buildings} Buildings · ${params.trains} Custom Train(s)`,
+    `Tourism: ${params.tourism.starRating}/5.0 Stars · ${params.tourism.dailyVisitors} Visitors/day · Top: ${params.tourism.topAttraction}`,
+    `Civic Pulse: ${params.prosperity}% Prosperity · ${params.morale}% Morale`,
+  ].join('\n');
+}
+
+

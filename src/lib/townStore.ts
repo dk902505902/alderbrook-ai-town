@@ -60,6 +60,7 @@ import {
   type StructureStatus,
   type StructureType,
   type TimeOfDay,
+  type TownAdvancedState,
   type TownHistoryPoint,
   type TownLogItem,
   type TownMetrics,
@@ -110,20 +111,74 @@ const LOCAL_TOWN_PREFIX = 'alderbrook_local_town_slot_';
 const ENEMY_CITY_STORAGE_PREFIX = 'alderbrook_ironhold_city_v1_';
 const TOWN_EXTRAS_STORAGE_PREFIX = 'alderbrook_town_extras_v1_';
 
+export function createDefaultAdvancedState(): TownAdvancedState {
+  return {
+    zoneMap: {},
+    unlockedTechs: [],
+    activeLoan: null,
+    claimedQuestIds: [],
+    cameraBookmarks: [],
+    autopilot: {
+      autoClaimQuests: false,
+      autoBalanceTax: false,
+      autoUpgradeBuildings: false,
+      autoBuildHousing: false,
+    },
+    marketPrices: {
+      timber: 9,
+      stone: 11,
+      harvest: 10,
+      crystal: 18,
+      trends: { timber: 'flat', stone: 'flat', harvest: 'flat', crystal: 'flat' },
+    },
+    agentShifts: {},
+    checkpoints: [],
+    cargoDispatchedCount: 0,
+    fireworksCount: 0,
+    dronePatrolEnabled: true,
+    balloonsEnabled: true,
+    auroraEnabled: true,
+    deliveryVanEnabled: true,
+    lampMood: 'warm',
+    hapticsEnabled: true,
+    showNameplates: true,
+    townMotto: 'Where autonomous minds build together',
+    emblemColor: '#f59e0b',
+    todos: [
+      { id: 'todo-1', text: 'Build a 5-story Apartment for 40+ crowd citizens', done: false, createdAtMs: 1 },
+      { id: 'todo-2', text: 'Unlock River Crossing & watch the River Ferry', done: false, createdAtMs: 2 },
+      { id: 'todo-3', text: 'Launch a Town Festival & 3D Fireworks Show', done: false, createdAtMs: 3 },
+    ],
+    activeFestival: null,
+  };
+}
+
 export interface TownExtrasSidecar {
   blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>>;
   trainBlueprints: TrainBlueprint[];
   taxRate: number;
+  advanced: TownAdvancedState;
 }
 
 export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
+  const fallbackAdv = createDefaultAdvancedState();
   if (typeof window === 'undefined' || !townId) {
-    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT], taxRate: 8 };
+    return {
+      blueprintsByPlot: {},
+      trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT],
+      taxRate: 8,
+      advanced: fallbackAdv,
+    };
   }
   try {
     const raw = window.localStorage.getItem(`${TOWN_EXTRAS_STORAGE_PREFIX}${townId}`);
     if (!raw) {
-      return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT], taxRate: 8 };
+      return {
+        blueprintsByPlot: {},
+        trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT],
+        taxRate: 8,
+        advanced: fallbackAdv,
+      };
     }
     const parsed = JSON.parse(raw) as Partial<TownExtrasSidecar>;
     const blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>> = {};
@@ -140,9 +195,76 @@ export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
         : [DEFAULT_TRAIN_BLUEPRINT];
     const taxNum = Number(parsed.taxRate);
     const taxRate = Number.isFinite(taxNum) ? Math.max(0, Math.min(20, Math.round(taxNum))) : 8;
-    return { blueprintsByPlot, trainBlueprints, taxRate };
+    const rawAdv = (
+      parsed.advanced && typeof parsed.advanced === 'object' ? parsed.advanced : {}
+    ) as Partial<TownAdvancedState>;
+    const validMoods = new Set(['warm', 'amber', 'cyber', 'emerald']);
+    const advanced: TownAdvancedState = {
+      ...fallbackAdv,
+      ...rawAdv,
+      zoneMap: rawAdv.zoneMap && typeof rawAdv.zoneMap === 'object' ? rawAdv.zoneMap : {},
+      unlockedTechs: Array.isArray(rawAdv.unlockedTechs) ? rawAdv.unlockedTechs : [],
+      activeLoan: rawAdv.activeLoan ?? null,
+      claimedQuestIds: Array.isArray(rawAdv.claimedQuestIds) ? rawAdv.claimedQuestIds : [],
+      cameraBookmarks: Array.isArray(rawAdv.cameraBookmarks)
+        ? rawAdv.cameraBookmarks.slice(0, 6)
+        : [],
+      autopilot: {
+        ...fallbackAdv.autopilot,
+        ...(rawAdv.autopilot && typeof rawAdv.autopilot === 'object' ? rawAdv.autopilot : {}),
+      },
+      marketPrices: {
+        ...fallbackAdv.marketPrices,
+        ...(rawAdv.marketPrices && typeof rawAdv.marketPrices === 'object'
+          ? rawAdv.marketPrices
+          : {}),
+        trends: {
+          ...fallbackAdv.marketPrices.trends,
+          ...(rawAdv.marketPrices?.trends && typeof rawAdv.marketPrices.trends === 'object'
+            ? rawAdv.marketPrices.trends
+            : {}),
+        },
+      },
+      agentShifts:
+        rawAdv.agentShifts && typeof rawAdv.agentShifts === 'object' ? rawAdv.agentShifts : {},
+      checkpoints: Array.isArray(rawAdv.checkpoints) ? rawAdv.checkpoints.slice(0, 3) : [],
+      cargoDispatchedCount:
+        typeof rawAdv.cargoDispatchedCount === 'number' ? rawAdv.cargoDispatchedCount : 0,
+      fireworksCount: typeof rawAdv.fireworksCount === 'number' ? rawAdv.fireworksCount : 0,
+      dronePatrolEnabled:
+        typeof rawAdv.dronePatrolEnabled === 'boolean' ? rawAdv.dronePatrolEnabled : true,
+      balloonsEnabled:
+        typeof rawAdv.balloonsEnabled === 'boolean' ? rawAdv.balloonsEnabled : true,
+      auroraEnabled: typeof rawAdv.auroraEnabled === 'boolean' ? rawAdv.auroraEnabled : true,
+      deliveryVanEnabled:
+        typeof rawAdv.deliveryVanEnabled === 'boolean' ? rawAdv.deliveryVanEnabled : true,
+      lampMood:
+        typeof rawAdv.lampMood === 'string' && validMoods.has(rawAdv.lampMood)
+          ? rawAdv.lampMood
+          : 'warm',
+      hapticsEnabled:
+        typeof rawAdv.hapticsEnabled === 'boolean' ? rawAdv.hapticsEnabled : true,
+      showNameplates:
+        typeof rawAdv.showNameplates === 'boolean' ? rawAdv.showNameplates : true,
+      townMotto:
+        typeof rawAdv.townMotto === 'string' && rawAdv.townMotto.trim()
+          ? rawAdv.townMotto.slice(0, 72)
+          : fallbackAdv.townMotto,
+      emblemColor:
+        typeof rawAdv.emblemColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(rawAdv.emblemColor)
+          ? rawAdv.emblemColor
+          : fallbackAdv.emblemColor,
+      todos: Array.isArray(rawAdv.todos) ? rawAdv.todos.slice(0, 12) : fallbackAdv.todos,
+      activeFestival: rawAdv.activeFestival ?? null,
+    };
+    return { blueprintsByPlot, trainBlueprints, taxRate, advanced };
   } catch {
-    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT], taxRate: 8 };
+    return {
+      blueprintsByPlot: {},
+      trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT],
+      taxRate: 8,
+      advanced: fallbackAdv,
+    };
   }
 }
 
@@ -151,6 +273,7 @@ export function saveTownExtrasLocal(
   structures: TownStructure[],
   trainBlueprints: TrainBlueprint[],
   taxRate = 8,
+  advanced?: TownAdvancedState,
 ): void {
   if (typeof window === 'undefined' || !townId) return;
   try {
@@ -163,9 +286,15 @@ export function saveTownExtrasLocal(
     const cleanTrains =
       trainBlueprints.length > 0 ? trainBlueprints.slice(0, 3) : [DEFAULT_TRAIN_BLUEPRINT];
     const cleanTax = Math.max(0, Math.min(20, Math.round(taxRate)));
+    const payload: TownExtrasSidecar = {
+      blueprintsByPlot,
+      trainBlueprints: cleanTrains,
+      taxRate: cleanTax,
+      advanced: advanced ?? loadTownExtrasLocal(townId).advanced,
+    };
     window.localStorage.setItem(
       `${TOWN_EXTRAS_STORAGE_PREFIX}${townId}`,
-      JSON.stringify({ blueprintsByPlot, trainBlueprints: cleanTrains, taxRate: cleanTax }),
+      JSON.stringify(payload),
     );
   } catch {
     // Ignore storage quota errors
