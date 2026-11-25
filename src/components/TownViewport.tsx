@@ -58,6 +58,7 @@ import {
   type CameraBookmark,
   type CameraMode,
   type CameraNudgeAction,
+  type CinemaFilterMode,
   type DecorPackId,
   type DistrictZoneType,
   type EnemyCityState,
@@ -168,6 +169,21 @@ interface TownViewportProps {
   balloonsEnabled?: boolean;
   auroraEnabled?: boolean;
   deliveryVanEnabled?: boolean;
+  airshipEnabled?: boolean;
+  skyTramEnabled?: boolean;
+  meteorShowerEnabled?: boolean;
+  triggerMeteorNonce?: number;
+  searchlightsEnabled?: boolean;
+  rainbowEnabled?: boolean;
+  firefliesEnabled?: boolean;
+  holoEmblemEnabled?: boolean;
+  birdsEnabled?: boolean;
+  satelliteEnabled?: boolean;
+  emblemColor?: string;
+  completedWonders?: number;
+  cinemaFilter?: CinemaFilterMode;
+  photoGridOverlay?: boolean;
+  autoTurntable?: boolean;
   beaconPlotId?: PlotId | null;
   onPinBeacon?: (plotId: PlotId | null) => void;
   lampMood?: LampMood;
@@ -215,6 +231,15 @@ const ACTIVITY_COLOR_MAP: Record<AgentActivityIcon, string> = {
   chat: 'text-slate-300',
   injured: 'text-rose-400',
   medic: 'text-emerald-300',
+};
+
+const CINEMA_FILTER_STYLE: Record<CinemaFilterMode, string> = {
+  none: 'none',
+  warm_film: 'sepia(0.24) saturate(1.22) contrast(1.06)',
+  noir: 'grayscale(1) contrast(1.22) brightness(0.95)',
+  cyber_vivid: 'saturate(1.45) contrast(1.12) hue-rotate(-10deg)',
+  pastel_dream: 'saturate(0.88) brightness(1.08) contrast(0.92)',
+  vintage: 'sepia(0.38) contrast(0.94) brightness(0.98)',
 };
 
 export function TownViewport({
@@ -285,6 +310,21 @@ export function TownViewport({
   balloonsEnabled = true,
   auroraEnabled = true,
   deliveryVanEnabled = true,
+  airshipEnabled = true,
+  skyTramEnabled = true,
+  meteorShowerEnabled = true,
+  triggerMeteorNonce = 0,
+  searchlightsEnabled = false,
+  rainbowEnabled = false,
+  firefliesEnabled = true,
+  holoEmblemEnabled = true,
+  birdsEnabled = true,
+  satelliteEnabled = true,
+  emblemColor = '#f59e0b',
+  completedWonders = 0,
+  cinemaFilter = 'none',
+  photoGridOverlay = false,
+  autoTurntable = false,
   beaconPlotId = null,
   onPinBeacon,
   lampMood = 'warm',
@@ -618,6 +658,60 @@ export function TownViewport({
   }, [deliveryVanEnabled]);
 
   useEffect(() => {
+    controllerRef.current?.setAirshipEnabled(airshipEnabled);
+  }, [airshipEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setSkyTramEnabled(skyTramEnabled);
+  }, [skyTramEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setMeteorShowerEnabled(meteorShowerEnabled);
+  }, [meteorShowerEnabled]);
+
+  useEffect(() => {
+    if (triggerMeteorNonce > 0) {
+      controllerRef.current?.triggerMeteorShower();
+    }
+  }, [triggerMeteorNonce]);
+
+  useEffect(() => {
+    controllerRef.current?.setSearchlightsEnabled(searchlightsEnabled);
+  }, [searchlightsEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setRainbowEnabled(rainbowEnabled);
+  }, [rainbowEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setFirefliesEnabled(firefliesEnabled);
+  }, [firefliesEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setHoloEmblemEnabled(holoEmblemEnabled);
+  }, [holoEmblemEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setBirdsEnabled(birdsEnabled);
+  }, [birdsEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setSatelliteEnabled(satelliteEnabled);
+  }, [satelliteEnabled]);
+
+  useEffect(() => {
+    controllerRef.current?.setEmblemColor(emblemColor);
+  }, [emblemColor]);
+
+  useEffect(() => {
+    controllerRef.current?.setWonderCount(completedWonders);
+  }, [completedWonders]);
+
+  useEffect(() => {
+    controllerRef.current?.setAutoTurntable(autoTurntable);
+  }, [autoTurntable]);
+
+  useEffect(() => {
     controllerRef.current?.setBeaconPlot(beaconPlotId);
   }, [beaconPlotId, currentTownKey]);
 
@@ -760,8 +854,19 @@ export function TownViewport({
       <div
         ref={mountRef}
         className="h-full w-full touch-none select-none"
+        style={{ filter: CINEMA_FILTER_STYLE[cinemaFilter] ?? 'none' }}
         aria-label="Interactive 3D Alderbrook Town viewport"
       />
+
+      {/* Optional Rule-of-Thirds Photo Framing Grid Overlay */}
+      {photoGridOverlay && (
+        <div className="pointer-events-none absolute inset-0 z-10" aria-hidden="true">
+          <div className="absolute top-0 bottom-0 left-1/3 w-px bg-white/30" />
+          <div className="absolute top-0 bottom-0 left-2/3 w-px bg-white/30" />
+          <div className="absolute right-0 left-0 top-1/3 h-px bg-white/30" />
+          <div className="absolute right-0 left-0 top-2/3 h-px bg-white/30" />
+        </div>
+      )}
 
       {/* Projected Semantic DOM Nameplates, Live Work Icons & Speech Bubbles */}
       <div

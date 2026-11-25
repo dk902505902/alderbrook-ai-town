@@ -12,6 +12,7 @@ import {
   Cloud,
   Compass,
   Crown,
+  Dices,
   EyeOff,
   FastForward,
   Flame,
@@ -111,13 +112,16 @@ import {
   appendHistoryPoint,
   compileTownGazette,
   computeCreditRating,
+  computeEcoScore,
   computeResourceRates,
   computeTourismSummary,
   computeTownEconomy,
   computeTownNeedsMetrics,
   computeTownRank,
+  computeTownTrophies,
   computeTradeTrainPayout,
   computeUtilityGrid,
+  computeWeatherForecast,
   decodeBlueprintShareCode,
   DECOR_PACKS,
   DISTRICT_ZONE_META,
@@ -130,6 +134,7 @@ import {
   generateCouncilDebate,
   generateCouncilProposals,
   getDemolishSalvageGold,
+  MEGAPROJECT_CATALOG,
   parseTownImport,
   pickEmergencyEvent,
   pickTownEvent,
@@ -138,6 +143,7 @@ import {
   stepMarketPrices,
   TECH_UPGRADES,
   TOWN_POLICIES,
+  TRADE_PACT_CATALOG,
 } from './lib/townSystems.ts';
 import {
   loadWebSearchConfig,
@@ -192,6 +198,7 @@ import {
   type CameraBookmark,
   type CameraMode,
   type CameraNudgeAction,
+  type CinemaFilterMode,
   type CitizenSentimentItem,
   type DistrictZoneType,
   type EnemyBuildingId,
@@ -200,6 +207,8 @@ import {
   type FestivalKind,
   type ImaginedTownBlueprint,
   type LampMood,
+  type MegaprojectId,
+  type TradePactId,
   type RaiderTactic,
   type CliAgentActivity,
   type CouncilDebateOption,
@@ -628,6 +637,8 @@ export default function App() {
   const [liveFps, setLiveFps] = useState(60);
   const [beaconPlotId, setBeaconPlotId] = useState<PlotId | null>(null);
   const [sunTimelapse, setSunTimelapse] = useState(false);
+  const [autoTurntable, setAutoTurntable] = useState(false);
+  const [triggerMeteorNonce, setTriggerMeteorNonce] = useState(0);
   const [cameraNudgeRequest, setCameraNudgeRequest] = useState<{
     action: CameraNudgeAction;
     nonce: number;
@@ -1515,16 +1526,59 @@ export default function App() {
       const nextAgentIndex =
         (snap.activeAgentIndex + 1) % Math.max(1, nextAgentsList.length);
 
-      // Update Town Treasury, Tourism, Festival, Utility Grid, Market Exchange, Loans & Autopilot
+      // Update Town Treasury, Tourism, Festival, Wonders, Trade Pacts, Eco Score, Savings Vault & Autopilot
       const nextWeatherForEcon = weatherShift ? weatherShift.weather : snap.weather;
+      const turnCompletedWonders = MEGAPROJECT_CATALOG.filter(
+        (m) => (snap.advanced.megaprojectProgress[m.id] ?? 0) >= 100,
+      ).length;
+      const turnEco = computeEcoScore({
+        structures: nextStructures,
+        unlockedBiomes: snap.unlockedBiomes,
+        activePolicies: snap.activePolicies,
+        unlockedTechs: snap.advanced.unlockedTechs,
+        megaprojectProgress: snap.advanced.megaprojectProgress,
+      });
+      const turnTaxHolidayActive = snap.advanced.taxHolidayTurnsLeft > 0;
+      const turnEffectiveTax = turnTaxHolidayActive ? 0 : snap.taxRate;
       const turnTourism = computeTourismSummary({
         structures: nextStructures,
         unlockedBiomes: snap.unlockedBiomes,
         decorPacks: snap.decorPacks,
         balloonsEnabled: snap.advanced.balloonsEnabled,
-        fireworksCount: 0,
+        fireworksCount: snap.advanced.fireworksCount,
         activeFestival: snap.advanced.activeFestival,
+        airshipEnabled: snap.advanced.airshipEnabled,
+        skyTramEnabled: snap.advanced.skyTramEnabled,
+        rainbowEnabled: snap.advanced.rainbowEnabled,
+        completedWonders: turnCompletedWonders,
+        taxHolidayActive: turnTaxHolidayActive,
       });
+      let turnWonderGold = 0;
+      let turnWonderCrystal = 0;
+      for (const mp of MEGAPROJECT_CATALOG) {
+        if ((snap.advanced.megaprojectProgress[mp.id] ?? 0) >= 100) {
+          turnWonderGold += mp.goldBonusPerTurn;
+          turnWonderCrystal += mp.crystalBonusPerTurn;
+        }
+      }
+      let turnPactGold = 0;
+      let turnPactTimber = 0;
+      let turnPactStone = 0;
+      let turnPactHarvest = 0;
+      let turnPactCrystal = 0;
+      for (const pid of snap.advanced.activeTradePacts) {
+        const pact = TRADE_PACT_CATALOG.find((p) => p.id === pid);
+        if (pact) {
+          turnPactGold += pact.goldPerTurn;
+          turnPactTimber += pact.timberPerTurn;
+          turnPactStone += pact.stonePerTurn;
+          turnPactHarvest += pact.harvestPerTurn;
+          turnPactCrystal += pact.crystalPerTurn;
+        }
+      }
+      const turnMedalGold = snap.advanced.awardedMedalAgentIds.length * 12;
+      const turnExtraGold = turnWonderGold + turnPactGold + turnEco.dividendGold + turnMedalGold;
+
       const turnEcon = computeTownEconomy(
         nextStructures,
         nextAgentsList,
@@ -1533,7 +1587,7 @@ export default function App() {
         snap.treasuryGold,
         snap.activePolicies,
         snap.decorPacks,
-        snap.taxRate,
+        turnEffectiveTax,
         Math.max(1, snap.trainBlueprints.length),
         snap.advanced.unlockedTechs,
         snap.advanced.zoneMap,
@@ -1541,9 +1595,16 @@ export default function App() {
         snap.advanced.agentShifts,
         snap.advanced.activeFestival,
         turnTourism.revenuePerTurn,
+        turnExtraGold,
       );
       if (turnEcon.taxMoraleEffect !== 0) {
         nextMetrics.morale = Math.max(0, Math.min(100, nextMetrics.morale + turnEcon.taxMoraleEffect));
+      }
+      if (turnEco.moraleBonus > 0) {
+        nextMetrics.morale = Math.min(100, nextMetrics.morale + turnEco.moraleBonus);
+      }
+      if (turnTaxHolidayActive) {
+        nextMetrics.morale = Math.min(100, nextMetrics.morale + 6);
       }
       if (snap.advanced.activeFestival) {
         nextMetrics.morale = Math.min(
@@ -1555,6 +1616,11 @@ export default function App() {
         nextMetrics.morale = Math.min(68, nextMetrics.morale + 2);
       }
       let nextTreasury = Math.max(0, snap.treasuryGold + turnEcon.netPerTurn);
+      const nextVaultGold =
+        snap.advanced.savingsVaultGold > 0
+          ? Math.round(snap.advanced.savingsVaultGold * 1.04)
+          : 0;
+      const nextTaxHolidayTurns = Math.max(0, snap.advanced.taxHolidayTurnsLeft - 1);
       const turnResRates = computeResourceRates(
         nextStructures,
         snap.unlockedBiomes,
@@ -1564,10 +1630,16 @@ export default function App() {
       const hydroBonus = snap.advanced.unlockedTechs.includes('hydroponics') ? 2 : 0;
       const festCrystalBonus = snap.advanced.activeFestival?.crystalBonusPerTurn ?? 0;
       const nextResources: TownResources = {
-        timber: snap.resources.timber + turnResRates.timber,
-        stone: snap.resources.stone + turnResRates.stone,
-        harvest: snap.resources.harvest + turnResRates.harvest + hydroBonus,
-        crystal: snap.resources.crystal + turnResRates.crystal + techZoneBonus + festCrystalBonus,
+        timber: snap.resources.timber + turnResRates.timber + turnPactTimber,
+        stone: snap.resources.stone + turnResRates.stone + turnPactStone,
+        harvest: snap.resources.harvest + turnResRates.harvest + hydroBonus + turnPactHarvest,
+        crystal:
+          snap.resources.crystal +
+          turnResRates.crystal +
+          techZoneBonus +
+          festCrystalBonus +
+          turnWonderCrystal +
+          turnPactCrystal,
       };
       // Advance fluctuating Market Exchange prices, Festival timer & service active Municipal Loan
       const nextMarketPrices = stepMarketPrices(
@@ -1676,6 +1748,8 @@ export default function App() {
         activeLoan: nextLoan,
         claimedQuestIds: nextClaimedQuests,
         activeFestival: nextActiveFestival,
+        savingsVaultGold: nextVaultGold,
+        taxHolidayTurnsLeft: nextTaxHolidayTurns,
       }));
       const nextHistory = appendHistoryPoint(snap.history, {
         turn: nextTurnNumber,
@@ -1937,6 +2011,29 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [isPlaying, runTurn]);
 
+  const completedWonders = useMemo(
+    () =>
+      MEGAPROJECT_CATALOG.filter((m) => (advanced.megaprojectProgress[m.id] ?? 0) >= 100).length,
+    [advanced.megaprojectProgress],
+  );
+
+  const ecoScore = useMemo(
+    () =>
+      computeEcoScore({
+        structures,
+        unlockedBiomes,
+        activePolicies,
+        unlockedTechs: advanced.unlockedTechs,
+        megaprojectProgress: advanced.megaprojectProgress,
+      }),
+    [structures, unlockedBiomes, activePolicies, advanced.unlockedTechs, advanced.megaprojectProgress],
+  );
+
+  const weatherForecast = useMemo(
+    () => computeWeatherForecast(weather, turnCount),
+    [weather, turnCount],
+  );
+
   const tourism = useMemo(
     () =>
       computeTourismSummary({
@@ -1944,18 +2041,49 @@ export default function App() {
         unlockedBiomes,
         decorPacks,
         balloonsEnabled: advanced.balloonsEnabled,
-        fireworksCount: fireworksNonce,
+        fireworksCount: advanced.fireworksCount,
         activeFestival: advanced.activeFestival,
+        airshipEnabled: advanced.airshipEnabled,
+        skyTramEnabled: advanced.skyTramEnabled,
+        rainbowEnabled: advanced.rainbowEnabled,
+        completedWonders,
+        taxHolidayActive: advanced.taxHolidayTurnsLeft > 0,
       }),
     [
       structures,
       unlockedBiomes,
       decorPacks,
       advanced.balloonsEnabled,
-      fireworksNonce,
+      advanced.fireworksCount,
       advanced.activeFestival,
+      advanced.airshipEnabled,
+      advanced.skyTramEnabled,
+      advanced.rainbowEnabled,
+      completedWonders,
+      advanced.taxHolidayTurnsLeft,
     ],
   );
+
+  const extraEconomyGold = useMemo(() => {
+    let total = ecoScore.dividendGold + advanced.awardedMedalAgentIds.length * 12;
+    for (const mp of MEGAPROJECT_CATALOG) {
+      if ((advanced.megaprojectProgress[mp.id] ?? 0) >= 100) {
+        total += mp.goldBonusPerTurn;
+      }
+    }
+    for (const pid of advanced.activeTradePacts) {
+      const pact = TRADE_PACT_CATALOG.find((p) => p.id === pid);
+      if (pact) total += pact.goldPerTurn;
+    }
+    return total;
+  }, [
+    ecoScore.dividendGold,
+    advanced.awardedMedalAgentIds.length,
+    advanced.megaprojectProgress,
+    advanced.activeTradePacts,
+  ]);
+
+  const effectiveTaxRate = advanced.taxHolidayTurnsLeft > 0 ? 0 : taxRate;
 
   const economy = useMemo(
     () =>
@@ -1967,7 +2095,7 @@ export default function App() {
         treasuryGold,
         activePolicies,
         decorPacks,
-        taxRate,
+        effectiveTaxRate,
         Math.max(1, trainBlueprints.length),
         advanced.unlockedTechs,
         advanced.zoneMap,
@@ -1975,6 +2103,7 @@ export default function App() {
         advanced.agentShifts,
         advanced.activeFestival,
         tourism.revenuePerTurn,
+        extraEconomyGold,
       ),
     [
       structures,
@@ -1984,7 +2113,7 @@ export default function App() {
       treasuryGold,
       activePolicies,
       decorPacks,
-      taxRate,
+      effectiveTaxRate,
       trainBlueprints.length,
       advanced.unlockedTechs,
       advanced.zoneMap,
@@ -1992,12 +2121,13 @@ export default function App() {
       advanced.agentShifts,
       advanced.activeFestival,
       tourism.revenuePerTurn,
+      extraEconomyGold,
     ],
   );
 
   const townNeeds = useMemo(
-    () => computeTownNeedsMetrics(structures, agents, unlockedBiomes, taxRate),
-    [structures, agents, unlockedBiomes, taxRate],
+    () => computeTownNeedsMetrics(structures, agents, unlockedBiomes, effectiveTaxRate),
+    [structures, agents, unlockedBiomes, effectiveTaxRate],
   );
 
   const utilities = useMemo(
@@ -2016,6 +2146,45 @@ export default function App() {
       }),
     [treasuryGold, economy.netPerTurn, utilities.status, advanced.activeLoan, metrics.morale],
   );
+
+  const trophies = useMemo(
+    () =>
+      computeTownTrophies({
+        structures,
+        agents,
+        treasuryGold,
+        savingsVaultGold: advanced.savingsVaultGold,
+        unlockedBiomes,
+        trainCount: Math.max(1, trainBlueprints.length),
+        completedWonders,
+        activeTradePacts: advanced.activeTradePacts.length,
+        ecoScore: ecoScore.score,
+        tourismStars: tourism.starRating,
+        creditGrade: creditRating.grade,
+        fireworksCount: advanced.fireworksCount,
+        awardedMedals: advanced.awardedMedalAgentIds.length,
+      }),
+    [
+      structures,
+      agents,
+      treasuryGold,
+      advanced.savingsVaultGold,
+      unlockedBiomes,
+      trainBlueprints.length,
+      completedWonders,
+      advanced.activeTradePacts.length,
+      ecoScore.score,
+      tourism.starRating,
+      creditRating.grade,
+      advanced.fireworksCount,
+      advanced.awardedMedalAgentIds.length,
+    ],
+  );
+
+  // Sync Master Soundscape Volume
+  useEffect(() => {
+    soundscape.setVolume(advanced.soundVolume);
+  }, [advanced.soundVolume]);
 
   // Live Cinematic Sun Timelapse Mode
   useEffect(() => {
@@ -4142,7 +4311,10 @@ export default function App() {
 
   const handleCapturePostcard = useCallback(() => {
     const snap = stateRef.current;
-    const subtitle = `Turn ${snap.turnCount} · ${snap.agents.length} Citizens · ${snap.structures.filter((s) => s.status === 'complete').length} Buildings`;
+    const customCaption = snap.advanced.postcardCaption.trim();
+    const subtitle =
+      customCaption ||
+      `Turn ${snap.turnCount} · ${snap.agents.length} Citizens · ${snap.structures.filter((s) => s.status === 'complete').length} Buildings`;
     const url = snapshotFnRef.current?.(snap.townName, subtitle) ?? null;
     if (url) {
       setLastPostcardDataUrl(url);
@@ -6516,6 +6688,8 @@ export default function App() {
   const handleFastForwardTurns = useCallback((turns: 5 | 10) => {
     const snap = stateRef.current;
     let gold = snap.treasuryGold;
+    let vaultGold = snap.advanced.savingsVaultGold;
+    let taxHol = snap.advanced.taxHolidayTurnsLeft;
     let res = { ...snap.resources };
     let prices = snap.advanced.marketPrices;
     let loan = snap.advanced.activeLoan;
@@ -6524,6 +6698,7 @@ export default function App() {
 
     for (let i = 1; i <= turns; i += 1) {
       const tNum = snap.turnCount + i;
+      const effTax = taxHol > 0 ? 0 : snap.taxRate;
       const econ = computeTownEconomy(
         snap.structures,
         snap.agents,
@@ -6532,15 +6707,20 @@ export default function App() {
         gold,
         snap.activePolicies,
         snap.decorPacks,
-        snap.taxRate,
+        effTax,
         Math.max(1, snap.trainBlueprints.length),
         snap.advanced.unlockedTechs,
         snap.advanced.zoneMap,
         loan,
         snap.advanced.agentShifts,
+        snap.advanced.activeFestival,
+        tourism.revenuePerTurn,
+        extraEconomyGold,
       );
       gold = Math.max(0, gold + econ.netPerTurn);
-      morale = Math.max(0, Math.min(100, morale + econ.taxMoraleEffect));
+      if (vaultGold > 0) vaultGold = Math.round(vaultGold * 1.04);
+      morale = Math.max(0, Math.min(100, morale + econ.taxMoraleEffect + (taxHol > 0 ? 4 : 0)));
+      if (taxHol > 0) taxHol -= 1;
       const rates = computeResourceRates(snap.structures, snap.unlockedBiomes, snap.activePolicies);
       res = {
         timber: res.timber + rates.timber,
@@ -6570,9 +6750,15 @@ export default function App() {
     setResources(res);
     setMetrics((m) => ({ ...m, morale }));
     setHistory(hist);
-    setAdvanced((prev) => ({ ...prev, marketPrices: prices, activeLoan: loan }));
+    setAdvanced((prev) => ({
+      ...prev,
+      marketPrices: prices,
+      activeLoan: loan,
+      savingsVaultGold: vaultGold,
+      taxHolidayTurnsLeft: taxHol,
+    }));
     soundscape.playBuildCompleteChime();
-  }, []);
+  }, [extraEconomyGold, tourism.revenuePerTurn]);
 
   const handleUnlockTech = useCallback((techId: TechUpgradeId): string => {
     const snap = stateRef.current;
@@ -7057,15 +7243,20 @@ export default function App() {
   const handleEnableBatterySaver = useCallback((): string => {
     handleChangeGraphicsQuality('low');
     setSunTimelapse(false);
+    setAutoTurntable(false);
     setAdvanced((prev) => ({
       ...prev,
       dronePatrolEnabled: false,
       auroraEnabled: false,
       deliveryVanEnabled: false,
+      skyTramEnabled: false,
+      firefliesEnabled: false,
+      satelliteEnabled: false,
+      searchlightsEnabled: false,
     }));
     triggerHaptic(16);
     flashQuickToast('Battery Saver On · Low GFX & lite background traffic');
-    return 'Battery Saver enabled (Low GFX, paused Drone/Aurora/Van for max FPS).';
+    return 'Battery Saver enabled (Low GFX, paused heavy sky & street traffic for max FPS).';
   }, [flashQuickToast, handleChangeGraphicsQuality, triggerHaptic]);
 
   const handleCopyReportCard = useCallback(async (): Promise<string> => {
@@ -7095,6 +7286,320 @@ export default function App() {
       return 'Clipboard blocked — open Share tab to export.';
     }
   }, [creditRating, economy.netPerTurn, tourism, triggerHaptic]);
+
+  // Batch 4 Handlers: Megaprojects, Trade Pacts, Savings Vault, Tax Holiday, Grant, Transmuter, Medals, Rush Builds, Journal, Surprise Me!, Reset Visuals & JSON Backup
+  const handleInvestMegaproject = useCallback(
+    (id: MegaprojectId): string => {
+      const snap = stateRef.current;
+      const spec = MEGAPROJECT_CATALOG.find((m) => m.id === id);
+      if (!spec) return 'Unknown megaproject.';
+      const cur = snap.advanced.megaprojectProgress[id] ?? 0;
+      if (cur >= 100) return `${spec.label} is already complete!`;
+      if (
+        snap.treasuryGold < spec.stageCostGold ||
+        snap.resources.crystal < spec.stageCostCrystal
+      ) {
+        return `Need ${spec.stageCostGold}g & ${spec.stageCostCrystal} Crystal.`;
+      }
+      const nextPct = Math.min(100, cur + 25);
+      setTreasuryGold((g) => Math.max(0, g - spec.stageCostGold));
+      setResources((r) => ({
+        ...r,
+        crystal: Math.max(0, r.crystal - spec.stageCostCrystal),
+      }));
+      setAdvanced((prev) => ({
+        ...prev,
+        megaprojectProgress: { ...prev.megaprojectProgress, [id]: nextPct },
+      }));
+      if (nextPct >= 100) {
+        setFireworksNonce((n) => n + 1);
+        setTriggerCelebrationNonce((n) => n + 1);
+      }
+      soundscape.playBuildCompleteChime();
+      triggerHaptic(22);
+      return nextPct >= 100
+        ? `Wonder Complete: ${spec.label}!`
+        : `${spec.label} advanced to ${nextPct}%!`;
+    },
+    [triggerHaptic],
+  );
+
+  const handleToggleTradePact = useCallback(
+    (id: TradePactId): string => {
+      const snap = stateRef.current;
+      const spec = TRADE_PACT_CATALOG.find((p) => p.id === id);
+      if (!spec) return 'Unknown trade pact.';
+      const active = snap.advanced.activeTradePacts.includes(id);
+      if (active) {
+        setAdvanced((prev) => ({
+          ...prev,
+          activeTradePacts: prev.activeTradePacts.filter((p) => p !== id),
+        }));
+        triggerHaptic(10);
+        return `Cancelled trade pact with ${spec.cityName}.`;
+      }
+      if (snap.treasuryGold < spec.signingFeeGold) {
+        return `Need ${spec.signingFeeGold}g signing fee for ${spec.cityName}.`;
+      }
+      setTreasuryGold((g) => Math.max(0, g - spec.signingFeeGold));
+      setAdvanced((prev) => ({
+        ...prev,
+        activeTradePacts: [...prev.activeTradePacts, id],
+      }));
+      soundscape.playAgentChime(2);
+      triggerHaptic(18);
+      return `Signed Sister-City Pact with ${spec.cityName}!`;
+    },
+    [triggerHaptic],
+  );
+
+  const handleVaultTransfer = useCallback(
+    (delta: number): string => {
+      const snap = stateRef.current;
+      if (delta > 0) {
+        if (snap.treasuryGold < delta) {
+          return `Need ${delta}g in Treasury to deposit (have ${snap.treasuryGold}g).`;
+        }
+        setTreasuryGold((g) => Math.max(0, g - delta));
+        setAdvanced((prev) => ({
+          ...prev,
+          savingsVaultGold: prev.savingsVaultGold + delta,
+        }));
+        triggerHaptic(12);
+        return `Deposited +${delta}g into Savings Vault (+4%/turn).`;
+      }
+      const amt = Math.min(Math.abs(delta), snap.advanced.savingsVaultGold);
+      if (amt <= 0) return 'Savings Vault is empty.';
+      setTreasuryGold((g) => g + amt);
+      setAdvanced((prev) => ({
+        ...prev,
+        savingsVaultGold: Math.max(0, prev.savingsVaultGold - amt),
+      }));
+      triggerHaptic(12);
+      return `Withdrew ${amt}g from Savings Vault to Treasury.`;
+    },
+    [triggerHaptic],
+  );
+
+  const handleStartTaxHoliday = useCallback((): string => {
+    if (stateRef.current.advanced.taxHolidayTurnsLeft > 0) {
+      return 'Tax Holiday is already active.';
+    }
+    setAdvanced((prev) => ({ ...prev, taxHolidayTurnsLeft: 3 }));
+    setMetrics((m) => ({ ...m, morale: Math.min(100, m.morale + 5) }));
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    triggerHaptic(18);
+    return 'Declared 3-Turn Civic Tax Holiday (0% Tax, +6 Morale/turn, +25% Tourism)!';
+  }, [triggerHaptic]);
+
+  const turnsUntilGrant = Math.max(0, 5 - (turnCount - advanced.lastGrantTurn));
+  const canClaimGrant = turnsUntilGrant === 0;
+
+  const handleClaimRegionalGrant = useCallback((): string => {
+    const snap = stateRef.current;
+    const wait = Math.max(0, 5 - (snap.turnCount - snap.advanced.lastGrantTurn));
+    if (wait > 0) return `Next Regional Grant available in ${wait} turn(s).`;
+    const goldBonus =
+      creditRating.grade === 'AAA'
+        ? 220
+        : creditRating.grade === 'AA'
+          ? 175
+          : creditRating.grade === 'A'
+            ? 140
+            : 110;
+    const crystalBonus = creditRating.grade === 'AAA' || creditRating.grade === 'AA' ? 4 : 2;
+    setTreasuryGold((g) => g + goldBonus);
+    setResources((r) => ({ ...r, crystal: r.crystal + crystalBonus }));
+    setAdvanced((prev) => ({ ...prev, lastGrantTurn: snap.turnCount }));
+    soundscape.playBuildCompleteChime();
+    triggerHaptic(20);
+    return `Claimed Regional Grant: +${goldBonus}g & +${crystalBonus} Crystal (${creditRating.grade} tier)!`;
+  }, [creditRating.grade, triggerHaptic]);
+
+  const handleTransmuteResource = useCallback(
+    (dir: 'to_crystal' | 'from_crystal'): string => {
+      const snap = stateRef.current;
+      if (dir === 'to_crystal') {
+        if (
+          snap.resources.timber < 12 ||
+          snap.resources.stone < 12 ||
+          snap.resources.harvest < 12
+        ) {
+          return 'Need 12 Timber, 12 Stone & 12 Harvest to refine 3 Crystal.';
+        }
+        setResources((r) => ({
+          timber: Math.max(0, r.timber - 12),
+          stone: Math.max(0, r.stone - 12),
+          harvest: Math.max(0, r.harvest - 12),
+          crystal: r.crystal + 3,
+        }));
+        soundscape.playAgentChime(3);
+        triggerHaptic(16);
+        return 'Refined 12 Timber/Stone/Harvest into +3 Crystal!';
+      }
+      if (snap.resources.crystal < 3) {
+        return 'Need 3 Crystal to synthesize +10 Timber, Stone & Harvest.';
+      }
+      setResources((r) => ({
+        timber: r.timber + 10,
+        stone: r.stone + 10,
+        harvest: r.harvest + 10,
+        crystal: Math.max(0, r.crystal - 3),
+      }));
+      soundscape.playAgentChime(2);
+      triggerHaptic(16);
+      return 'Synthesized 3 Crystal into +10 Timber, +10 Stone & +10 Harvest!';
+    },
+    [triggerHaptic],
+  );
+
+  const handleToggleMedal = useCallback(
+    (agentId: AgentId): string => {
+      const snap = stateRef.current;
+      const agent = snap.agents.find((a) => a.id === agentId);
+      const name = agent?.name ?? 'Villager';
+      const has = snap.advanced.awardedMedalAgentIds.includes(agentId);
+      setAdvanced((prev) => ({
+        ...prev,
+        awardedMedalAgentIds: has
+          ? prev.awardedMedalAgentIds.filter((id) => id !== agentId)
+          : [...prev.awardedMedalAgentIds, agentId],
+      }));
+      soundscape.playAgentChime(has ? 1 : 3);
+      triggerHaptic(16);
+      return has
+        ? `Revoked Medal of Honor from ${name}.`
+        : `Awarded Mayor's Medal of Honor to ${name} (+12g/turn)!`;
+    },
+    [triggerHaptic],
+  );
+
+  const handleRushAllConstruction = useCallback((): string => {
+    const snap = stateRef.current;
+    const building = snap.structures.filter((s) => s.status === 'building');
+    if (building.length === 0) return 'No buildings are currently under construction.';
+    const cost = building.length * 40;
+    if (snap.treasuryGold < cost) {
+      return `Need ${cost}g to rush ${building.length} build(s) (have ${snap.treasuryGold}g).`;
+    }
+    pushUndoSnapshot();
+    const now = Date.now();
+    setTreasuryGold((g) => Math.max(0, g - cost));
+    setStructures((prev) =>
+      prev.map((s) =>
+        s.status === 'building' ? { ...s, status: 'complete', progress: 100, updatedAtMs: now } : s,
+      ),
+    );
+    setTriggerCelebrationNonce((n) => n + 1);
+    soundscape.playBuildCompleteChime();
+    triggerHaptic(22);
+    return `Completed all ${building.length} active build(s) instantly (-${cost}g)!`;
+  }, [pushUndoSnapshot, triggerHaptic]);
+
+  const handleAddJournalEntry = useCallback(
+    (text: string) => {
+      const clean = text.trim().slice(0, 140);
+      if (!clean) return;
+      setAdvanced((prev) => ({
+        ...prev,
+        journalEntries: [
+          {
+            id: `j-${Date.now()}`,
+            turn: stateRef.current.turnCount,
+            text: clean,
+            createdAtMs: Date.now(),
+          },
+          ...prev.journalEntries,
+        ].slice(0, 30),
+      }));
+      triggerHaptic(10);
+    },
+    [triggerHaptic],
+  );
+
+  const handleDeleteJournalEntry = useCallback((id: string) => {
+    setAdvanced((prev) => ({
+      ...prev,
+      journalEntries: prev.journalEntries.filter((e) => e.id !== id),
+    }));
+  }, []);
+
+  const handleJumpLandmark = useCallback(
+    (target: 'town_hall' | 'rail' | 'plaza' | 'reset') => {
+      triggerHaptic(10);
+      setCameraMode('orbit');
+      setPovVillagerId(null);
+      if (target === 'town_hall') {
+        setFocusRequest({ type: 'location', id: 'town_hall', nonce: Date.now() });
+      } else if (target === 'rail') {
+        setFocusRequest({ type: 'rail_spur', nonce: Date.now() });
+      } else if (target === 'plaza') {
+        setFocusRequest({ type: 'location', id: 'park', nonce: Date.now() });
+      } else {
+        setFocusRequest({ type: 'reset', nonce: Date.now() });
+      }
+    },
+    [triggerHaptic],
+  );
+
+  const handleSurpriseAtmosphere = useCallback((): string => {
+    const moods: LampMood[] = ['warm', 'amber', 'cyber', 'emerald'];
+    const filters: CinemaFilterMode[] = [
+      'none',
+      'warm_film',
+      'cyber_vivid',
+      'pastel_dream',
+      'vintage',
+    ];
+    const tods: TimeOfDay[] = ['dawn', 'day', 'twilight', 'night'];
+    const pickMood = moods[Math.floor(Math.random() * moods.length)];
+    const pickFilter = filters[Math.floor(Math.random() * filters.length)];
+    const pickTod = tods[Math.floor(Math.random() * tods.length)];
+    setAutoDayNight(false);
+    setTimeOfDay(pickTod);
+    setAdvanced((prev) => ({
+      ...prev,
+      lampMood: pickMood,
+      cinemaFilter: pickFilter,
+      rainbowEnabled: pickTod === 'day' || pickTod === 'dawn',
+      searchlightsEnabled: pickTod === 'night' || pickTod === 'twilight',
+      auroraEnabled: true,
+      airshipEnabled: true,
+    }));
+    setTriggerMeteorNonce((n) => n + 1);
+    soundscape.playAgentChime(3);
+    triggerHaptic(18);
+    const msg = `Surprise Mood: ${pickTod.toUpperCase()} · ${pickMood} lights · ${pickFilter.replace('_', ' ')}`;
+    flashQuickToast(msg);
+    return msg;
+  }, [flashQuickToast, triggerHaptic]);
+
+  const handleResetVisuals = useCallback((): string => {
+    setSunTimelapse(false);
+    setAutoTurntable(false);
+    setCameraFov(46);
+    setSunAngle(38);
+    setHeatmapMode('off');
+    setShowUtilityOverlay(false);
+    setShowZoneOverlay(false);
+    setBeaconPlotId(null);
+    setAdvanced((prev) => ({
+      ...prev,
+      cinemaFilter: 'none',
+      photoGridOverlay: false,
+      showNameplates: true,
+      lampMood: 'warm',
+    }));
+    triggerHaptic(12);
+    return 'Reset cinema filters, overlays, lens FOV & lighting to clean defaults.';
+  }, [triggerHaptic]);
+
+  const handleDownloadBackupJson = useCallback((): string => {
+    handleExportTownJson();
+    triggerHaptic(14);
+    return 'Downloaded full town backup .JSON file!';
+  }, [handleExportTownJson, triggerHaptic]);
 
   const paletteQuickActions = useMemo<PaletteActionItem[]>(
     () => [
@@ -7279,6 +7784,21 @@ export default function App() {
         balloonsEnabled={advanced.balloonsEnabled}
         auroraEnabled={advanced.auroraEnabled}
         deliveryVanEnabled={advanced.deliveryVanEnabled}
+        airshipEnabled={advanced.airshipEnabled}
+        skyTramEnabled={advanced.skyTramEnabled}
+        meteorShowerEnabled={advanced.meteorShowerEnabled}
+        triggerMeteorNonce={triggerMeteorNonce}
+        searchlightsEnabled={advanced.searchlightsEnabled}
+        rainbowEnabled={advanced.rainbowEnabled}
+        firefliesEnabled={advanced.firefliesEnabled}
+        holoEmblemEnabled={advanced.holoEmblemEnabled}
+        birdsEnabled={advanced.birdsEnabled}
+        satelliteEnabled={advanced.satelliteEnabled}
+        emblemColor={advanced.emblemColor}
+        completedWonders={completedWonders}
+        cinemaFilter={advanced.cinemaFilter}
+        photoGridOverlay={advanced.photoGridOverlay}
+        autoTurntable={autoTurntable}
         beaconPlotId={beaconPlotId}
         onPinBeacon={(pid) => {
           setBeaconPlotId(pid);
@@ -7302,7 +7822,10 @@ export default function App() {
         onMinimapUpdate={setMinimapCoords}
         onRaiderRadarUpdate={setRaiderRadar}
         onBusRadarUpdate={setBusRadarPos}
-        onUserOrbitStart={() => setFollowActive(false)}
+        onUserOrbitStart={() => {
+          setFollowActive(false);
+          setAutoTurntable(false);
+        }}
       />
 
       {!zenMode && (
@@ -8259,13 +8782,13 @@ export default function App() {
 
         {/* Mobile One-Thumb Quick-Actions Bottom Sheet */}
         {mobileQuickOpen && !mobileTab && (
-          <div className="flex max-h-[68dvh] flex-col rounded-t-3xl border-t border-white/15 bg-slate-950/95 px-4 pt-2.5 pb-3 shadow-2xl">
-            <div className="mx-auto mb-2 h-1.5 w-10 rounded-full bg-slate-700" aria-hidden="true" />
-            <div className="mb-2.5 flex items-center justify-between gap-2">
+          <div className="flex max-h-[76dvh] flex-col overflow-y-auto rounded-t-3xl border-t border-white/15 bg-slate-950/95 px-4 pt-2.5 pb-3 shadow-2xl">
+            <div className="mx-auto mb-2 h-1.5 w-10 shrink-0 rounded-full bg-slate-700" aria-hidden="true" />
+            <div className="mb-2 flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-display text-sm font-semibold text-white">Quick Actions</div>
                 <div className="font-mono-tabular text-[10px] text-slate-400">
-                  {liveFps} FPS · {creditRating.grade} Credit · ★ {tourism.starRating.toFixed(1)}
+                  {liveFps} FPS · {creditRating.grade} Credit · Eco {ecoScore.score}% · ★ {tourism.starRating.toFixed(1)}
                 </div>
               </div>
               <button
@@ -8284,8 +8807,52 @@ export default function App() {
               </div>
             )}
 
-            {/* One-Thumb Camera Quick-Orbit Strip */}
-            <div className="mb-2.5 grid grid-cols-5 gap-1.5">
+            {/* 4-Tap Day/Night Scrubber + Play/Pause */}
+            <div className="mb-2 grid grid-cols-5 gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(12);
+                  setIsPlaying((p) => !p);
+                }}
+                className={`flex min-h-[40px] items-center justify-center gap-1 rounded-xl border text-[10px] font-semibold ${
+                  isPlaying
+                    ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                    : 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                }`}
+              >
+                {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                <span>{isPlaying ? 'Run' : 'Hold'}</span>
+              </button>
+              {(
+                [
+                  { id: 'dawn' as TimeOfDay, label: 'Dawn' },
+                  { id: 'day' as TimeOfDay, label: 'Day' },
+                  { id: 'twilight' as TimeOfDay, label: 'Dusk' },
+                  { id: 'night' as TimeOfDay, label: 'Night' },
+                ] as const
+              ).map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic(10);
+                    setAutoDayNight(false);
+                    setTimeOfDay(t.id);
+                  }}
+                  className={`min-h-[40px] rounded-xl border text-[10px] font-semibold ${
+                    timeOfDay === t.id
+                      ? 'border-amber-400 bg-amber-500 text-slate-950'
+                      : 'border-white/10 bg-slate-900 text-slate-300'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* One-Thumb Camera Quick-Orbit + Landmark Jump Strip */}
+            <div className="mb-2 grid grid-cols-5 gap-1.5">
               {(
                 [
                   { action: 'left' as CameraNudgeAction, label: 'Left', Icon: RotateCcw },
@@ -8307,7 +8874,27 @@ export default function App() {
               ))}
             </div>
 
-            {/* 8 Thumb-Friendly 48px Action Tiles */}
+            <div className="mb-2 grid grid-cols-4 gap-1.5">
+              {(
+                [
+                  { id: 'town_hall' as const, label: 'Town Hall' },
+                  { id: 'rail' as const, label: 'Railway' },
+                  { id: 'plaza' as const, label: 'Plaza' },
+                  { id: 'reset' as const, label: 'Reset Cam' },
+                ] as const
+              ).map((lm) => (
+                <button
+                  key={lm.id}
+                  type="button"
+                  onClick={() => handleJumpLandmark(lm.id)}
+                  className="min-h-[38px] rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-200 active:bg-amber-500 active:text-slate-950"
+                >
+                  {lm.label}
+                </button>
+              ))}
+            </div>
+
+            {/* 8 Thumb-Friendly 50px Action Tiles */}
             <div className="grid grid-cols-4 gap-1.5">
               <button
                 type="button"
@@ -8317,7 +8904,7 @@ export default function App() {
                   setStudioInitialTab('economy');
                   setStudioDrawerOpen(true);
                 }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 text-[10px] font-semibold text-amber-200"
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 text-[10px] font-semibold text-amber-200"
               >
                 <SlidersHorizontal className="h-4 w-4" />
                 <span>Studio</span>
@@ -8329,10 +8916,32 @@ export default function App() {
                   handleLaunchFireworks();
                   flashQuickToast('Launched 3D Fireworks!');
                 }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
               >
                 <Flame className="h-4 w-4 text-amber-300" />
                 <span>Fireworks</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic(16);
+                  setTriggerMeteorNonce((n) => n + 1);
+                  flashQuickToast('Launched Starlight Meteor Shower!');
+                }}
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <Sparkles className="h-4 w-4 text-cyan-300" />
+                <span>Meteors</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handleSurpriseAtmosphere();
+                }}
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+              >
+                <Dices className="h-4 w-4 text-amber-300" />
+                <span>Surprise!</span>
               </button>
               <button
                 type="button"
@@ -8341,7 +8950,7 @@ export default function App() {
                   handleCapturePostcard();
                   flashQuickToast('Snapped 3D Postcard Photo!');
                 }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
               >
                 <Camera className="h-4 w-4 text-cyan-300" />
                 <span>Photo</span>
@@ -8353,7 +8962,7 @@ export default function App() {
                   setMobileQuickOpen(false);
                   handleChangeCameraMode(cameraMode === 'free_roam' ? 'orbit' : 'free_roam');
                 }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
               >
                 <Footprints className="h-4 w-4 text-emerald-300" />
                 <span>{cameraMode === 'free_roam' ? 'Orbit' : 'Walk'}</span>
@@ -8365,7 +8974,7 @@ export default function App() {
                   handleFastForwardTurns(5);
                   flashQuickToast('Simulated +5 economic turns!');
                 }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
               >
                 <FastForward className="h-4 w-4 text-amber-300" />
                 <span>+5 Turns</span>
@@ -8373,33 +8982,9 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  triggerHaptic(10);
-                  setMobileQuickOpen(false);
-                  setZenMode(true);
-                }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
-              >
-                <EyeOff className="h-4 w-4 text-slate-300" />
-                <span>Zen HUD</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  triggerHaptic(10);
-                  setMobileQuickOpen(false);
-                  setCommandPaletteOpen(true);
-                }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-900 text-[10px] font-semibold text-slate-100"
-              >
-                <Search className="h-4 w-4 text-sky-300" />
-                <span>Search</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
                   handleEnableBatterySaver();
                 }}
-                className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-xl border border-emerald-400/35 bg-emerald-500/15 text-[10px] font-semibold text-emerald-200"
+                className="flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-xl border border-emerald-400/35 bg-emerald-500/15 text-[10px] font-semibold text-emerald-200"
               >
                 <BatteryCharging className="h-4 w-4" />
                 <span>Battery</span>
@@ -8904,6 +9489,104 @@ export default function App() {
         graphicsQuality={graphicsQuality}
         onEnableBatterySaver={handleEnableBatterySaver}
         onCopyReportCard={handleCopyReportCard}
+        airshipEnabled={advanced.airshipEnabled}
+        onToggleAirship={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, airshipEnabled: next }));
+        }}
+        skyTramEnabled={advanced.skyTramEnabled}
+        onToggleSkyTram={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, skyTramEnabled: next }));
+        }}
+        meteorShowerEnabled={advanced.meteorShowerEnabled}
+        onToggleMeteorShower={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, meteorShowerEnabled: next }));
+        }}
+        onTriggerMeteorShower={() => {
+          triggerHaptic(14);
+          setTriggerMeteorNonce((n) => n + 1);
+        }}
+        searchlightsEnabled={advanced.searchlightsEnabled}
+        onToggleSearchlights={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, searchlightsEnabled: next }));
+        }}
+        rainbowEnabled={advanced.rainbowEnabled}
+        onToggleRainbow={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, rainbowEnabled: next }));
+        }}
+        firefliesEnabled={advanced.firefliesEnabled}
+        onToggleFireflies={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, firefliesEnabled: next }));
+        }}
+        holoEmblemEnabled={advanced.holoEmblemEnabled}
+        onToggleHoloEmblem={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, holoEmblemEnabled: next }));
+        }}
+        birdsEnabled={advanced.birdsEnabled}
+        onToggleBirds={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, birdsEnabled: next }));
+        }}
+        satelliteEnabled={advanced.satelliteEnabled}
+        onToggleSatellite={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, satelliteEnabled: next }));
+        }}
+        cinemaFilter={advanced.cinemaFilter}
+        onChangeCinemaFilter={(mode) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, cinemaFilter: mode }));
+        }}
+        photoGridOverlay={advanced.photoGridOverlay}
+        onTogglePhotoGrid={(next) => {
+          triggerHaptic(10);
+          setAdvanced((prev) => ({ ...prev, photoGridOverlay: next }));
+        }}
+        postcardCaption={advanced.postcardCaption}
+        onChangePostcardCaption={(caption) =>
+          setAdvanced((prev) => ({ ...prev, postcardCaption: caption.slice(0, 70) }))
+        }
+        autoTurntable={autoTurntable}
+        onToggleAutoTurntable={(next) => {
+          triggerHaptic(10);
+          setAutoTurntable(next);
+        }}
+        onJumpLandmark={handleJumpLandmark}
+        soundVolume={advanced.soundVolume}
+        onChangeSoundVolume={(vol) =>
+          setAdvanced((prev) => ({ ...prev, soundVolume: Math.max(0, Math.min(100, vol)) }))
+        }
+        onPlayTestChime={() => soundscape.playTestChime()}
+        savingsVaultGold={advanced.savingsVaultGold}
+        onVaultTransfer={handleVaultTransfer}
+        taxHolidayTurnsLeft={advanced.taxHolidayTurnsLeft}
+        onStartTaxHoliday={handleStartTaxHoliday}
+        canClaimGrant={canClaimGrant}
+        turnsUntilGrant={turnsUntilGrant}
+        onClaimGrant={handleClaimRegionalGrant}
+        ecoScore={ecoScore}
+        weatherForecast={weatherForecast}
+        megaprojectProgress={advanced.megaprojectProgress}
+        onInvestMegaproject={handleInvestMegaproject}
+        activeTradePacts={advanced.activeTradePacts}
+        onToggleTradePact={handleToggleTradePact}
+        onTransmuteResource={handleTransmuteResource}
+        awardedMedalAgentIds={advanced.awardedMedalAgentIds}
+        onToggleMedal={handleToggleMedal}
+        onRushAllConstruction={handleRushAllConstruction}
+        journalEntries={advanced.journalEntries}
+        onAddJournalEntry={handleAddJournalEntry}
+        onDeleteJournalEntry={handleDeleteJournalEntry}
+        trophies={trophies}
+        onSurpriseAtmosphere={handleSurpriseAtmosphere}
+        onResetVisuals={handleResetVisuals}
+        onDownloadBackupJson={handleDownloadBackupJson}
       />
 
       {/* Universal Quick Command Palette (Ctrl+K / Search) */}

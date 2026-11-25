@@ -6,36 +6,46 @@ import {
   ArrowUpRight,
   Award,
   BatteryCharging,
+  BookOpen,
   Bookmark,
   Bus,
   Camera,
   Check,
   CheckSquare,
   ClipboardCheck,
+  CloudSun,
   Coffee,
   Coins,
   Compass,
   Copy,
   Cpu,
+  Dices,
   Download,
   Droplets,
   Eye,
   EyeOff,
   FastForward,
+  FileJson,
   Flame,
   Footprints,
   Globe,
+  Grid3x3,
   Hammer,
+  Handshake,
   Landmark,
   Layers,
+  Leaf,
   Map as MapIcon,
   MapPin,
+  Medal,
   Minus,
   Package,
   PartyPopper,
+  PiggyBank,
   Plus,
   Radio,
   Redo2,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Save,
@@ -48,10 +58,12 @@ import {
   Sun,
   TrainFront,
   Trash2,
+  Trophy,
   Undo2,
   UserCheck,
   Users,
   Video,
+  Volume2,
   Wrench,
   X,
   Zap,
@@ -63,7 +75,9 @@ import {
   encodeBlueprintShareCode,
   exportHistoryToCsv,
   FESTIVAL_CATALOG,
+  MEGAPROJECT_CATALOG,
   TECH_UPGRADES,
+  TRADE_PACT_CATALOG,
 } from '../lib/townSystems.ts';
 import {
   computeTownHousingCapacity,
@@ -80,20 +94,24 @@ import {
   type CameraBookmark,
   type CameraMode,
   type CameraNudgeAction,
+  type CinemaFilterMode,
   type CitizenSentimentItem,
   type CivicQuestItem,
   type CouncilDebateOption,
   type CouncilDebateProposal,
   type CreditRatingSummary,
   type DistrictZoneType,
+  type EcoScoreSummary,
   type EmergencyEventOption,
   type EmergencyEventState,
   type FestivalKind,
   type GraphicsQuality,
   type HeatmapMode,
+  type JournalEntry,
   type LampMood,
   type MarketPricesState,
   type MayorTodoItem,
+  type MegaprojectId,
   type MunicipalLoanState,
   type PlotId,
   type TechUpgradeId,
@@ -106,15 +124,19 @@ import {
   type TownResources,
   type TownStructure,
   type TownTheme,
+  type TownTrophyItem,
+  type TradePactId,
   type TrainBlueprint,
   type TrainStyle,
   type UtilityGridSummary,
+  type WeatherForecastItem,
   type WeatherMode,
 } from '../types/town.ts';
 
 export type StudioTab =
   | 'economy'
   | 'world'
+  | 'wonders'
   | 'utilities'
   | 'market'
   | 'tech'
@@ -122,6 +144,7 @@ export type StudioTab =
   | 'council'
   | 'citizens'
   | 'camera'
+  | 'trophies'
   | 'tools'
   | 'share';
 
@@ -255,6 +278,62 @@ interface TownControlDrawerProps {
   graphicsQuality: GraphicsQuality;
   onEnableBatterySaver: () => string;
   onCopyReportCard: () => Promise<string>;
+  // Batch 4: 30 Creative 3D Marvels, Megaprojects, Diplomacy, Studio & Trophies
+  airshipEnabled: boolean;
+  onToggleAirship: (next: boolean) => void;
+  skyTramEnabled: boolean;
+  onToggleSkyTram: (next: boolean) => void;
+  meteorShowerEnabled: boolean;
+  onToggleMeteorShower: (next: boolean) => void;
+  onTriggerMeteorShower: () => void;
+  searchlightsEnabled: boolean;
+  onToggleSearchlights: (next: boolean) => void;
+  rainbowEnabled: boolean;
+  onToggleRainbow: (next: boolean) => void;
+  firefliesEnabled: boolean;
+  onToggleFireflies: (next: boolean) => void;
+  holoEmblemEnabled: boolean;
+  onToggleHoloEmblem: (next: boolean) => void;
+  birdsEnabled: boolean;
+  onToggleBirds: (next: boolean) => void;
+  satelliteEnabled: boolean;
+  onToggleSatellite: (next: boolean) => void;
+  cinemaFilter: CinemaFilterMode;
+  onChangeCinemaFilter: (mode: CinemaFilterMode) => void;
+  photoGridOverlay: boolean;
+  onTogglePhotoGrid: (next: boolean) => void;
+  postcardCaption: string;
+  onChangePostcardCaption: (caption: string) => void;
+  autoTurntable: boolean;
+  onToggleAutoTurntable: (next: boolean) => void;
+  onJumpLandmark: (target: 'town_hall' | 'rail' | 'plaza' | 'reset') => void;
+  soundVolume: number;
+  onChangeSoundVolume: (vol: number) => void;
+  onPlayTestChime: () => void;
+  savingsVaultGold: number;
+  onVaultTransfer: (delta: number) => string;
+  taxHolidayTurnsLeft: number;
+  onStartTaxHoliday: () => string;
+  canClaimGrant: boolean;
+  turnsUntilGrant: number;
+  onClaimGrant: () => string;
+  ecoScore: EcoScoreSummary;
+  weatherForecast: WeatherForecastItem[];
+  megaprojectProgress: Partial<Record<MegaprojectId, number>>;
+  onInvestMegaproject: (id: MegaprojectId) => string;
+  activeTradePacts: TradePactId[];
+  onToggleTradePact: (id: TradePactId) => string;
+  onTransmuteResource: (dir: 'to_crystal' | 'from_crystal') => string;
+  awardedMedalAgentIds: AgentId[];
+  onToggleMedal: (agentId: AgentId) => string;
+  onRushAllConstruction: () => string;
+  journalEntries: JournalEntry[];
+  onAddJournalEntry: (text: string) => void;
+  onDeleteJournalEntry: (id: string) => void;
+  trophies: TownTrophyItem[];
+  onSurpriseAtmosphere: () => string;
+  onResetVisuals: () => string;
+  onDownloadBackupJson: () => string;
 }
 
 const HEATMAP_BUTTONS: Array<{ id: HeatmapMode; label: string }> = [
@@ -432,6 +511,61 @@ export function TownControlDrawer({
   graphicsQuality,
   onEnableBatterySaver,
   onCopyReportCard,
+  airshipEnabled,
+  onToggleAirship,
+  skyTramEnabled,
+  onToggleSkyTram,
+  meteorShowerEnabled,
+  onToggleMeteorShower,
+  onTriggerMeteorShower,
+  searchlightsEnabled,
+  onToggleSearchlights,
+  rainbowEnabled,
+  onToggleRainbow,
+  firefliesEnabled,
+  onToggleFireflies,
+  holoEmblemEnabled,
+  onToggleHoloEmblem,
+  birdsEnabled,
+  onToggleBirds,
+  satelliteEnabled,
+  onToggleSatellite,
+  cinemaFilter,
+  onChangeCinemaFilter,
+  photoGridOverlay,
+  onTogglePhotoGrid,
+  postcardCaption,
+  onChangePostcardCaption,
+  autoTurntable,
+  onToggleAutoTurntable,
+  onJumpLandmark,
+  soundVolume,
+  onChangeSoundVolume,
+  onPlayTestChime,
+  savingsVaultGold,
+  onVaultTransfer,
+  taxHolidayTurnsLeft,
+  onStartTaxHoliday,
+  canClaimGrant,
+  turnsUntilGrant,
+  onClaimGrant,
+  ecoScore,
+  weatherForecast,
+  megaprojectProgress,
+  onInvestMegaproject,
+  activeTradePacts,
+  onToggleTradePact,
+  onTransmuteResource,
+  awardedMedalAgentIds,
+  onToggleMedal,
+  onRushAllConstruction,
+  journalEntries,
+  onAddJournalEntry,
+  onDeleteJournalEntry,
+  trophies,
+  onSurpriseAtmosphere,
+  onResetVisuals,
+  onDownloadBackupJson,
 }: TownControlDrawerProps) {
   const [tab, setTab] = useState<StudioTab>(initialTab);
   const [trainDraft, setTrainDraft] = useState<TrainBlueprint>(() =>
@@ -448,6 +582,7 @@ export function TownControlDrawer({
   const [bookmarkName, setBookmarkName] = useState('');
   const [checkpointName, setCheckpointName] = useState('');
   const [todoDraft, setTodoDraft] = useState('');
+  const [journalDraft, setJournalDraft] = useState('');
   const [selectedZonePlot, setSelectedZonePlot] = useState<PlotId>(
     () => getAvailablePlotIds(unlockedBiomes)[0],
   );
@@ -528,10 +663,13 @@ export function TownControlDrawer({
 
   const selectedCargoTarget = cargoTargetId || otherTowns[0]?.id || 'regional_depot';
   const unclaimedQuestCount = quests.filter((q) => q.completed && !q.claimed).length;
+  const unlockedTrophyCount = trophies.filter((t) => t.unlocked).length;
+  const inProgressBuildCount = structures.filter((s) => s.status === 'building').length;
 
   const TABS: Array<{ id: StudioTab; label: string; Icon: typeof Coins }> = [
     { id: 'economy', label: 'Economy', Icon: Coins },
     { id: 'world', label: activeFestival ? 'World (Fest)' : 'World', Icon: Globe },
+    { id: 'wonders', label: 'Wonders', Icon: Landmark },
     { id: 'utilities', label: 'Grid', Icon: Zap },
     { id: 'market', label: unclaimedQuestCount > 0 ? `Market (${unclaimedQuestCount})` : 'Market', Icon: Store },
     { id: 'tech', label: 'Tech', Icon: Cpu },
@@ -539,6 +677,7 @@ export function TownControlDrawer({
     { id: 'council', label: 'Council', Icon: Scale },
     { id: 'citizens', label: 'Citizens', Icon: Users },
     { id: 'camera', label: 'Camera', Icon: Camera },
+    { id: 'trophies', label: `Awards (${unlockedTrophyCount})`, Icon: Trophy },
     { id: 'tools', label: 'Tools', Icon: Wrench },
     { id: 'share', label: 'Share', Icon: Share2 },
   ];
@@ -765,6 +904,87 @@ export function TownControlDrawer({
                       : 'All Completed Buildings Upgraded'}
                   </span>
                 </button>
+                {inProgressBuildCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onRushAllConstruction())}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-3 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    <span>
+                      Rush All {inProgressBuildCount} Active Build{inProgressBuildCount === 1 ? '' : 's'} (-{inProgressBuildCount * 40}g)
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* Protected Savings Vault (+4%/turn) & Tax Holiday & Regional Grant */}
+              <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/50 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <PiggyBank className="h-3.5 w-3.5 text-emerald-300" />
+                    <span>Municipal Savings Vault</span>
+                  </div>
+                  <span className="font-mono-tabular text-xs font-semibold text-emerald-300">
+                    {savingsVaultGold}g · +4%/turn
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onVaultTransfer(100))}
+                    className="min-h-[44px] rounded-xl border border-emerald-400/40 bg-emerald-500/15 font-semibold text-emerald-200 hover:bg-emerald-500/25"
+                  >
+                    Deposit +100g
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onVaultTransfer(-100))}
+                    className="min-h-[44px] rounded-xl border border-white/15 bg-slate-950 font-semibold text-slate-200 hover:bg-slate-800"
+                  >
+                    Withdraw 100g
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={taxHolidayTurnsLeft > 0}
+                    onClick={() => flashStatus(onStartTaxHoliday())}
+                    className="min-h-[44px] rounded-xl border border-amber-400/40 bg-amber-500/15 px-2 text-[11px] font-semibold text-amber-200 disabled:opacity-50"
+                  >
+                    {taxHolidayTurnsLeft > 0
+                      ? `Tax Holiday (${taxHolidayTurnsLeft}t)`
+                      : 'Tax Holiday (3t)'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canClaimGrant}
+                    onClick={() => flashStatus(onClaimGrant())}
+                    className="min-h-[44px] rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-2 text-[11px] font-semibold text-cyan-200 disabled:opacity-45"
+                  >
+                    {canClaimGrant ? 'Claim Dev Grant' : `Grant in ${turnsUntilGrant}t`}
+                  </button>
+                </div>
+              </div>
+
+              {/* Eco-Sustainability Index */}
+              <div className="space-y-2 rounded-xl border border-white/10 bg-slate-900/50 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <Leaf className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Eco-Sustainability Index</span>
+                  </div>
+                  <span className="font-mono-tabular text-xs font-semibold text-emerald-300">
+                    {ecoScore.score}% · {ecoScore.label}
+                  </span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                  <div
+                    className="h-full rounded-full bg-emerald-400 transition-all duration-300"
+                    style={{ width: `${ecoScore.score}%` }}
+                  />
+                </div>
+                <p className="text-[11px] text-slate-400">{ecoScore.tip}</p>
               </div>
 
               {/* Municipal Bonds & Live Credit Rating */}
@@ -909,14 +1129,117 @@ export function TownControlDrawer({
             </>
           )}
 
-          {/* NEW TAB: 3D WORLD ATMOSPHERE, LIGHTING MOOD, WAYPOINT BEACON & FESTIVAL CALENDAR */}
+          {/* WORLD TAB: 3-TURN WEATHER FORECAST, SURPRISE ME!, 12 LIVE 3D WORLD MARVELS, LIGHTING & FESTIVALS */}
           {tab === 'world' && (
             <>
+              {/* 3-Turn Weather Forecast + Surprise Me! */}
               <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/60 p-3">
-                <div className="font-semibold text-white">3D Live World Features</div>
-                <div className="grid grid-cols-1 gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <CloudSun className="h-3.5 w-3.5 text-sky-300" />
+                    <span>3-Turn Weather Forecast</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onSurpriseAtmosphere())}
+                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-amber-500 px-2.5 text-[11px] font-semibold text-slate-950 hover:bg-amber-400"
+                  >
+                    <Dices className="h-3.5 w-3.5" />
+                    <span>Surprise Me!</span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {weatherForecast.map((f) => (
+                    <div
+                      key={f.turnsAhead}
+                      className="rounded-xl border border-white/10 bg-slate-950 p-2"
+                    >
+                      <div className="font-mono-tabular text-[10px] text-amber-300">
+                        +{f.turnsAhead} Turn{f.turnsAhead > 1 ? 's' : ''}
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] font-semibold text-white">
+                        {f.label}
+                      </div>
+                      <div className="mt-0.5 line-clamp-2 text-[9px] leading-tight text-slate-400">
+                        {f.hint}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-xl border border-white/10 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-white">3D World Marvels & Living Sky</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onTriggerMeteorShower();
+                      flashStatus('Launched Starlight Meteor Shower across the sky!');
+                    }}
+                    className="inline-flex min-h-[34px] items-center gap-1 rounded-lg border border-cyan-400/40 bg-cyan-500/15 px-2.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/25"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    <span>Meteors Now</span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
                   {(
                     [
+                      {
+                        label: 'Grand Zephyr Airship',
+                        sub: 'Luxury skyline blimp (+30 tourists/day)',
+                        enabled: airshipEnabled,
+                        onToggle: () => onToggleAirship(!airshipEnabled),
+                      },
+                      {
+                        label: 'Sky Gondola Cable-Car Line',
+                        sub: 'Glass cable car gliding across town (+18 tourists/day)',
+                        enabled: skyTramEnabled,
+                        onToggle: () => onToggleSkyTram(!skyTramEnabled),
+                      },
+                      {
+                        label: 'Post-Rain Rainbow Arch',
+                        sub: '5-band rainbow arching over the horizon (+18 tourists/day)',
+                        enabled: rainbowEnabled,
+                        onToggle: () => onToggleRainbow(!rainbowEnabled),
+                      },
+                      {
+                        label: 'Starlight Meteor Shower',
+                        sub: 'Shooting star streaks across twilight & night skies',
+                        enabled: meteorShowerEnabled,
+                        onToggle: () => onToggleMeteorShower(!meteorShowerEnabled),
+                      },
+                      {
+                        label: 'Twin Gala Searchlights',
+                        sub: 'Sweeping festival spotlight beams from central square',
+                        enabled: searchlightsEnabled,
+                        onToggle: () => onToggleSearchlights(!searchlightsEnabled),
+                      },
+                      {
+                        label: 'Golden Fireflies Swarm',
+                        sub: 'Glowing fireflies drifting around town gardens at night',
+                        enabled: firefliesEnabled,
+                        onToggle: () => onToggleFireflies(!firefliesEnabled),
+                      },
+                      {
+                        label: 'Floating Holo Town Emblem',
+                        sub: 'Rotating holographic crest spire hovering above Town Hall',
+                        enabled: holoEmblemEnabled,
+                        onToggle: () => onToggleHoloEmblem(!holoEmblemEnabled),
+                      },
+                      {
+                        label: 'Instanced Soaring Birds Flock',
+                        sub: '24 low-poly swallows banking smoothly in sky thermals',
+                        enabled: birdsEnabled,
+                        onToggle: () => onToggleBirds(!birdsEnabled),
+                      },
+                      {
+                        label: 'Orbiting Civic Satellite',
+                        sub: 'Solar-winged weather & comms satellite high overhead',
+                        enabled: satelliteEnabled,
+                        onToggle: () => onToggleSatellite(!satelliteEnabled),
+                      },
                       {
                         label: 'Hot Air Balloon Fleet',
                         sub: '3 composite balloons drifting above skyline (+22 tourists/day)',
@@ -941,7 +1264,7 @@ export function TownControlDrawer({
                       key={item.label}
                       type="button"
                       onClick={item.onToggle}
-                      className={`flex min-h-[48px] items-center justify-between gap-3 rounded-xl border px-3 py-2 text-left transition-colors ${
+                      className={`flex min-h-[46px] items-center justify-between gap-3 rounded-xl border px-3 py-1.5 text-left transition-colors ${
                         item.enabled
                           ? 'border-emerald-400/40 bg-emerald-500/10 text-white'
                           : 'border-white/10 bg-slate-950 text-slate-300'
@@ -1085,6 +1408,107 @@ export function TownControlDrawer({
                       </span>
                     </button>
                   ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* NEW TAB: MULTI-STAGE TOWN MEGAPROJECTS & SISTER-CITY TRADE PACTS */}
+          {tab === 'wonders' && (
+            <>
+              <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <Landmark className="h-3.5 w-3.5 text-amber-300" />
+                    <span>Multi-Stage World Wonders</span>
+                  </div>
+                  <span className="font-mono-tabular text-[11px] text-cyan-300">
+                    {economy.treasuryGold}g · {resources.crystal}C
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {MEGAPROJECT_CATALOG.map((mp) => {
+                    const pct = Math.min(100, megaprojectProgress[mp.id] ?? 0);
+                    const done = pct >= 100;
+                    return (
+                      <div
+                        key={mp.id}
+                        className={`rounded-xl border p-2.5 ${
+                          done
+                            ? 'border-amber-400/50 bg-amber-500/10'
+                            : 'border-white/10 bg-slate-950'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-white">{mp.label}</span>
+                          <span className="font-mono-tabular text-[11px] font-semibold text-amber-300">
+                            {pct}%
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[10px] text-slate-400">{mp.summary}</p>
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                          <div
+                            className={`h-full rounded-full ${done ? 'bg-amber-400' : 'bg-cyan-400'}`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        {done ? (
+                          <div className="mt-2 text-[11px] font-semibold text-amber-300">
+                            Wonder Complete · Permanent Dividend Active
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => flashStatus(onInvestMegaproject(mp.id))}
+                            className="mt-2 min-h-[40px] w-full rounded-xl bg-amber-500 text-xs font-semibold text-slate-950 hover:bg-amber-400"
+                          >
+                            Invest +25% ({mp.stageCostGold}g · {mp.stageCostCrystal} Crystal)
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Sister-City Trade Pacts */}
+              <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/50 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <Handshake className="h-3.5 w-3.5 text-emerald-300" />
+                    <span>Sister-City Trade Pacts ({activeTradePacts.length}/3)</span>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {TRADE_PACT_CATALOG.map((pact) => {
+                    const active = activeTradePacts.includes(pact.id);
+                    return (
+                      <div
+                        key={pact.id}
+                        className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 ${
+                          active
+                            ? 'border-emerald-400/40 bg-emerald-500/10'
+                            : 'border-white/10 bg-slate-950'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="font-semibold text-white">{pact.cityName}</div>
+                          <div className="text-[10px] text-slate-400">{pact.summary}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => flashStatus(onToggleTradePact(pact.id))}
+                          className={`min-h-[40px] shrink-0 rounded-xl px-3 text-[11px] font-semibold ${
+                            active
+                              ? 'border border-rose-400/40 bg-rose-500/15 text-rose-200'
+                              : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'
+                          }`}
+                        >
+                          {active ? 'Cancel' : `Sign -${pact.signingFeeGold}g`}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </>
@@ -1322,6 +1746,30 @@ export function TownControlDrawer({
                       </div>
                     );
                   })}
+                </div>
+              </div>
+
+              {/* Civic Refinery / Resource Transmuter */}
+              <div className="space-y-2 rounded-xl border border-white/10 bg-slate-900/50 p-3">
+                <div className="flex items-center gap-1.5 font-semibold text-white">
+                  <Sparkles className="h-3.5 w-3.5 text-cyan-300" />
+                  <span>Civic Refinery & Resource Transmuter</span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onTransmuteResource('to_crystal'))}
+                    className="min-h-[44px] rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-2.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/25"
+                  >
+                    12 T/S/H → +3 Crystal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onTransmuteResource('from_crystal'))}
+                    className="min-h-[44px] rounded-xl border border-amber-400/40 bg-amber-500/15 px-2.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/25"
+                  >
+                    3 Crystal → +10 T/S/H
+                  </button>
                 </div>
               </div>
 
@@ -1853,22 +2301,48 @@ export function TownControlDrawer({
                 <div className="space-y-1.5">
                   {agents.slice(0, 10).map((agent) => {
                     const mode = agentShifts[agent.id] ?? 'normal';
+                    const hasMedal = awardedMedalAgentIds.includes(agent.id);
                     return (
                       <div
                         key={agent.id}
                         className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-950 px-2.5 py-2"
                       >
                         <div className="min-w-0">
-                          <div className="truncate font-semibold text-white">{agent.name}</div>
-                          <div className="truncate text-[10px] text-slate-400">{agent.role}</div>
+                          <div className="flex items-center gap-1 truncate font-semibold text-white">
+                            <span className="truncate">{agent.name}</span>
+                            {hasMedal && (
+                              <Medal className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+                            )}
+                          </div>
+                          <div className="truncate text-[10px] text-slate-400">
+                            {agent.role}
+                            {hasMedal ? ' · Medal (+12g/t)' : ''}
+                          </div>
                         </div>
-                        <div className="flex shrink-0 gap-1">
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => flashStatus(onToggleMedal(agent.id))}
+                            title={
+                              hasMedal
+                                ? 'Revoke Mayor Medal of Honor'
+                                : 'Award Mayor Medal of Honor (+12g/turn)'
+                            }
+                            aria-label={`Toggle Medal of Honor for ${agent.name}`}
+                            className={`flex min-h-[34px] min-w-[34px] items-center justify-center rounded-md border ${
+                              hasMedal
+                                ? 'border-amber-400 bg-amber-500/20 text-amber-300'
+                                : 'border-white/10 text-slate-400 hover:text-amber-300'
+                            }`}
+                          >
+                            <Medal className="h-3.5 w-3.5" />
+                          </button>
                           {(['normal', 'overtime', 'rest'] as const).map((m) => (
                             <button
                               key={m}
                               type="button"
                               onClick={() => onSetAgentShift(agent.id, m)}
-                              className={`min-h-[30px] rounded-md px-2 text-[10px] font-semibold ${
+                              className={`min-h-[34px] rounded-md px-2 text-[10px] font-semibold ${
                                 mode === m
                                   ? m === 'overtime'
                                     ? 'bg-amber-500 text-slate-950'
@@ -1983,6 +2457,109 @@ export function TownControlDrawer({
                     ))}
                   </div>
                 </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onToggleAutoTurntable(!autoTurntable)}
+                    className={`inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border font-semibold transition-colors ${
+                      autoTurntable
+                        ? 'border-amber-400 bg-amber-500 text-slate-950'
+                        : 'border-white/15 bg-slate-950 text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>{autoTurntable ? 'Turntable On' : 'Auto Turntable'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onTogglePhotoGrid(!photoGridOverlay)}
+                    className={`inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border font-semibold transition-colors ${
+                      photoGridOverlay
+                        ? 'border-cyan-400 bg-cyan-400 text-slate-950'
+                        : 'border-white/15 bg-slate-950 text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    <Grid3x3 className="h-3.5 w-3.5" />
+                    <span>{photoGridOverlay ? 'Photo Grid On' : 'Rule of 3rds'}</span>
+                  </button>
+                </div>
+
+                {/* Live 3D Cinema Color Grading Filter */}
+                <div>
+                  <div className="mb-1.5 text-[11px] font-medium text-slate-400">
+                    Live Cinema Color Grading
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(
+                      [
+                        { id: 'none' as CinemaFilterMode, label: 'Natural' },
+                        { id: 'warm_film' as CinemaFilterMode, label: 'Warm Film' },
+                        { id: 'noir' as CinemaFilterMode, label: 'Noir B&W' },
+                        { id: 'cyber_vivid' as CinemaFilterMode, label: 'Cyber Vivid' },
+                        { id: 'pastel_dream' as CinemaFilterMode, label: 'Pastel' },
+                        { id: 'vintage' as CinemaFilterMode, label: 'Vintage' },
+                      ] as const
+                    ).map((cf) => (
+                      <button
+                        key={cf.id}
+                        type="button"
+                        onClick={() => onChangeCinemaFilter(cf.id)}
+                        className={`min-h-[38px] rounded-xl border text-[11px] font-semibold transition-colors ${
+                          cinemaFilter === cf.id
+                            ? 'border-amber-400 bg-amber-500 text-slate-950'
+                            : 'border-white/10 bg-slate-950 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {cf.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* One-Tap Landmark Camera Jump Strip */}
+                <div>
+                  <div className="mb-1.5 text-[11px] font-medium text-slate-400">
+                    One-Tap Landmark Focus
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {(
+                      [
+                        { id: 'town_hall' as const, label: 'Hall' },
+                        { id: 'rail' as const, label: 'Rail' },
+                        { id: 'plaza' as const, label: 'Plaza' },
+                        { id: 'reset' as const, label: 'Reset' },
+                      ] as const
+                    ).map((lm) => (
+                      <button
+                        key={lm.id}
+                        type="button"
+                        onClick={() => {
+                          onJumpLandmark(lm.id);
+                          flashStatus(`Framed ${lm.label}.`);
+                        }}
+                        className="min-h-[40px] rounded-xl border border-white/15 bg-slate-950 text-[11px] font-semibold text-slate-200 active:bg-amber-500 active:text-slate-950"
+                      >
+                        {lm.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Custom Postcard Caption */}
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    Custom Postcard Caption Stamp
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={70}
+                    value={postcardCaption}
+                    onChange={(e) => onChangePostcardCaption(e.target.value)}
+                    placeholder="Optional caption stamped on snapped postcards..."
+                    className="min-h-[42px] w-full rounded-xl border border-white/15 bg-slate-950 px-3 text-xs text-white placeholder:text-slate-500"
+                  />
+                </div>
+
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
@@ -2128,7 +2705,61 @@ export function TownControlDrawer({
             </>
           )}
 
-          {/* NEW TAB: MAYOR CHECKLIST, MOTTO/EMBLEM, REPORT CARD, FPS HEALTH & HAPTICS */}
+          {/* NEW TAB: 12-BADGE TOWN ACHIEVEMENT TROPHY SHELF */}
+          {tab === 'trophies' && (
+            <div className="space-y-3 rounded-xl border border-white/10 bg-slate-900/60 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 font-semibold text-white">
+                  <Trophy className="h-4 w-4 text-amber-300" />
+                  <span>Town Trophy Shelf</span>
+                </div>
+                <span className="font-mono-tabular text-xs font-semibold text-amber-300">
+                  {unlockedTrophyCount}/{trophies.length} Unlocked
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-amber-400 transition-all duration-300"
+                  style={{
+                    width: `${Math.round((unlockedTrophyCount / Math.max(1, trophies.length)) * 100)}%`,
+                  }}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {trophies.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`rounded-xl border p-2.5 ${
+                      t.unlocked
+                        ? 'border-amber-400/50 bg-amber-500/10'
+                        : 'border-white/10 bg-slate-950/80 opacity-80'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <Trophy
+                        className={`h-3.5 w-3.5 shrink-0 ${
+                          t.unlocked ? 'text-amber-300' : 'text-slate-600'
+                        }`}
+                      />
+                      <span
+                        className={`font-mono-tabular text-[10px] font-semibold ${
+                          t.unlocked ? 'text-amber-300' : 'text-slate-400'
+                        }`}
+                      >
+                        {t.progressLabel}
+                      </span>
+                    </div>
+                    <div className="mt-1 font-semibold text-white">{t.title}</div>
+                    <div className="mt-0.5 text-[10px] leading-snug text-slate-400">
+                      {t.detail}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TOOLS TAB: FPS HEALTH, VOLUME MIXER, CHECKLIST, MAYOR JOURNAL, EMBLEM, RESET & JSON BACKUP */}
           {tab === 'tools' && (
             <>
               {/* Live Performance & 4GB Phone Battery Saver */}
@@ -2291,13 +2922,103 @@ export function TownControlDrawer({
                 </div>
               </div>
 
-              {/* One-Tap Town Report Card Copy */}
+              {/* Master Soundscape Volume Mixer & Test Chime */}
               <div className="space-y-2 rounded-xl border border-white/10 bg-slate-900/50 p-3">
-                <div className="font-semibold text-white">Shareable Town Report Card</div>
-                <p className="text-[11px] text-slate-400">
-                  Copy a clean text summary of your Credit Rating, Tourism, Treasury, and Skyline
-                  for WhatsApp, Discord, or Notes.
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-white">
+                    <Volume2 className="h-3.5 w-3.5 text-cyan-300" />
+                    <span>Master Soundscape Volume</span>
+                  </div>
+                  <span className="font-mono-tabular text-xs font-semibold text-cyan-300">
+                    {soundVolume}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={soundVolume}
+                    onChange={(e) => onChangeSoundVolume(Number(e.target.value))}
+                    className="w-full accent-cyan-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPlayTestChime();
+                      flashStatus(`Tested sound chime at ${soundVolume}%.`);
+                    }}
+                    className="min-h-[38px] shrink-0 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-3 text-[11px] font-semibold text-cyan-200"
+                  >
+                    Test
+                  </button>
+                </div>
+              </div>
+
+              {/* Mayor's Civic Journal / Timestamped Diary */}
+              <div className="space-y-2.5 rounded-xl border border-white/10 bg-slate-900/50 p-3">
+                <div className="flex items-center gap-1.5 font-semibold text-white">
+                  <BookOpen className="h-3.5 w-3.5 text-amber-300" />
+                  <span>Mayor&apos;s Civic Journal ({journalEntries.length})</span>
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const clean = journalDraft.trim();
+                    if (!clean) return;
+                    onAddJournalEntry(clean);
+                    setJournalDraft('');
+                    flashStatus('Logged entry in Mayor Journal.');
+                  }}
+                  className="flex gap-2"
+                >
+                  <input
+                    type="text"
+                    maxLength={140}
+                    value={journalDraft}
+                    onChange={(e) => setJournalDraft(e.target.value)}
+                    placeholder="Record town strategy note..."
+                    className="min-h-[44px] min-w-0 flex-1 rounded-xl border border-white/15 bg-slate-950 px-3 text-xs text-white"
+                  />
+                  <button
+                    type="submit"
+                    aria-label="Add journal entry"
+                    className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl bg-amber-500 text-slate-950 hover:bg-amber-400"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </form>
+                {journalEntries.length > 0 && (
+                  <div className="max-h-40 space-y-1.5 overflow-y-auto">
+                    {journalEntries.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex items-start justify-between gap-2 rounded-xl border border-white/10 bg-slate-950 px-2.5 py-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-mono-tabular text-[10px] text-amber-300">
+                            Turn {entry.turn}
+                          </div>
+                          <div className="text-[11px] leading-snug text-slate-200">{entry.text}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteJournalEntry(entry.id)}
+                          aria-label="Delete journal entry"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-white/10 hover:text-rose-300"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* One-Tap Town Report Card, Direct JSON Backup & Visual Reset */}
+              <div className="space-y-2 rounded-xl border border-white/10 bg-slate-900/50 p-3">
+                <div className="font-semibold text-white">Export, Backup & Clean Visual Reset</div>
                 <button
                   type="button"
                   onClick={() => {
@@ -2308,6 +3029,24 @@ export function TownControlDrawer({
                   <ClipboardCheck className="h-4 w-4" />
                   <span>Copy Town Report Card</span>
                 </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onDownloadBackupJson())}
+                    className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/15 px-2.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25"
+                  >
+                    <FileJson className="h-4 w-4 shrink-0" />
+                    <span>Download .JSON</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => flashStatus(onResetVisuals())}
+                    className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-slate-950 px-2.5 text-xs font-semibold text-slate-200 hover:bg-slate-800"
+                  >
+                    <RotateCcw className="h-4 w-4 shrink-0" />
+                    <span>Reset Visuals</span>
+                  </button>
+                </div>
               </div>
             </>
           )}

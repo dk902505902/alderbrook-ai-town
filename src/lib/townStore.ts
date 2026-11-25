@@ -150,6 +150,33 @@ export function createDefaultAdvancedState(): TownAdvancedState {
       { id: 'todo-3', text: 'Launch a Town Festival & 3D Fireworks Show', done: false, createdAtMs: 3 },
     ],
     activeFestival: null,
+    airshipEnabled: true,
+    skyTramEnabled: true,
+    meteorShowerEnabled: true,
+    searchlightsEnabled: false,
+    rainbowEnabled: false,
+    firefliesEnabled: true,
+    holoEmblemEnabled: true,
+    birdsEnabled: true,
+    satelliteEnabled: false,
+    cinemaFilter: 'none',
+    photoGridOverlay: false,
+    postcardCaption: 'Greetings from Alderbrook',
+    soundVolume: 75,
+    savingsVaultGold: 0,
+    taxHolidayTurnsLeft: 0,
+    lastGrantTurn: -10,
+    megaprojectProgress: {},
+    activeTradePacts: [],
+    awardedMedalAgentIds: [],
+    journalEntries: [
+      {
+        id: 'journal-welcome',
+        turn: 1,
+        text: 'Founded the Grand Metropolis Council. Ready to expand the skyline and wonders!',
+        createdAtMs: 1,
+      },
+    ],
   };
 }
 
@@ -254,8 +281,78 @@ export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
         typeof rawAdv.emblemColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(rawAdv.emblemColor)
           ? rawAdv.emblemColor
           : fallbackAdv.emblemColor,
-      todos: Array.isArray(rawAdv.todos) ? rawAdv.todos.slice(0, 12) : fallbackAdv.todos,
+      todos: Array.isArray(rawAdv.todos) ? rawAdv.todos.slice(0, 20) : fallbackAdv.todos,
       activeFestival: rawAdv.activeFestival ?? null,
+      airshipEnabled:
+        typeof rawAdv.airshipEnabled === 'boolean' ? rawAdv.airshipEnabled : fallbackAdv.airshipEnabled,
+      skyTramEnabled:
+        typeof rawAdv.skyTramEnabled === 'boolean' ? rawAdv.skyTramEnabled : fallbackAdv.skyTramEnabled,
+      meteorShowerEnabled:
+        typeof rawAdv.meteorShowerEnabled === 'boolean'
+          ? rawAdv.meteorShowerEnabled
+          : fallbackAdv.meteorShowerEnabled,
+      searchlightsEnabled:
+        typeof rawAdv.searchlightsEnabled === 'boolean'
+          ? rawAdv.searchlightsEnabled
+          : fallbackAdv.searchlightsEnabled,
+      rainbowEnabled:
+        typeof rawAdv.rainbowEnabled === 'boolean' ? rawAdv.rainbowEnabled : fallbackAdv.rainbowEnabled,
+      firefliesEnabled:
+        typeof rawAdv.firefliesEnabled === 'boolean'
+          ? rawAdv.firefliesEnabled
+          : fallbackAdv.firefliesEnabled,
+      holoEmblemEnabled:
+        typeof rawAdv.holoEmblemEnabled === 'boolean'
+          ? rawAdv.holoEmblemEnabled
+          : fallbackAdv.holoEmblemEnabled,
+      birdsEnabled:
+        typeof rawAdv.birdsEnabled === 'boolean' ? rawAdv.birdsEnabled : fallbackAdv.birdsEnabled,
+      satelliteEnabled:
+        typeof rawAdv.satelliteEnabled === 'boolean'
+          ? rawAdv.satelliteEnabled
+          : fallbackAdv.satelliteEnabled,
+      cinemaFilter:
+        typeof rawAdv.cinemaFilter === 'string' &&
+        ['none', 'warm_film', 'noir', 'cyber_vivid', 'pastel_dream', 'vintage'].includes(
+          rawAdv.cinemaFilter,
+        )
+          ? rawAdv.cinemaFilter
+          : 'none',
+      photoGridOverlay:
+        typeof rawAdv.photoGridOverlay === 'boolean' ? rawAdv.photoGridOverlay : false,
+      postcardCaption:
+        typeof rawAdv.postcardCaption === 'string' && rawAdv.postcardCaption.trim()
+          ? rawAdv.postcardCaption.slice(0, 64)
+          : fallbackAdv.postcardCaption,
+      soundVolume:
+        typeof rawAdv.soundVolume === 'number' && Number.isFinite(rawAdv.soundVolume)
+          ? Math.max(0, Math.min(100, Math.round(rawAdv.soundVolume)))
+          : 75,
+      savingsVaultGold:
+        typeof rawAdv.savingsVaultGold === 'number' && Number.isFinite(rawAdv.savingsVaultGold)
+          ? Math.max(0, Math.round(rawAdv.savingsVaultGold))
+          : 0,
+      taxHolidayTurnsLeft:
+        typeof rawAdv.taxHolidayTurnsLeft === 'number' && Number.isFinite(rawAdv.taxHolidayTurnsLeft)
+          ? Math.max(0, Math.min(10, Math.round(rawAdv.taxHolidayTurnsLeft)))
+          : 0,
+      lastGrantTurn:
+        typeof rawAdv.lastGrantTurn === 'number' && Number.isFinite(rawAdv.lastGrantTurn)
+          ? Math.round(rawAdv.lastGrantTurn)
+          : -10,
+      megaprojectProgress:
+        rawAdv.megaprojectProgress && typeof rawAdv.megaprojectProgress === 'object'
+          ? rawAdv.megaprojectProgress
+          : {},
+      activeTradePacts: Array.isArray(rawAdv.activeTradePacts)
+        ? rawAdv.activeTradePacts.slice(0, 3)
+        : [],
+      awardedMedalAgentIds: Array.isArray(rawAdv.awardedMedalAgentIds)
+        ? rawAdv.awardedMedalAgentIds.slice(0, 20)
+        : [],
+      journalEntries: Array.isArray(rawAdv.journalEntries)
+        ? rawAdv.journalEntries.slice(0, 30)
+        : fallbackAdv.journalEntries,
     };
     return { blueprintsByPlot, trainBlueprints, taxRate, advanced };
   } catch {

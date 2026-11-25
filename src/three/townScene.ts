@@ -1894,6 +1894,10 @@ export class TownSceneController {
       this.cameraTargetGoal = null;
       this.cameraPosGoal = null;
       this.povReturnActive = false;
+      if (this.controls.autoRotate) {
+        this.controls.autoRotate = false;
+        this.callbacks.onUserOrbitStart?.();
+      }
       if (this.followActive) {
         this.followActive = false;
         this.callbacks.onUserOrbitStart?.();
@@ -2758,6 +2762,59 @@ export class TownSceneController {
 
   public setDeliveryVanEnabled(enabled: boolean): void {
     this.infraHandle?.setDeliveryVanEnabled(enabled);
+  }
+
+  public setAirshipEnabled(enabled: boolean): void {
+    this.infraHandle?.setAirshipEnabled(enabled);
+  }
+
+  public setSkyTramEnabled(enabled: boolean): void {
+    this.infraHandle?.setSkyTramEnabled(enabled);
+  }
+
+  public setMeteorShowerEnabled(enabled: boolean): void {
+    this.infraHandle?.setMeteorShowerEnabled(enabled);
+  }
+
+  public triggerMeteorShower(): void {
+    this.infraHandle?.triggerMeteorShower();
+  }
+
+  public setSearchlightsEnabled(enabled: boolean): void {
+    this.infraHandle?.setSearchlightsEnabled(enabled);
+  }
+
+  public setRainbowEnabled(enabled: boolean): void {
+    this.infraHandle?.setRainbowEnabled(enabled);
+  }
+
+  public setFirefliesEnabled(enabled: boolean): void {
+    this.infraHandle?.setFirefliesEnabled(enabled);
+  }
+
+  public setHoloEmblemEnabled(enabled: boolean): void {
+    this.infraHandle?.setHoloEmblemEnabled(enabled);
+  }
+
+  public setBirdsEnabled(enabled: boolean): void {
+    this.infraHandle?.setBirdsEnabled(enabled);
+  }
+
+  public setSatelliteEnabled(enabled: boolean): void {
+    this.infraHandle?.setSatelliteEnabled(enabled);
+  }
+
+  public setEmblemColor(hex: string): void {
+    this.infraHandle?.setEmblemColor(hex);
+  }
+
+  public setWonderCount(count: number): void {
+    this.infraHandle?.setWonderCount(count);
+  }
+
+  public setAutoTurntable(enabled: boolean): void {
+    this.controls.autoRotate = enabled;
+    this.controls.autoRotateSpeed = 1.05;
   }
 
   public setBeaconPlot(plotId: PlotId | null): void {

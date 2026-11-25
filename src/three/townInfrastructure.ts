@@ -19,6 +19,18 @@ export interface TownInfrastructureHandle {
   setBalloonsEnabled: (enabled: boolean) => void;
   setAuroraEnabled: (enabled: boolean) => void;
   setDeliveryVanEnabled: (enabled: boolean) => void;
+  setAirshipEnabled: (enabled: boolean) => void;
+  setSkyTramEnabled: (enabled: boolean) => void;
+  setMeteorShowerEnabled: (enabled: boolean) => void;
+  triggerMeteorShower: () => void;
+  setSearchlightsEnabled: (enabled: boolean) => void;
+  setRainbowEnabled: (enabled: boolean) => void;
+  setFirefliesEnabled: (enabled: boolean) => void;
+  setHoloEmblemEnabled: (enabled: boolean) => void;
+  setBirdsEnabled: (enabled: boolean) => void;
+  setSatelliteEnabled: (enabled: boolean) => void;
+  setEmblemColor: (hex: string) => void;
+  setWonderCount: (count: number) => void;
   setBeaconTarget: (target: { x: number; z: number } | null) => void;
   setLampMood: (mood: LampMood) => void;
   setUnlockedBiomes: (biomes: BiomeId[]) => void;
@@ -79,6 +91,17 @@ export function buildTownInfrastructureSystem(scene: THREE.Scene): TownInfrastru
   let balloonsEnabled = true;
   let auroraEnabled = true;
   let deliveryVanEnabled = true;
+  let airshipEnabled = true;
+  let skyTramEnabled = true;
+  let meteorShowerEnabled = true;
+  let searchlightsEnabled = false;
+  let rainbowEnabled = false;
+  let firefliesEnabled = true;
+  let holoEmblemEnabled = true;
+  let birdsEnabled = true;
+  let satelliteEnabled = true;
+  let wonderCount = 0;
+  let manualMeteorTimer = 0;
   let hasRiver = false;
   let nightFactor = 0;
 
@@ -491,6 +514,357 @@ export function buildTownInfrastructureSystem(scene: THREE.Scene): TownInfrastru
   group.add(beaconGroup);
   disposables.push(beaconBeamGeo, beaconRingGeo, beaconMat, beaconRingMat);
 
+  // -------------------------------------------------------------------------
+  // 10. Composite 7-Part Grand Zephyr Airship (cruises upper sky)
+  // -------------------------------------------------------------------------
+  const airshipGroup = new THREE.Group();
+  const airshipPts = [
+    new THREE.Vector2(0.01, -3.4),
+    new THREE.Vector2(0.78, -2.5),
+    new THREE.Vector2(1.22, -1.0),
+    new THREE.Vector2(1.28, 0.5),
+    new THREE.Vector2(1.05, 2.0),
+    new THREE.Vector2(0.45, 3.0),
+    new THREE.Vector2(0.01, 3.35),
+  ];
+  const airshipHullGeo = new THREE.LatheGeometry(airshipPts, 14);
+  airshipHullGeo.rotateX(Math.PI / 2);
+  const airshipStripeGeo = new THREE.TorusGeometry(1.25, 0.08, 6, 14);
+  const airshipGondolaGeo = new THREE.BoxGeometry(0.68, 0.42, 1.55);
+  const airshipFinGeo = new THREE.BoxGeometry(0.07, 1.05, 0.92);
+  const airshipPropGeo = new THREE.BoxGeometry(0.55, 0.07, 0.06);
+  const airshipNavGeo = new THREE.SphereGeometry(0.14, 8, 6);
+
+  const airshipHullMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.42, metalness: 0.18 });
+  const airshipStripeMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.35, metalness: 0.45 });
+  const airshipGondolaMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5, metalness: 0.35 });
+  const airshipFinMat = new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.42, metalness: 0.25 });
+  const airshipNavMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 1.5,
+    roughness: 0.2,
+  });
+
+  const airshipHull = new THREE.Mesh(airshipHullGeo, airshipHullMat);
+  const airshipStripe = new THREE.Mesh(airshipStripeGeo, airshipStripeMat);
+  airshipStripe.position.z = 0.2;
+  const airshipGondola = new THREE.Mesh(airshipGondolaGeo, airshipGondolaMat);
+  airshipGondola.position.set(0, -1.42, 0.1);
+  const airshipFinTop = new THREE.Mesh(airshipFinGeo, airshipFinMat);
+  airshipFinTop.position.set(0, 0.88, -2.2);
+  const airshipFinL = new THREE.Mesh(airshipFinGeo, airshipFinMat);
+  airshipFinL.rotation.z = Math.PI / 2;
+  airshipFinL.position.set(-0.92, 0, -2.2);
+  const airshipFinR = new THREE.Mesh(airshipFinGeo, airshipFinMat);
+  airshipFinR.rotation.z = Math.PI / 2;
+  airshipFinR.position.set(0.92, 0, -2.2);
+  const airshipPropL = new THREE.Mesh(airshipPropGeo, airshipStripeMat);
+  airshipPropL.position.set(-0.56, -1.38, -0.58);
+  const airshipPropR = new THREE.Mesh(airshipPropGeo, airshipStripeMat);
+  airshipPropR.position.set(0.56, -1.38, -0.58);
+  const airshipNav = new THREE.Mesh(airshipNavGeo, airshipNavMat);
+  airshipNav.position.set(0, -1.64, 0.72);
+  airshipGroup.add(
+    airshipHull,
+    airshipStripe,
+    airshipGondola,
+    airshipFinTop,
+    airshipFinL,
+    airshipFinR,
+    airshipPropL,
+    airshipPropR,
+    airshipNav,
+  );
+  group.add(airshipGroup);
+  disposables.push(
+    airshipHullGeo,
+    airshipStripeGeo,
+    airshipGondolaGeo,
+    airshipFinGeo,
+    airshipPropGeo,
+    airshipNavGeo,
+    airshipHullMat,
+    airshipStripeMat,
+    airshipGondolaMat,
+    airshipFinMat,
+    airshipNavMat,
+  );
+
+  // -------------------------------------------------------------------------
+  // 11. 3D Sky Gondola Cable-Car Line (2 pylons + overhead cable + glass cab)
+  // -------------------------------------------------------------------------
+  const skyTramGroup = new THREE.Group();
+  const pylonGeo = new THREE.CylinderGeometry(0.18, 0.34, 11.6, 6);
+  const pylonCrossGeo = new THREE.BoxGeometry(1.4, 0.22, 0.26);
+  const pylonMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.55, metalness: 0.45 });
+  const pylonL = new THREE.Mesh(pylonGeo, pylonMat);
+  pylonL.position.set(-18.5, 5.8, -14.5);
+  const pylonCrossL = new THREE.Mesh(pylonCrossGeo, pylonMat);
+  pylonCrossL.position.set(-18.5, 11.4, -14.5);
+  const pylonR = new THREE.Mesh(pylonGeo, pylonMat);
+  pylonR.position.set(18.5, 5.8, -14.5);
+  const pylonCrossR = new THREE.Mesh(pylonCrossGeo, pylonMat);
+  pylonCrossR.position.set(18.5, 11.4, -14.5);
+
+  const cableGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-18.5, 11.45, -14.5),
+    new THREE.Vector3(18.5, 11.45, -14.5),
+  ]);
+  const cableMat = new THREE.LineBasicMaterial({ color: 0x94a3b8 });
+  const cableLine = new THREE.Line(cableGeo, cableMat);
+
+  const gondolaGroup = new THREE.Group();
+  const gondolaArmGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.35, 6);
+  const gondolaRoofGeo = new THREE.BoxGeometry(1.45, 0.16, 0.95);
+  const gondolaCabGeo = new THREE.BoxGeometry(1.36, 0.78, 0.86);
+  const gondolaFloorGeo = new THREE.BoxGeometry(1.45, 0.18, 0.95);
+  const gondolaRoofMat = new THREE.MeshStandardMaterial({ color: 0xe11d48, roughness: 0.4, metalness: 0.2 });
+  const gondolaGlassMat = new THREE.MeshStandardMaterial({
+    color: 0xbae6fd,
+    emissive: 0x38bdf8,
+    emissiveIntensity: 0.45,
+    transparent: true,
+    opacity: 0.82,
+    roughness: 0.15,
+    metalness: 0.4,
+  });
+  const gondolaArm = new THREE.Mesh(gondolaArmGeo, pylonMat);
+  gondolaArm.position.y = -0.68;
+  const gondolaRoof = new THREE.Mesh(gondolaRoofGeo, gondolaRoofMat);
+  gondolaRoof.position.y = -1.36;
+  const gondolaCab = new THREE.Mesh(gondolaCabGeo, gondolaGlassMat);
+  gondolaCab.position.y = -1.82;
+  const gondolaFloor = new THREE.Mesh(gondolaFloorGeo, gondolaRoofMat);
+  gondolaFloor.position.y = -2.26;
+  gondolaGroup.add(gondolaArm, gondolaRoof, gondolaCab, gondolaFloor);
+  gondolaGroup.position.set(0, 11.45, -14.5);
+
+  skyTramGroup.add(pylonL, pylonCrossL, pylonR, pylonCrossR, cableLine, gondolaGroup);
+  group.add(skyTramGroup);
+  disposables.push(
+    pylonGeo,
+    pylonCrossGeo,
+    pylonMat,
+    cableGeo,
+    cableMat,
+    gondolaArmGeo,
+    gondolaRoofGeo,
+    gondolaCabGeo,
+    gondolaFloorGeo,
+    gondolaRoofMat,
+    gondolaGlassMat,
+  );
+
+  // -------------------------------------------------------------------------
+  // 12. 3D Starlight Meteor Shower (8 zero-GC shooting star streaks)
+  // -------------------------------------------------------------------------
+  const METEOR_COUNT = 8;
+  const meteorPositions = new Float32Array(METEOR_COUNT * 2 * 3);
+  const meteorGeo = new THREE.BufferGeometry();
+  meteorGeo.setAttribute('position', new THREE.BufferAttribute(meteorPositions, 3));
+  const meteorMat = new THREE.LineBasicMaterial({
+    color: 0xe0f2fe,
+    transparent: true,
+    opacity: 0.88,
+    blending: THREE.AdditiveBlending,
+  });
+  const meteorLines = new THREE.LineSegments(meteorGeo, meteorMat);
+  meteorLines.visible = false;
+  meteorLines.frustumCulled = false;
+  group.add(meteorLines);
+  disposables.push(meteorGeo, meteorMat);
+
+  const meteors = Array.from({ length: METEOR_COUNT }, (_, idx) => ({
+    x: -24 + idx * 7,
+    y: 26 + (idx % 3) * 5,
+    z: -26 - (idx % 4) * 5,
+    vx: 14 + (idx % 3) * 4,
+    vy: -9 - (idx % 2) * 3,
+    vz: 3.5,
+    phase: idx * 0.65,
+  }));
+
+  // -------------------------------------------------------------------------
+  // 13. 3D Twin Gala Searchlights (sweeping additive sky cones)
+  // -------------------------------------------------------------------------
+  const searchlightsGroup = new THREE.Group();
+  const slGeo = new THREE.ConeGeometry(2.3, 24, 14, 1, true);
+  slGeo.translate(0, 12, 0);
+  const slMat = new THREE.MeshBasicMaterial({
+    color: 0xfde68a,
+    transparent: true,
+    opacity: 0.16,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const searchlightL = new THREE.Mesh(slGeo, slMat);
+  searchlightL.position.set(-6.8, 0.1, -6.5);
+  const searchlightR = new THREE.Mesh(slGeo, slMat);
+  searchlightR.position.set(6.8, 0.1, -6.5);
+  searchlightsGroup.add(searchlightL, searchlightR);
+  searchlightsGroup.visible = false;
+  group.add(searchlightsGroup);
+  disposables.push(slGeo, slMat);
+
+  // -------------------------------------------------------------------------
+  // 14. 3D Post-Rain / Civic Rainbow Arch (5 translucent torus half-arcs)
+  // -------------------------------------------------------------------------
+  const rainbowGroup = new THREE.Group();
+  const rainbowColors = [0xef4444, 0xf97316, 0xfacc15, 0x22c55e, 0x38bdf8];
+  for (let i = 0; i < rainbowColors.length; i++) {
+    const rGeo = new THREE.TorusGeometry(28 - i * 0.72, 0.34, 6, 36, Math.PI);
+    const rMat = new THREE.MeshBasicMaterial({
+      color: rainbowColors[i],
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const arc = new THREE.Mesh(rGeo, rMat);
+    rainbowGroup.add(arc);
+    disposables.push(rGeo, rMat);
+  }
+  rainbowGroup.position.set(0, 0.5, -22);
+  rainbowGroup.visible = false;
+  group.add(rainbowGroup);
+
+  // -------------------------------------------------------------------------
+  // 15. 3D Golden Fireflies Swarm (48 zero-GC drifting Points)
+  // -------------------------------------------------------------------------
+  const FIREFLY_COUNT = 48;
+  const fireflyPositions = new Float32Array(FIREFLY_COUNT * 3);
+  const fireflySeeds = Array.from({ length: FIREFLY_COUNT }, (_, i) => ({
+    angle: (i / FIREFLY_COUNT) * Math.PI * 2,
+    radius: 3.5 + (i % 9) * 1.4,
+    baseY: 0.7 + (i % 5) * 0.55,
+    speed: 0.45 + (i % 7) * 0.11,
+  }));
+  const fireflyGeo = new THREE.BufferGeometry();
+  fireflyGeo.setAttribute('position', new THREE.BufferAttribute(fireflyPositions, 3));
+  const fireflyMat = new THREE.PointsMaterial({
+    color: 0xfef08a,
+    size: 0.24,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const firefliesPoints = new THREE.Points(fireflyGeo, fireflyMat);
+  firefliesPoints.visible = false;
+  firefliesPoints.frustumCulled = false;
+  group.add(firefliesPoints);
+  disposables.push(fireflyGeo, fireflyMat);
+
+  // -------------------------------------------------------------------------
+  // 16. 3D Floating Holographic Town Emblem Spire (above Town Hall)
+  // -------------------------------------------------------------------------
+  const holoGroup = new THREE.Group();
+  const holoOuterGeo = new THREE.OctahedronGeometry(0.95, 0);
+  const holoCoreGeo = new THREE.OctahedronGeometry(0.45, 0);
+  const holoRingGeo = new THREE.TorusGeometry(1.45, 0.06, 6, 24);
+  const holoWonderRingGeo = new THREE.TorusGeometry(2.05, 0.07, 6, 28);
+  const holoOuterMat = new THREE.MeshBasicMaterial({
+    color: 0xf59e0b,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.72,
+  });
+  const holoCoreMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 1.6,
+    roughness: 0.2,
+    metalness: 0.3,
+  });
+  const holoRingMat = new THREE.MeshBasicMaterial({
+    color: 0x38bdf8,
+    transparent: true,
+    opacity: 0.65,
+  });
+  const holoWonderMat = new THREE.MeshBasicMaterial({
+    color: 0xfde047,
+    transparent: true,
+    opacity: 0.85,
+  });
+  const holoOuter = new THREE.Mesh(holoOuterGeo, holoOuterMat);
+  const holoCore = new THREE.Mesh(holoCoreGeo, holoCoreMat);
+  const holoRing = new THREE.Mesh(holoRingGeo, holoRingMat);
+  holoRing.rotation.x = Math.PI / 3;
+  const holoWonderRing = new THREE.Mesh(holoWonderRingGeo, holoWonderMat);
+  holoWonderRing.rotation.x = -Math.PI / 3;
+  holoWonderRing.visible = false;
+  holoGroup.add(holoOuter, holoCore, holoRing, holoWonderRing);
+  holoGroup.position.set(0, 12.2, -9.2);
+  group.add(holoGroup);
+  disposables.push(
+    holoOuterGeo,
+    holoCoreGeo,
+    holoRingGeo,
+    holoWonderRingGeo,
+    holoOuterMat,
+    holoCoreMat,
+    holoRingMat,
+    holoWonderMat,
+  );
+
+  // -------------------------------------------------------------------------
+  // 17. 3D Instanced Soaring Birds / Swallows Flock (1 draw call, zero GC)
+  // -------------------------------------------------------------------------
+  const MAX_BIRDS = 24;
+  const birdGeo = new THREE.ConeGeometry(0.16, 0.62, 3);
+  birdGeo.rotateX(Math.PI / 2);
+  birdGeo.scale(2.8, 0.25, 1.0);
+  const birdMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.6, metalness: 0.05 });
+  const birdsInstanced = new THREE.InstancedMesh(birdGeo, birdMat, MAX_BIRDS);
+  birdsInstanced.frustumCulled = false;
+  group.add(birdsInstanced);
+  disposables.push(birdGeo, birdMat);
+  const _birdDummy = new THREE.Object3D();
+  const birdSeeds = Array.from({ length: MAX_BIRDS }, (_, i) => ({
+    offset: (i / MAX_BIRDS) * Math.PI * 2,
+    radiusX: 14 + (i % 5) * 3.1,
+    radiusZ: 11 + (i % 4) * 2.8,
+    altitude: 11.5 + (i % 6) * 1.45,
+    speed: 0.28 + (i % 4) * 0.05,
+  }));
+
+  // -------------------------------------------------------------------------
+  // 18. Composite 5-Part Orbiting Civic Satellite Beacon
+  // -------------------------------------------------------------------------
+  const satGroup = new THREE.Group();
+  const satCoreGeo = new THREE.BoxGeometry(0.7, 0.55, 0.7);
+  const satPanelGeo = new THREE.BoxGeometry(2.8, 0.05, 0.65);
+  const satDishGeo = new THREE.ConeGeometry(0.32, 0.22, 10, 1, true);
+  const satBeaconGeo = new THREE.SphereGeometry(0.14, 8, 6);
+  const satCoreMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.3, metalness: 0.75 });
+  const satPanelMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.25, metalness: 0.6 });
+  const satDishMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.4, metalness: 0.5 });
+  const satBeaconMat = new THREE.MeshStandardMaterial({
+    color: 0x38bdf8,
+    emissive: 0x22d3ee,
+    emissiveIntensity: 1.8,
+  });
+  const satCore = new THREE.Mesh(satCoreGeo, satCoreMat);
+  const satPanels = new THREE.Mesh(satPanelGeo, satPanelMat);
+  const satDish = new THREE.Mesh(satDishGeo, satDishMat);
+  satDish.position.set(0, -0.38, 0);
+  const satBeacon = new THREE.Mesh(satBeaconGeo, satBeaconMat);
+  satBeacon.position.set(0, 0.42, 0);
+  satGroup.add(satCore, satPanels, satDish, satBeacon);
+  group.add(satGroup);
+  disposables.push(
+    satCoreGeo,
+    satPanelGeo,
+    satDishGeo,
+    satBeaconGeo,
+    satCoreMat,
+    satPanelMat,
+    satDishMat,
+    satBeaconMat,
+  );
+
   scene.add(group);
 
   function syncActorVisibility(): void {
@@ -503,6 +877,17 @@ export function buildTownInfrastructureSystem(scene: THREE.Scene): TownInfrastru
       balloonGroups[i].visible = balloonsEnabled && (allowExtra || i === 0);
     }
     auroraMesh.visible = auroraEnabled && allowExtra && nightFactor > 0.25;
+    airshipGroup.visible = airshipEnabled;
+    skyTramGroup.visible = skyTramEnabled && allowExtra;
+    meteorLines.visible = manualMeteorTimer > 0 || (meteorShowerEnabled && nightFactor > 0.22);
+    searchlightsGroup.visible = searchlightsEnabled && allowExtra;
+    rainbowGroup.visible = rainbowEnabled;
+    firefliesPoints.visible = firefliesEnabled && allowExtra && nightFactor > 0.2;
+    holoGroup.visible = holoEmblemEnabled;
+    holoWonderRing.visible = wonderCount > 0;
+    birdsInstanced.visible = birdsEnabled;
+    birdsInstanced.count = allowExtra ? MAX_BIRDS : 8;
+    satGroup.visible = satelliteEnabled && allowExtra;
   }
 
   return {
@@ -560,6 +945,59 @@ export function buildTownInfrastructureSystem(scene: THREE.Scene): TownInfrastru
       deliveryVanEnabled = enabled;
       syncActorVisibility();
     },
+    setAirshipEnabled(enabled) {
+      airshipEnabled = enabled;
+      syncActorVisibility();
+    },
+    setSkyTramEnabled(enabled) {
+      skyTramEnabled = enabled;
+      syncActorVisibility();
+    },
+    setMeteorShowerEnabled(enabled) {
+      meteorShowerEnabled = enabled;
+      syncActorVisibility();
+    },
+    triggerMeteorShower() {
+      manualMeteorTimer = 6.5;
+      syncActorVisibility();
+    },
+    setSearchlightsEnabled(enabled) {
+      searchlightsEnabled = enabled;
+      syncActorVisibility();
+    },
+    setRainbowEnabled(enabled) {
+      rainbowEnabled = enabled;
+      syncActorVisibility();
+    },
+    setFirefliesEnabled(enabled) {
+      firefliesEnabled = enabled;
+      syncActorVisibility();
+    },
+    setHoloEmblemEnabled(enabled) {
+      holoEmblemEnabled = enabled;
+      syncActorVisibility();
+    },
+    setBirdsEnabled(enabled) {
+      birdsEnabled = enabled;
+      syncActorVisibility();
+    },
+    setSatelliteEnabled(enabled) {
+      satelliteEnabled = enabled;
+      syncActorVisibility();
+    },
+    setEmblemColor(hex) {
+      try {
+        holoOuterMat.color.set(hex);
+        holoCoreMat.emissive.set(hex);
+      } catch {
+        holoOuterMat.color.setHex(0xf59e0b);
+      }
+    },
+    setWonderCount(count) {
+      wonderCount = Math.max(0, count);
+      holoGroup.scale.setScalar(1 + Math.min(0.45, wonderCount * 0.12));
+      syncActorVisibility();
+    },
     setBeaconTarget(target) {
       if (!target) {
         beaconGroup.visible = false;
@@ -576,6 +1014,8 @@ export function buildTownInfrastructureSystem(scene: THREE.Scene): TownInfrastru
       beaconRingMat.color.setHex(cfg.accent);
       vanLightMat.emissive.setHex(cfg.accent);
       auroraMat.color.setHex(cfg.auroraA);
+      slMat.color.setHex(cfg.accent);
+      holoRingMat.color.setHex(cfg.auroraB);
     },
     setUnlockedBiomes(biomes) {
       hasRiver = biomes.includes('river');
@@ -707,6 +1147,114 @@ export function buildTownInfrastructureSystem(scene: THREE.Scene): TownInfrastru
         if (!anyAlive || fireworksActiveTimer <= 0) {
           fwPoints.visible = false;
         }
+      }
+
+      // 10. Grand Zephyr Airship
+      if (airshipGroup.visible) {
+        const ang = elapsed * 0.11;
+        const ax = Math.cos(ang) * 23;
+        const az = Math.sin(ang) * 18.5;
+        airshipGroup.position.set(ax, 21.5 + Math.sin(elapsed * 0.65) * 0.7, az);
+        airshipGroup.rotation.y = -ang;
+        airshipPropL.rotation.z += dt * 16;
+        airshipPropR.rotation.z -= dt * 16;
+      }
+
+      // 11. Sky Gondola Cable-Car Line
+      if (skyTramGroup.visible) {
+        const swing = Math.sin(elapsed * 0.24);
+        gondolaGroup.position.x = swing * 16.5;
+        gondolaGroup.rotation.z = Math.cos(elapsed * 0.24) * 0.06;
+      }
+
+      // 12. Starlight Meteor Shower
+      if (manualMeteorTimer > 0) {
+        manualMeteorTimer = Math.max(0, manualMeteorTimer - dt);
+        if (manualMeteorTimer === 0) syncActorVisibility();
+      }
+      if (meteorLines.visible) {
+        for (let i = 0; i < METEOR_COUNT; i++) {
+          const m = meteors[i];
+          const t = (elapsed * 0.72 + m.phase) % 2.4;
+          const active = t < 1.05;
+          const idx = i * 6;
+          if (active) {
+            const hx = m.x + m.vx * t;
+            const hy = m.y + m.vy * t;
+            const hz = m.z + m.vz * t;
+            meteorPositions[idx] = hx;
+            meteorPositions[idx + 1] = hy;
+            meteorPositions[idx + 2] = hz;
+            meteorPositions[idx + 3] = hx - m.vx * 0.18;
+            meteorPositions[idx + 4] = hy - m.vy * 0.18;
+            meteorPositions[idx + 5] = hz - m.vz * 0.18;
+          } else {
+            meteorPositions[idx + 1] = -40;
+            meteorPositions[idx + 4] = -40;
+          }
+        }
+        meteorGeo.attributes.position.needsUpdate = true;
+      }
+
+      // 13. Twin Gala Searchlights
+      if (searchlightsGroup.visible) {
+        searchlightL.rotation.z = Math.sin(elapsed * 0.9) * 0.48 - 0.12;
+        searchlightL.rotation.x = Math.cos(elapsed * 0.65) * 0.25;
+        searchlightR.rotation.z = Math.cos(elapsed * 0.85) * 0.48 + 0.12;
+        searchlightR.rotation.x = Math.sin(elapsed * 0.7) * 0.25;
+        slMat.opacity = 0.08 + nightFactor * 0.16;
+      }
+
+      // 15. Golden Fireflies Swarm
+      if (firefliesPoints.visible) {
+        for (let i = 0; i < FIREFLY_COUNT; i++) {
+          const s = fireflySeeds[i];
+          const a = s.angle + elapsed * s.speed * 0.25;
+          const r = s.radius + Math.sin(elapsed * s.speed + i) * 0.65;
+          fireflyPositions[i * 3] = Math.cos(a) * r;
+          fireflyPositions[i * 3 + 1] = s.baseY + Math.sin(elapsed * 1.9 + i * 0.7) * 0.42;
+          fireflyPositions[i * 3 + 2] = Math.sin(a) * r;
+        }
+        fireflyGeo.attributes.position.needsUpdate = true;
+      }
+
+      // 16. Floating Holographic Town Emblem Spire
+      if (holoGroup.visible) {
+        holoGroup.position.y = 12.2 + Math.sin(elapsed * 1.6) * 0.35;
+        holoOuter.rotation.y += dt * 0.75;
+        holoCore.rotation.y -= dt * 1.25;
+        holoRing.rotation.z += dt * 1.1;
+        if (holoWonderRing.visible) {
+          holoWonderRing.rotation.z -= dt * 0.85;
+        }
+      }
+
+      // 17. Instanced Soaring Birds Flock (zero GC)
+      if (birdsInstanced.visible) {
+        const count = birdsInstanced.count;
+        for (let i = 0; i < count; i++) {
+          const b = birdSeeds[i];
+          const t = elapsed * b.speed + b.offset;
+          const bx = Math.cos(t) * b.radiusX;
+          const bz = Math.sin(t * 1.5) * b.radiusZ;
+          const by = b.altitude + Math.sin(t * 2.2) * 0.75;
+          const dx = -Math.sin(t) * b.radiusX;
+          const dz = Math.cos(t * 1.5) * 1.5 * b.radiusZ;
+          _birdDummy.position.set(bx, by, bz);
+          _birdDummy.rotation.set(0, Math.atan2(dx, dz), Math.sin(elapsed * 7 + i) * 0.25);
+          _birdDummy.scale.set(1, 1 + Math.sin(elapsed * 10 + i) * 0.35, 1);
+          _birdDummy.updateMatrix();
+          birdsInstanced.setMatrixAt(i, _birdDummy.matrix);
+        }
+        birdsInstanced.instanceMatrix.needsUpdate = true;
+      }
+
+      // 18. Orbiting Civic Satellite Beacon
+      if (satGroup.visible) {
+        const ang = elapsed * 0.22;
+        satGroup.position.set(Math.cos(ang) * 30, 27.5 + Math.sin(ang * 2) * 1.4, Math.sin(ang) * 26);
+        satGroup.rotation.y = -ang + Math.PI / 2;
+        satGroup.rotation.z = 0.22;
       }
     },
     dispose() {

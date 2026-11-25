@@ -32,10 +32,12 @@ import {
   type DecorPackId,
   type DecorPackMeta,
   type DistrictZoneType,
+  type EcoScoreSummary,
   type EmergencyEventState,
   type FestivalKind,
   type LocationId,
   type MarketPricesState,
+  type MegaprojectId,
   type MilestoneId,
   type MunicipalLoanState,
   type PlotId,
@@ -62,7 +64,10 @@ import {
   type TownResources,
   type TownStructure,
   type TownTheme,
+  type TownTrophyItem,
+  type TradePactId,
   type TrainBlueprint,
+  type WeatherForecastItem,
   type UtilityGridSummary,
   type WeatherMode,
 } from '../types/town.ts';
@@ -190,6 +195,7 @@ export function computeTownEconomy(
   agentShifts: Partial<Record<AgentId, AgentShiftMode>> = {},
   activeFestival: ActiveFestivalState | null = null,
   tourismBonus = 0,
+  extraBonusGold = 0,
 ): TownEconomySummary {
   const rows: BuildingEconomyRow[] = [];
   let buildingRevenue = 0;
@@ -296,7 +302,8 @@ export function computeTownEconomy(
     railwayBonus +
     buildingRevenue +
     festivalGold +
-    Math.max(0, Math.round(tourismBonus));
+    Math.max(0, Math.round(tourismBonus)) +
+    Math.max(0, Math.round(extraBonusGold));
   const policyUpkeep = (hasFreeBread ? 10 : 0) + (hasGreenCharter ? 4 : 0);
   const loanPayment = activeLoan && activeLoan.remaining > 0 ? activeLoan.perTurnPayment : 0;
   const workerUpkeep = Math.max(0, agents.length - 5) * 4 + 8 + policyUpkeep + loanPayment;
@@ -2406,25 +2413,39 @@ export function computeTourismSummary(params: {
   balloonsEnabled: boolean;
   fireworksCount: number;
   activeFestival: ActiveFestivalState | null;
+  airshipEnabled?: boolean;
+  skyTramEnabled?: boolean;
+  rainbowEnabled?: boolean;
+  completedWonders?: number;
+  taxHolidayActive?: boolean;
 }): TourismSummary {
   const completed = params.structures.filter((s) => s.status === 'complete');
   const tallTowers = completed.filter((s) => (s.blueprint?.floors ?? 1) >= 4).length;
-  const dailyVisitors =
+  const rawVisitors =
     18 +
     completed.length * 6 +
     tallTowers * 14 +
     params.unlockedBiomes.length * 12 +
     params.decorPacks.length * 15 +
     (params.balloonsEnabled ? 22 : 0) +
+    (params.airshipEnabled ? 30 : 0) +
+    (params.skyTramEnabled ? 18 : 0) +
+    (params.rainbowEnabled ? 18 : 0) +
+    (params.completedWonders ?? 0) * 34 +
     Math.min(30, params.fireworksCount * 6) +
     (params.activeFestival ? 38 : 0);
 
+  const dailyVisitors = Math.round(rawVisitors * (params.taxHolidayActive ? 1.25 : 1));
   const revenuePerTurn = Math.round(dailyVisitors * 0.24);
-  const starRating = Math.min(5, Number((2.2 + dailyVisitors / 75).toFixed(1)));
+  const starRating = Math.min(5, Number((2.2 + dailyVisitors / 82).toFixed(1)));
 
   let topAttraction = 'Alderbrook Town Square';
   if (params.activeFestival) {
     topAttraction = params.activeFestival.label;
+  } else if ((params.completedWonders ?? 0) > 0) {
+    topAttraction = 'Completed Town Megaproject';
+  } else if (params.airshipEnabled) {
+    topAttraction = 'Grand Zephyr Airship Cruises';
   } else if (tallTowers > 0) {
     const tallest = [...completed].sort(
       (a, b) => (b.blueprint?.floors ?? 1) - (a.blueprint?.floors ?? 1),
@@ -2534,5 +2555,302 @@ export function formatTownReportCard(params: {
     `Civic Pulse: ${params.prosperity}% Prosperity · ${params.morale}% Morale`,
   ].join('\n');
 }
+
+// ============================================================================
+// 19. Batch 4: Town Megaprojects, Sister-City Trade Pacts, Weather Forecast,
+//     Eco-Sustainability Index & 12 Achievement Trophies
+// ============================================================================
+
+export const MEGAPROJECT_CATALOG: Array<{
+  id: MegaprojectId;
+  label: string;
+  stageCostGold: number;
+  stageCostCrystal: number;
+  goldBonusPerTurn: number;
+  crystalBonusPerTurn: number;
+  ecoBonus: number;
+  summary: string;
+}> = [
+  {
+    id: 'clockwork_observatory',
+    label: 'Grand Clockwork Observatory',
+    stageCostGold: 95,
+    stageCostCrystal: 4,
+    goldBonusPerTurn: 38,
+    crystalBonusPerTurn: 3,
+    ecoBonus: 6,
+    summary: '+38g & +3 Crystal/turn + boosts skyline wonder prestige',
+  },
+  {
+    id: 'botanical_conservatory',
+    label: 'Skyline Botanical Conservatory',
+    stageCostGold: 85,
+    stageCostCrystal: 3,
+    goldBonusPerTurn: 26,
+    crystalBonusPerTurn: 1,
+    ecoBonus: 22,
+    summary: '+22 Eco Score, +26g/turn & +34 daily visitors',
+  },
+  {
+    id: 'quantum_rail_terminal',
+    label: 'Quantum Rail Grand Terminal',
+    stageCostGold: 115,
+    stageCostCrystal: 5,
+    goldBonusPerTurn: 56,
+    crystalBonusPerTurn: 2,
+    ecoBonus: 8,
+    summary: '+56g/turn express transit dividend & +2 Crystal/turn',
+  },
+  {
+    id: 'aegis_solar_citadel',
+    label: 'Aegis Solar Citadel',
+    stageCostGold: 120,
+    stageCostCrystal: 6,
+    goldBonusPerTurn: 44,
+    crystalBonusPerTurn: 4,
+    ecoBonus: 18,
+    summary: '+44g, +4 Crystal/turn & +18 Eco clean-grid boost',
+  },
+];
+
+export const TRADE_PACT_CATALOG: Array<{
+  id: TradePactId;
+  cityName: string;
+  goldPerTurn: number;
+  timberPerTurn: number;
+  stonePerTurn: number;
+  harvestPerTurn: number;
+  crystalPerTurn: number;
+  signingFeeGold: number;
+  summary: string;
+}> = [
+  {
+    id: 'solstice_harbor',
+    cityName: 'Solstice Harbor',
+    goldPerTurn: 18,
+    timberPerTurn: 0,
+    stonePerTurn: 0,
+    harvestPerTurn: 4,
+    crystalPerTurn: 0,
+    signingFeeGold: 40,
+    summary: '+18g & +4 Harvest/turn maritime supply pact',
+  },
+  {
+    id: 'ironridge_foundry',
+    cityName: 'Ironridge Foundry',
+    goldPerTurn: 14,
+    timberPerTurn: 3,
+    stonePerTurn: 4,
+    harvestPerTurn: 0,
+    crystalPerTurn: 0,
+    signingFeeGold: 45,
+    summary: '+14g, +3 Timber & +4 Stone/turn heavy craft pact',
+  },
+  {
+    id: 'verdant_spire',
+    cityName: 'Verdant Spire',
+    goldPerTurn: 12,
+    timberPerTurn: 2,
+    stonePerTurn: 0,
+    harvestPerTurn: 2,
+    crystalPerTurn: 2,
+    signingFeeGold: 55,
+    summary: '+12g, +2 Crystal, +2 Timber & +2 Harvest/turn research pact',
+  },
+];
+
+const FORECAST_CYCLE: Array<{ weather: WeatherMode; label: string; hint: string }> = [
+  { weather: 'summer', label: 'Warm Summer', hint: 'Peak solar output & bustling plaza tourism' },
+  { weather: 'rain', label: 'Spring Rain', hint: 'Rich greenhouse harvests & rainbow chance' },
+  { weather: 'summer', label: 'Golden Skies', hint: 'Strong open-air trade & rail ridership' },
+  { weather: 'winter', label: 'Alpine Snow', hint: 'Cozy winter glow & hearth bakery demand' },
+];
+
+export function computeWeatherForecast(
+  currentWeather: WeatherMode,
+  turnCount: number,
+): WeatherForecastItem[] {
+  const startIdx = Math.max(
+    0,
+    FORECAST_CYCLE.findIndex((w) => w.weather === currentWeather),
+  );
+  const items: WeatherForecastItem[] = [];
+  for (let i = 1; i <= 3; i += 1) {
+    const pick = FORECAST_CYCLE[(startIdx + i + Math.floor(turnCount / 6)) % FORECAST_CYCLE.length];
+    items.push({
+      turnsAhead: i,
+      weather: pick.weather,
+      label: pick.label,
+      hint: pick.hint,
+    });
+  }
+  return items;
+}
+
+export function computeEcoScore(params: {
+  structures: TownStructure[];
+  unlockedBiomes: BiomeId[];
+  activePolicies: PolicyId[];
+  unlockedTechs: TechUpgradeId[];
+  megaprojectProgress: Partial<Record<MegaprojectId, number>>;
+}): EcoScoreSummary {
+  const completed = params.structures.filter((s) => s.status === 'complete');
+  const greenCount = completed.filter(
+    (s) =>
+      s.structureType === 'greenhouse' ||
+      s.structureType === 'windmill' ||
+      s.structureType === 'pavilion' ||
+      s.structureType === 'hospital',
+  ).length;
+  const heavyCount = completed.filter(
+    (s) =>
+      s.structureType === 'custom' ||
+      s.structureType === 'defense_wall' ||
+      s.structureType === 'triple_gun_tower',
+  ).length;
+
+  let wonderEco = 0;
+  for (const m of MEGAPROJECT_CATALOG) {
+    if ((params.megaprojectProgress[m.id] ?? 0) >= 100) {
+      wonderEco += m.ecoBonus;
+    }
+  }
+
+  let score =
+    56 +
+    greenCount * 8 -
+    heavyCount * 4 +
+    (params.unlockedBiomes.includes('forest') ? 8 : 0) +
+    (params.unlockedBiomes.includes('river') ? 6 : 0) +
+    (params.activePolicies.includes('green_charter') ? 14 : 0) +
+    (params.unlockedTechs.includes('solar_roofs') ? 10 : 0) +
+    (params.unlockedTechs.includes('smart_grid') ? 6 : 0) +
+    (params.unlockedTechs.includes('hydroponics') ? 8 : 0) +
+    wonderEco;
+
+  score = Math.max(10, Math.min(100, Math.round(score)));
+  const dividendGold = score >= 85 ? 24 : score >= 75 ? 14 : score >= 60 ? 6 : 0;
+  const moraleBonus = score >= 80 ? 2 : score >= 65 ? 1 : 0;
+  const label =
+    score >= 85
+      ? 'Eco Utopia'
+      : score >= 75
+        ? 'Green Leader'
+        : score >= 55
+          ? 'Balanced'
+          : 'Industrial Strain';
+  const tip =
+    score >= 75
+      ? `Earning +${dividendGold}g/turn Green Dividend & +${moraleBonus} Morale!`
+      : 'Build Gardens/Windmills or enable Green Charter to reach 75%+ Eco Dividend.';
+
+  return { score, label, dividendGold, moraleBonus, tip };
+}
+
+export function computeTownTrophies(params: {
+  structures: TownStructure[];
+  agents: AgentRecord[];
+  treasuryGold: number;
+  savingsVaultGold: number;
+  unlockedBiomes: BiomeId[];
+  trainCount: number;
+  completedWonders: number;
+  activeTradePacts: number;
+  ecoScore: number;
+  tourismStars: number;
+  creditGrade: CreditRatingSummary['grade'];
+  fireworksCount: number;
+  awardedMedals: number;
+}): TownTrophyItem[] {
+  const completedBldgs = params.structures.filter((s) => s.status === 'complete').length;
+  const housing = computeTownHousingCapacity(params.structures);
+  return [
+    {
+      id: 'trophy-skyline',
+      title: 'Skyline Architect',
+      detail: 'Complete 6+ buildings across Alderbrook',
+      unlocked: completedBldgs >= 6,
+      progressLabel: `${Math.min(6, completedBldgs)}/6`,
+    },
+    {
+      id: 'trophy-crowd',
+      title: 'Metropolis 100+',
+      detail: 'House 100+ living instanced crowd citizens',
+      unlocked: housing.dummyPopulation >= 100,
+      progressLabel: `${Math.min(100, housing.dummyPopulation)}/100`,
+    },
+    {
+      id: 'trophy-wonder',
+      title: 'Wonder Architect',
+      detail: 'Complete any multi-stage Town Megaproject',
+      unlocked: params.completedWonders >= 1,
+      progressLabel: `${params.completedWonders}/1`,
+    },
+    {
+      id: 'trophy-all-wonders',
+      title: 'Grand Visionary',
+      detail: 'Complete all 4 Town Megaprojects',
+      unlocked: params.completedWonders >= 4,
+      progressLabel: `${params.completedWonders}/4`,
+    },
+    {
+      id: 'trophy-vault',
+      title: 'Vault Tycoon',
+      detail: 'Hold 500g+ in the protected Savings Vault',
+      unlocked: params.savingsVaultGold >= 500,
+      progressLabel: `${Math.min(500, params.savingsVaultGold)}/500g`,
+    },
+    {
+      id: 'trophy-aaa',
+      title: 'Prime AAA Mayor',
+      detail: 'Achieve AAA Municipal Credit Rating',
+      unlocked: params.creditGrade === 'AAA',
+      progressLabel: params.creditGrade,
+    },
+    {
+      id: 'trophy-eco',
+      title: 'Eco Utopia',
+      detail: 'Reach 85%+ Town Eco-Sustainability Score',
+      unlocked: params.ecoScore >= 85,
+      progressLabel: `${params.ecoScore}%`,
+    },
+    {
+      id: 'trophy-tourism',
+      title: '5-Star Destination',
+      detail: 'Reach a 4.5+ Star Tourism Rating',
+      unlocked: params.tourismStars >= 4.5,
+      progressLabel: `★ ${params.tourismStars.toFixed(1)}`,
+    },
+    {
+      id: 'trophy-diplomat',
+      title: 'Regional Diplomat',
+      detail: 'Maintain 2+ active Sister-City Trade Pacts',
+      unlocked: params.activeTradePacts >= 2,
+      progressLabel: `${params.activeTradePacts}/2`,
+    },
+    {
+      id: 'trophy-rail',
+      title: 'Rail Baron',
+      detail: 'Operate a full 3-train custom rail fleet',
+      unlocked: params.trainCount >= 3,
+      progressLabel: `${Math.min(3, params.trainCount)}/3`,
+    },
+    {
+      id: 'trophy-medals',
+      title: 'Hall of Honor',
+      detail: 'Award 3+ Medals of Honor to AI villagers',
+      unlocked: params.awardedMedals >= 3,
+      progressLabel: `${Math.min(3, params.awardedMedals)}/3`,
+    },
+    {
+      id: 'trophy-biomes',
+      title: 'Frontier Explorer',
+      detail: 'Unlock all 4 regional biomes around town',
+      unlocked: params.unlockedBiomes.length >= 4,
+      progressLabel: `${params.unlockedBiomes.length}/4`,
+    },
+  ];
+}
+
 
 

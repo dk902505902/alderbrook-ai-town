@@ -504,6 +504,52 @@ export interface CreditRatingSummary {
   advice: string;
 }
 
+export type CinemaFilterMode =
+  | 'none'
+  | 'warm_film'
+  | 'noir'
+  | 'cyber_vivid'
+  | 'pastel_dream'
+  | 'vintage';
+
+export type MegaprojectId =
+  | 'clockwork_observatory'
+  | 'botanical_conservatory'
+  | 'quantum_rail_terminal'
+  | 'aegis_solar_citadel';
+
+export type TradePactId = 'solstice_harbor' | 'ironridge_foundry' | 'verdant_spire';
+
+export interface JournalEntry {
+  id: string;
+  turn: number;
+  text: string;
+  createdAtMs: number;
+}
+
+export interface WeatherForecastItem {
+  turnsAhead: number;
+  weather: WeatherMode;
+  label: string;
+  hint: string;
+}
+
+export interface EcoScoreSummary {
+  score: number; // 0..100
+  label: string;
+  dividendGold: number;
+  moraleBonus: number;
+  tip: string;
+}
+
+export interface TownTrophyItem {
+  id: string;
+  title: string;
+  detail: string;
+  unlocked: boolean;
+  progressLabel: string;
+}
+
 export interface TownAdvancedState {
   zoneMap: Partial<Record<PlotId, DistrictZoneType>>;
   unlockedTechs: TechUpgradeId[];
@@ -527,6 +573,27 @@ export interface TownAdvancedState {
   emblemColor: string;
   todos: MayorTodoItem[];
   activeFestival: ActiveFestivalState | null;
+  // Batch 4: 3D Sky & Living World Marvels, Cinema Studio, Megaprojects, Vault, Pacts & Journal
+  airshipEnabled: boolean;
+  skyTramEnabled: boolean;
+  meteorShowerEnabled: boolean;
+  searchlightsEnabled: boolean;
+  rainbowEnabled: boolean;
+  firefliesEnabled: boolean;
+  holoEmblemEnabled: boolean;
+  birdsEnabled: boolean;
+  satelliteEnabled: boolean;
+  cinemaFilter: CinemaFilterMode;
+  photoGridOverlay: boolean;
+  postcardCaption: string;
+  soundVolume: number;
+  savingsVaultGold: number;
+  taxHolidayTurnsLeft: number;
+  lastGrantTurn: number;
+  megaprojectProgress: Partial<Record<MegaprojectId, number>>;
+  activeTradePacts: TradePactId[];
+  awardedMedalAgentIds: AgentId[];
+  journalEntries: JournalEntry[];
 }
 
 export interface TownEventOption {

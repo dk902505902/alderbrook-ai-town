@@ -3,6 +3,7 @@
 class TownSoundscape {
   private ctx: AudioContext | null = null;
   private enabled = false;
+  private masterVolume = 0.75;
   private ambientGain: GainNode | null = null;
   private ambientSource: AudioBufferSourceNode | null = null;
 
@@ -36,6 +37,30 @@ class TownSoundscape {
     return this.enabled;
   }
 
+  public setVolume(pct: number): void {
+    this.masterVolume = Math.max(0, Math.min(1, pct / 100));
+    if (this.ambientGain && this.ctx) {
+      this.ambientGain.gain.setTargetAtTime(0.035 * this.masterVolume, this.ctx.currentTime, 0.05);
+    }
+  }
+
+  public getVolume(): number {
+    return Math.round(this.masterVolume * 100);
+  }
+
+  public playTestChime(): void {
+    const prev = this.enabled;
+    if (!prev) {
+      this.enabled = true;
+    }
+    this.playTone(523.25, 0.18, 'triangle', 0.09, 0);
+    this.playTone(659.25, 0.22, 'sine', 0.08, 0.08);
+    this.playTone(783.99, 0.3, 'sine', 0.09, 0.16);
+    if (!prev) {
+      this.enabled = false;
+    }
+  }
+
   private startAmbient(ctx: AudioContext): void {
     if (this.ambientSource) return;
     // Soft filtered pink-ish noise breeze
@@ -62,7 +87,7 @@ class TownSoundscape {
     filter.frequency.value = 380;
 
     const gain = ctx.createGain();
-    gain.gain.value = 0.035;
+    gain.gain.value = 0.035 * this.masterVolume;
 
     src.connect(filter);
     filter.connect(gain);
@@ -107,8 +132,9 @@ class TownSoundscape {
     osc.type = type;
     osc.frequency.setValueAtTime(freq, now);
 
+    const scaledVol = Math.max(0.0002, volume * this.masterVolume);
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(volume, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(scaledVol, now + 0.015);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
     osc.connect(gain);
