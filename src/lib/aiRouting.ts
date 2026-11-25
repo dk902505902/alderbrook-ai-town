@@ -557,21 +557,25 @@ const REASONING_MODEL_PATTERNS: RegExp[] = [
   /(?:^|[/:_.-])r1(?:$|[/:_.-])/i,
   /deepseek[-_/\s]?r1/i,
   /deepseek[-_/\s]?reasoner/i,
+  /nemotron/i,
+  /(?:^|[/:_.-])ultra(?:$|[/:_.-])/i,
   /\breasoner\b/i,
   /\breasoning\b/i,
   /thinking/i,
   /(?:^|[/:_.-])think(?:$|[/:_.-])/i,
   /\bqwq\b/i,
-  /\bqwen[-_.]?3\b/i,
-  /gemini[-_.]?2\.5/i,
-  /gemini[-_.]?4[-_.]/i,
+  /\bqwen[-_.]?3(?:$|[/:_.-])/i,
+  /gemini[-_.]?(?:2\.5|3|4)[-_.]/i,
   /gpt[-_.]?5/i,
+  /glm[-_.]?4\.[567]/i,
+  /kimi[-_.]?k2/i,
+  /magistral/i,
 ];
 
 /**
- * Returns true for reasoning/thinking models (DeepSeek R1, Qwen Thinking/QwQ,
- * Gemini Thinking/2.5/4, OpenAI o1/o3/o4) that emit thinking tokens and often
- * reject `temperature` or truncate output when `max_tokens` is too small.
+ * Returns true for reasoning/thinking/ultra models (Nemotron Ultra, DeepSeek R1,
+ * Qwen Thinking/QwQ, Gemini Thinking/2.5/3/4, OpenAI o1/o3/o4) that emit internal
+ * thinking tokens and often reject `temperature` or exhaust small `max_tokens` budgets.
  */
 export function isReasoningModel(modelName: string): boolean {
   const normalized = (modelName || '').trim().toLowerCase();
@@ -626,6 +630,82 @@ function tryParseJsonRecord(candidate: string): Record<string, unknown> | null {
 }
 
 /**
+ * Extracts all top-level valid JSON objects found via balanced-brace scanning.
+ */
+function findBalancedJsonObjects(text: string): Record<string, unknown>[] {
+  const results: Record<string, unknown>[] = [];
+  let inString = false;
+  let escapeNext = false;
+  let depth = 0;
+  let startIdx = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (ch === '\\') {
+        escapeNext = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') {
+      if (depth === 0) startIdx = i;
+      depth += 1;
+    } else if (ch === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && startIdx >= 0) {
+        const candidate = text.slice(startIdx, i + 1);
+        const parsed = tryParseJsonRecord(candidate);
+        if (parsed) results.push(parsed);
+        startIdx = -1;
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Extracts the last valid `{ ... }` JSON object from text (ideal when recovering a final
+ * structured answer from `reasoning_content`, where earlier snippets may be draft thoughts).
+ */
+function extractLastJsonObject(cleaned: string): Record<string, unknown> | null {
+  if (!cleaned) return null;
+
+  // 1) Check fenced code blocks from last to first
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  const fencedBlocks: string[] = [];
+  let fenceMatch: RegExpExecArray | null = null;
+  while ((fenceMatch = fenceRegex.exec(cleaned)) !== null) {
+    const inner = fenceMatch[1].trim();
+    if (inner) fencedBlocks.push(inner);
+  }
+  for (let i = fencedBlocks.length - 1; i >= 0; i--) {
+    const direct = tryParseJsonRecord(fencedBlocks[i]);
+    if (direct) return direct;
+    const innerObjs = findBalancedJsonObjects(fencedBlocks[i]);
+    if (innerObjs.length > 0) return innerObjs[innerObjs.length - 1];
+  }
+
+  // 2) Balanced-brace scan across the full cleaned text (pick the final valid object)
+  const objs = findBalancedJsonObjects(cleaned);
+  if (objs.length > 0) {
+    return objs[objs.length - 1];
+  }
+
+  return extractFirstJsonObject(cleaned);
+}
+
+/**
  * Extracts the first valid `{ ... }` JSON object from raw LLM output after stripping
  * `<think>...</think>` blocks. Handles markdown code fences, prose-wrapped JSON, and
  * multiple brace segments without throwing. Returns `null` if no valid JSON object exists.
@@ -656,41 +736,9 @@ export function extractFirstJsonObject(rawText: string): Record<string, unknown>
   }
 
   // 3) Balanced-brace scanner respecting JSON strings & escape sequences (finds first valid object)
-  let inString = false;
-  let escapeNext = false;
-  let depth = 0;
-  let startIdx = -1;
-
-  for (let i = 0; i < cleaned.length; i++) {
-    const ch = cleaned[i];
-    if (inString) {
-      if (escapeNext) {
-        escapeNext = false;
-      } else if (ch === '\\') {
-        escapeNext = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (ch === '{') {
-      if (depth === 0) startIdx = i;
-      depth += 1;
-    } else if (ch === '}' && depth > 0) {
-      depth -= 1;
-      if (depth === 0 && startIdx >= 0) {
-        const candidate = cleaned.slice(startIdx, i + 1);
-        const parsed = tryParseJsonRecord(candidate);
-        if (parsed) return parsed;
-        startIdx = -1;
-      }
-    }
+  const balanced = findBalancedJsonObjects(cleaned);
+  if (balanced.length > 0) {
+    return balanced[0];
   }
 
   // 4) Final regex fallback (greedy outer braces, then non-greedy segments)
@@ -774,7 +822,7 @@ export interface ChatCompletionPayloadOptions {
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   temperature?: number;
   maxTokens: number;
-  /** Minimum token ceiling applied automatically to reasoning/thinking models (defaults to 2048, always >= 1024) */
+  /** Minimum token ceiling applied automatically to reasoning/ultra models (always >= 2048) */
   minReasoningTokens?: number;
   jsonMode?: boolean;
   baseUrl?: string;
@@ -782,12 +830,12 @@ export interface ChatCompletionPayloadOptions {
 
 /**
  * Builds an OpenAI-compatible chat/completions request body that works reliably
- * with both standard and reasoning/thinking models (o1/o3/o4, DeepSeek R1,
- * Qwen Thinking/QwQ, Gemini Thinking/2.5/4):
+ * with both standard and reasoning/thinking/ultra models (Nemotron Ultra, o1/o3/o4,
+ * DeepSeek R1, Qwen Thinking/QwQ, Gemini Thinking/2.5/3/4):
  * - Omits `temperature` on reasoning models
- * - Guarantees >= 1024 tokens (default 2048) on reasoning models so thinking tokens don't truncate JSON
+ * - Guarantees >= 2048 tokens on reasoning/ultra models so internal thinking tokens don't exhaust the budget
  * - Uses `max_completion_tokens` for OpenAI o-series on OpenAI endpoints
- * - Omits `response_format` when known to break reasoning models (o1/o3/r1/reasoner)
+ * - Omits `response_format` when known to break or blank-out reasoning models (o1/o3/r1/reasoner/nemotron/ultra)
  */
 export function buildChatCompletionPayload(
   opts: ChatCompletionPayloadOptions,
@@ -797,7 +845,7 @@ export function buildChatCompletionPayload(
   const isOpenAiHost = (opts.baseUrl || '').toLowerCase().includes('api.openai.com');
 
   const effectiveMaxTokens = reasoning
-    ? Math.max(1024, opts.minReasoningTokens ?? 2048, opts.maxTokens)
+    ? Math.max(2048, opts.minReasoningTokens ?? 2048, opts.maxTokens)
     : opts.maxTokens;
 
   const payload: Record<string, unknown> = {
@@ -805,7 +853,7 @@ export function buildChatCompletionPayload(
     messages: opts.messages,
   };
 
-  if (oSeries && isOpenAiHost) {
+  if (oSeries && (isOpenAiHost || !opts.baseUrl)) {
     payload.max_completion_tokens = effectiveMaxTokens;
   } else {
     payload.max_tokens = effectiveMaxTokens;
@@ -816,9 +864,12 @@ export function buildChatCompletionPayload(
     payload.temperature = opts.temperature;
   }
 
-  // Many reasoning endpoints (o1, DeepSeek R1/reasoner) reject or corrupt json_object mode with <think>
+  // Many reasoning endpoints (o-series, DeepSeek R1/reasoner, Nemotron Ultra) reject or return empty content with json_object mode
   const skipJsonFormat =
-    oSeries || /(?:deepseek[-_/\s]?(?:r1|reasoner)|(?:^|[/:_.-])r1(?:$|[/:_.-]))/i.test(opts.model);
+    oSeries ||
+    /(?:deepseek[-_/\s]?(?:r1|reasoner)|(?:^|[/:_.-])r1(?:$|[/:_.-])|nemotron|(?:^|[/:_.-])ultra(?:$|[/:_.-]))/i.test(
+      opts.model,
+    );
   if (opts.jsonMode && !skipJsonFormat) {
     payload.response_format = { type: 'json_object' };
   }
@@ -827,8 +878,55 @@ export function buildChatCompletionPayload(
 }
 
 /**
- * Safely extracts plain text content from OpenAI-compatible `choices[0].message` objects,
- * handling both string content and structured part arrays (ignoring `thinking`/`reasoning` parts).
+ * Recovers the final JSON object or concise plain-text answer from a reasoning/thinking
+ * buffer (`reasoning_content` / `reasoning` / unclosed `<think>` content) when
+ * `choice.message.content` is empty.
+ */
+function extractAnswerFromReasoning(rawReasoning: string): string {
+  if (typeof rawReasoning !== 'string' || !rawReasoning.trim()) return '';
+
+  // 1) Strip paired/unclosed <think>...</think> blocks first
+  const stripped = stripThinkingBlocks(rawReasoning);
+  const candidates = stripped
+    ? [stripped]
+    : [rawReasoning.replace(/<\/?(?:think|thinking|thought|reasoning)\b[^>]*>/gi, '').trim()];
+
+  for (const text of candidates) {
+    if (!text) continue;
+
+    // Prefer the last valid JSON object inside the reasoning trace (final answer)
+    const jsonObj = extractLastJsonObject(text);
+    if (jsonObj) {
+      return JSON.stringify(jsonObj);
+    }
+
+    // Check for explicit "Final Answer:" / "Answer:" marker
+    const markerMatch = text.match(/(?:^|\n)\s*(?:final\s+answer|answer|response|reply)\s*:\s*([\s\S]+)$/i);
+    if (markerMatch && markerMatch[1].trim()) {
+      return markerMatch[1].trim();
+    }
+
+    // Fall back to the final non-empty paragraph (so plain-text endpoints never get an empty string)
+    const paragraphs = text
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (paragraphs.length > 0) {
+      return paragraphs[paragraphs.length - 1];
+    }
+
+    return text;
+  }
+
+  return '';
+}
+
+/**
+ * Safely extracts plain text content from OpenAI-compatible `choices[0].message` objects:
+ * 1) Checks `choice.message.content` first (handling both string and structured part arrays).
+ * 2) If `content` is empty (or contains only thinking tags), falls back to extracting the
+ *    final answer / JSON from `choice.message.reasoning_content` (or `reasoning`), after
+ *    stripping `<think>...</think>` blocks.
  */
 export function extractChoiceMessageText(data: Record<string, unknown>): string {
   const choices = data.choices as
@@ -839,29 +937,63 @@ export function extractChoiceMessageText(data: Record<string, unknown>): string 
             | Array<{ type?: string; text?: string; content?: string }>
             | null;
           reasoning_content?: string | null;
+          reasoning?: string | null;
         };
       }>
     | undefined;
   const msg = choices?.[0]?.message;
   if (!msg) return '';
 
+  const reasoningFallbacks: string[] = [];
+
   if (typeof msg.content === 'string') {
-    return msg.content;
-  }
-  if (Array.isArray(msg.content)) {
+    const trimmed = msg.content.trim();
+    if (trimmed) {
+      if (stripThinkingBlocks(trimmed)) {
+        return trimmed;
+      }
+      // Content consisted exclusively of a <think> block; keep it as a fallback candidate
+      reasoningFallbacks.push(trimmed);
+    }
+  } else if (Array.isArray(msg.content)) {
     const parts: string[] = [];
+    const thinkingParts: string[] = [];
     for (const part of msg.content) {
       if (!part || typeof part !== 'object') continue;
       const t = String(part.type ?? '').toLowerCase();
-      if (t === 'thinking' || t === 'reasoning' || t === 'thought') continue;
-      if (typeof part.text === 'string' && part.text) {
-        parts.push(part.text);
-      } else if (typeof part.content === 'string' && part.content) {
-        parts.push(part.content);
+      const val =
+        typeof part.text === 'string' && part.text
+          ? part.text
+          : typeof part.content === 'string' && part.content
+            ? part.content
+            : '';
+      if (!val) continue;
+      if (t === 'thinking' || t === 'reasoning' || t === 'thought') {
+        thinkingParts.push(val);
+      } else {
+        parts.push(val);
       }
     }
-    return parts.join('\n').trim();
+    const joined = parts.join('\n').trim();
+    if (joined && stripThinkingBlocks(joined)) {
+      return joined;
+    }
+    if (joined) reasoningFallbacks.push(joined);
+    if (thinkingParts.length > 0) reasoningFallbacks.push(thinkingParts.join('\n').trim());
   }
+
+  if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
+    reasoningFallbacks.unshift(msg.reasoning_content);
+  }
+  if (typeof msg.reasoning === 'string' && msg.reasoning.trim()) {
+    reasoningFallbacks.push(msg.reasoning);
+  }
+
+  for (const candidate of reasoningFallbacks) {
+    const recovered = extractAnswerFromReasoning(candidate);
+    if (recovered) return recovered;
+  }
+
   return '';
 }
 
