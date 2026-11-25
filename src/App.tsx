@@ -26,6 +26,7 @@ import {
   Radio,
   ScrollText,
   Settings,
+  SlidersHorizontal,
   Sparkles,
   Swords,
   TrainFront,
@@ -42,9 +43,11 @@ import { DecreePanel } from './components/DecreePanel.tsx';
 import { HelpGuideModal } from './components/HelpGuideModal.tsx';
 import { HierarchyPanel } from './components/HierarchyPanel.tsx';
 import { MayorChatModal, type MayorBuildResult } from './components/MayorChatModal.tsx';
+import { PlotBlueprintStudio } from './components/PlotBlueprintStudio.tsx';
 import { RemoteBridgeModal } from './components/RemoteBridgeModal.tsx';
 import { SignalRelayModal } from './components/SignalRelayModal.tsx';
 import { TownChronicleModal, type ChronicleTab } from './components/TownChronicleModal.tsx';
+import { TownControlDrawer, type StudioTab } from './components/TownControlDrawer.tsx';
 import { TownLogPanel } from './components/TownLogPanel.tsx';
 import { TownMinimap } from './components/TownMinimap.tsx';
 import { TownViewport } from './components/TownViewport.tsx';
@@ -99,14 +102,18 @@ import {
   compileTownGazette,
   computeResourceRates,
   computeTownEconomy,
+  computeTownNeedsMetrics,
   computeTownRank,
   computeTradeTrainPayout,
+  decodeBlueprintShareCode,
   DECOR_PACKS,
   evaluateTownMilestones,
   formatAgentBondsForPrompt,
+  generateCouncilDebate,
   generateCouncilProposals,
   getDemolishSalvageGold,
   parseTownImport,
+  pickEmergencyEvent,
   pickTownEvent,
   recordSocialInteraction,
   serializeTownExport,
@@ -167,10 +174,15 @@ import {
   type ImaginedTownBlueprint,
   type RaiderTactic,
   type CliAgentActivity,
+  type CouncilDebateOption,
+  type CouncilDebateProposal,
   type CouncilProposal,
   type CustomBuildingStyle,
   type DecorPackId,
+  type EmergencyEventOption,
+  type EmergencyEventState,
   type GraphicsQuality,
+  type HeatmapMode,
   type HiredWorkerSpec,
   type LocationId,
   type MilestoneId,
@@ -562,6 +574,16 @@ export default function App() {
     }
     return loadTownExtrasLocal(init?.townId ?? LOCAL_MAIN_TOWN_ID).trainBlueprints;
   });
+  const [taxRate, setTaxRate] = useState<number>(
+    () => loadTownExtrasLocal(initialLocal.current?.townId ?? LOCAL_MAIN_TOWN_ID).taxRate,
+  );
+  const [heatmapMode, setHeatmapMode] = useState<HeatmapMode>('off');
+  const [activeTrainCameraIdx, setActiveTrainCameraIdx] = useState<number>(0);
+  const [studioDrawerOpen, setStudioDrawerOpen] = useState(false);
+  const [studioInitialTab, setStudioInitialTab] = useState<StudioTab>('economy');
+  const [plotStudioPlotId, setPlotStudioPlotId] = useState<PlotId | null>(null);
+  const [activeDebate, setActiveDebate] = useState<CouncilDebateProposal | null>(null);
+  const [activeEmergency, setActiveEmergency] = useState<EmergencyEventState | null>(null);
   const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>(() =>
     loadGraphicsQuality(),
   );
@@ -711,11 +733,18 @@ export default function App() {
     setStructures(loaded.structures);
     setLogs(loaded.logs);
     setEnemyCity(loaded.enemyCity ?? loadEnemyCityLocal(loaded.townId));
+    const extras = loadTownExtrasLocal(loaded.townId);
     setTrainBlueprints(
       loaded.trainBlueprints && loaded.trainBlueprints.length > 0
         ? loaded.trainBlueprints
-        : loadTownExtrasLocal(loaded.townId).trainBlueprints,
+        : extras.trainBlueprints,
     );
+    setTaxRate(extras.taxRate);
+    setHeatmapMode('off');
+    setActiveTrainCameraIdx(0);
+    setPlotStudioPlotId(null);
+    setActiveDebate(null);
+    setActiveEmergency(null);
     setSelectedPlotId(null);
     setSelectedAgentId('mayor_sterling');
     setRecentSpeakerId(null);
@@ -846,11 +875,11 @@ export default function App() {
     saveEnemyCityLocal(activeTownId, enemyCity);
   }, [activeTownId, enemyCity]);
 
-  // Persist procedural building blueprints & AI-imagined train fleet sidecar across reloads
+  // Persist procedural building blueprints, train fleet & tax rate sidecar across reloads
   useEffect(() => {
     if (!activeTownId) return;
-    saveTownExtrasLocal(activeTownId, structures, trainBlueprints);
-  }, [activeTownId, structures, trainBlueprints]);
+    saveTownExtrasLocal(activeTownId, structures, trainBlueprints, taxRate);
+  }, [activeTownId, structures, trainBlueprints, taxRate]);
 
   useEffect(() => {
     return () => {
@@ -933,6 +962,9 @@ export default function App() {
     weather,
     townTheme,
     trainBlueprints,
+    taxRate,
+    activeDebate,
+    activeEmergency,
     turnIntervalSeconds,
     providerConfig,
     remoteBridgeConfig,
@@ -973,6 +1005,9 @@ export default function App() {
     weather,
     townTheme,
     trainBlueprints,
+    taxRate,
+    activeDebate,
+    activeEmergency,
     turnIntervalSeconds,
     providerConfig,
     remoteBridgeConfig,
@@ -1409,7 +1444,12 @@ export default function App() {
         snap.treasuryGold,
         snap.activePolicies,
         snap.decorPacks,
+        snap.taxRate,
+        Math.max(1, snap.trainBlueprints.length),
       );
+      if (turnEcon.taxMoraleEffect !== 0) {
+        nextMetrics.morale = Math.max(0, Math.min(100, nextMetrics.morale + turnEcon.taxMoraleEffect));
+      }
       const nextTreasury = Math.max(0, snap.treasuryGold + turnEcon.netPerTurn);
       const turnResRates = computeResourceRates(
         nextStructures,
@@ -1581,6 +1621,26 @@ export default function App() {
         );
         setActiveTownEvent(ev);
         setRecentEventIds((prev) => [ev.id, ...prev.filter((id) => id !== ev.id)].slice(0, 4));
+      } else if (
+        snap.isPlaying &&
+        nextTurnNumber > 0 &&
+        nextTurnNumber % 7 === 0 &&
+        !snap.activeDebate &&
+        !snap.activeEmergency
+      ) {
+        setActiveDebate(
+          generateCouncilDebate(nextStructures, nextAgentsList, snap.trainBlueprints, nextTurnNumber),
+        );
+      } else if (
+        snap.isPlaying &&
+        nextTurnNumber > 0 &&
+        nextTurnNumber % 9 === 0 &&
+        !snap.activeEmergency &&
+        !snap.activeDebate
+      ) {
+        setActiveEmergency(
+          pickEmergencyEvent(nextWeatherForEcon, snap.unlockedBiomes, nextStructures),
+        );
       }
 
       if (playBuildFanfare) {
@@ -1672,8 +1732,25 @@ export default function App() {
         treasuryGold,
         activePolicies,
         decorPacks,
+        taxRate,
+        Math.max(1, trainBlueprints.length),
       ),
-    [structures, agents, weather, railSpurBuilt, treasuryGold, activePolicies, decorPacks],
+    [
+      structures,
+      agents,
+      weather,
+      railSpurBuilt,
+      treasuryGold,
+      activePolicies,
+      decorPacks,
+      taxRate,
+      trainBlueprints.length,
+    ],
+  );
+
+  const townNeeds = useMemo(
+    () => computeTownNeedsMetrics(structures, agents, unlockedBiomes, taxRate),
+    [structures, agents, unlockedBiomes, taxRate],
   );
 
   const resourceRates = useMemo(
@@ -3044,7 +3121,7 @@ export default function App() {
 
       setTrainBlueprints(nextFleet);
       setTriggerTrainNonce((n) => n + 1);
-      saveTownExtrasLocal(snap.activeTownId, snap.structures, nextFleet);
+      saveTownExtrasLocal(snap.activeTownId, snap.structures, nextFleet, snap.taxRate);
       soundscape.playBuildCompleteChime();
 
       const badge = `${verb}: ${cleanBp.name} (${cleanBp.style} · ${cleanBp.carCount} cars)`;
@@ -3828,6 +3905,7 @@ export default function App() {
       customStyle?: CustomBuildingStyle,
       preferredBiome?: BiomeId,
       blueprint?: BuildingBlueprint,
+      preferredPlotId?: PlotId,
     ): Promise<MayorBuildResult> => {
       const snap = stateRef.current;
       const now = Date.now();
@@ -3865,8 +3943,13 @@ export default function App() {
 
       let chosenPlot: PlotId | null = null;
 
+      // 0) Direct plot placement from Plot Blueprint Studio
+      if (preferredPlotId && !occupiedMap.has(preferredPlotId)) {
+        chosenPlot = preferredPlotId;
+      }
+
       // 1) If preferred biome requested, prioritize open plot inside that biome
-      if (preferredBiome) {
+      if (!chosenPlot && preferredBiome) {
         const biomeEmpty = BIOME_PLOT_IDS[preferredBiome].find((p) => !occupiedMap.has(p));
         if (biomeEmpty) chosenPlot = biomeEmpty;
       }
@@ -3919,7 +4002,7 @@ export default function App() {
       let badge: string;
 
       if (!existing) {
-        const isProceduralInstant = Boolean(blueprint);
+        const isProceduralInstant = Boolean(blueprint || preferredPlotId);
         nextStruct = {
           plotId: chosenPlot,
           structureType,
@@ -5715,6 +5798,200 @@ export default function App() {
     void handleSwitchTown(nextSavedTown.id);
   }, [nextSavedTown, handleSwitchTown]);
 
+  const handleBuildBlueprintOnPlot = useCallback(
+    (plotId: PlotId, structureType: StructureType, blueprint?: BuildingBlueprint) => {
+      void handleMayorBuildStructure(
+        structureType,
+        blueprint?.name,
+        undefined,
+        undefined,
+        blueprint,
+        plotId,
+      );
+      setFocusRequest({ type: 'plot', id: plotId, nonce: Date.now() });
+    },
+    [handleMayorBuildStructure],
+  );
+
+  const handleDispatchCargo = useCallback(
+    (targetTownId: string, resource: keyof TownResources): string => {
+      const snap = stateRef.current;
+      const avail = snap.resources[resource];
+      if (avail < 6) {
+        return `Need at least 6 ${resource} (currently ${avail}).`;
+      }
+      const unitMap: Record<keyof TownResources, number> = {
+        timber: 9,
+        stone: 11,
+        harvest: 10,
+        crystal: 18,
+      };
+      const mult = snap.interTownRailBuilt ? 1.35 : snap.railSpurBuilt ? 1.15 : 1.0;
+      const payout = Math.round(unitMap[resource] * 6 * mult);
+      const destName =
+        snap.savedTowns.find((t) => t.id === targetTownId)?.name ?? 'Regional Rail Exchange';
+      setResources((prev) => ({ ...prev, [resource]: Math.max(0, prev[resource] - 6) }));
+      setTreasuryGold((prev) => prev + payout);
+      setTriggerTrainNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+      const now = Date.now();
+      setLogs((prev) =>
+        [
+          {
+            id: `cargo-${now}`,
+            turnNumber: snap.turnCount,
+            agentId: 'commander_vance' as AgentId,
+            agentName: 'Commander Vance',
+            rank: 2 as const,
+            location: 'market' as LocationId,
+            targetAgent: 'Mayor Sterling',
+            thought: `Dispatched 6 ${resource} freight to ${destName} for +${payout}g.`,
+            dialogue: `Freight express departed for ${destName} carrying 6 ${resource} — earned +${payout}g!`,
+            newTask: `Cargo trade: ${destName}`,
+            timestampMs: now,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+      return `Dispatched 6 ${resource} to ${destName} (+${payout}g)!`;
+    },
+    [],
+  );
+
+  const handleVoteDebate = useCallback(
+    (option: CouncilDebateOption) => {
+      const snap = stateRef.current;
+      setTreasuryGold((prev) => Math.max(0, prev - option.goldCost));
+      setMetrics((prev) => ({
+        prosperity: Math.min(100, prev.prosperity + 3),
+        morale: Math.max(0, Math.min(100, prev.morale + option.moraleDelta)),
+        orderLevel: Math.max(0, Math.min(100, prev.orderLevel + option.orderDelta)),
+      }));
+      if (option.actionKind === 'train' && option.trainBlueprint) {
+        void handleDesignTrain(
+          option.trainBlueprint,
+          snap.trainBlueprints.length < 3 ? 'add' : 'swap',
+        );
+      } else if (option.actionKind === 'build' && option.structureType) {
+        void handleMayorBuildStructure(
+          option.structureType,
+          option.blueprint?.name,
+          undefined,
+          undefined,
+          option.blueprint,
+        );
+      }
+      setActiveDebate(null);
+      setTriggerCelebrationNonce((n) => n + 1);
+      soundscape.playBuildCompleteChime();
+      const now = Date.now();
+      setLogs((prev) =>
+        [
+          {
+            id: `debate-win-${now}`,
+            turnNumber: snap.turnCount,
+            agentId: 'mayor_sterling' as AgentId,
+            agentName: 'Mayor Sterling',
+            rank: 1 as const,
+            location: 'town_hall' as LocationId,
+            targetAgent: option.leaderName,
+            thought: `Council approved ${option.leaderName}'s motion: ${option.title}.`,
+            dialogue: `The council vote is in! We're backing ${option.leaderName}'s plan: ${option.title}!`,
+            newTask: option.title,
+            timestampMs: now,
+          },
+          ...prev,
+        ].slice(0, 50),
+      );
+    },
+    [handleDesignTrain, handleMayorBuildStructure],
+  );
+
+  const handleResolveEmergency = useCallback((option: EmergencyEventOption) => {
+    const snap = stateRef.current;
+    setTreasuryGold((prev) => Math.max(0, prev + option.goldDelta));
+    setResources((prev) => ({
+      ...prev,
+      timber: Math.max(0, prev.timber + option.timberDelta),
+      stone: Math.max(0, prev.stone + option.stoneDelta),
+    }));
+    setMetrics((prev) => ({
+      prosperity: Math.max(0, Math.min(100, prev.prosperity + option.prosperityDelta)),
+      morale: Math.max(0, Math.min(100, prev.morale + option.moraleDelta)),
+      orderLevel: Math.max(0, Math.min(100, prev.orderLevel + option.orderDelta)),
+    }));
+    setActiveEmergency(null);
+    if (option.goldDelta > 0) {
+      setTriggerCelebrationNonce((n) => n + 1);
+    }
+    soundscape.playBuildCompleteChime();
+    const now = Date.now();
+    setLogs((prev) =>
+      [
+        {
+          id: `emergency-res-${now}`,
+          turnNumber: snap.turnCount,
+          agentId: 'commander_vance' as AgentId,
+          agentName: 'Commander Vance',
+          rank: 2 as const,
+          location: 'town_hall' as LocationId,
+          targetAgent: 'Mayor Sterling',
+          thought: option.responseNote,
+          dialogue: option.responseNote,
+          newTask: 'Civic response complete',
+          timestampMs: now,
+        },
+        ...prev,
+      ].slice(0, 50),
+    );
+  }, []);
+
+  const handleImportShareCode = useCallback(
+    (rawCode: string): { ok: boolean; message: string } => {
+      const decoded = decodeBlueprintShareCode(rawCode);
+      if (!decoded.ok) {
+        return { ok: false, message: decoded.error };
+      }
+      const payload = decoded.payload;
+      if (payload.kind === 'building') {
+        const sType: StructureType =
+          payload.blueprint.apartmentCapacity > 0 ? 'apartment' : 'custom';
+        void handleMayorBuildStructure(
+          sType,
+          payload.blueprint.name,
+          undefined,
+          undefined,
+          payload.blueprint,
+        );
+        return { ok: true, message: `Cloned "${payload.blueprint.name}" onto an open plot!` };
+      }
+      if (payload.kind === 'train') {
+        void handleDesignTrain(
+          payload.blueprint,
+          stateRef.current.trainBlueprints.length < 3 ? 'add' : 'swap',
+        );
+        return { ok: true, message: `Deployed "${payload.blueprint.name}" onto the railway!` };
+      }
+      const imagined: ImaginedTownBlueprint = {
+        name: payload.townName,
+        theme: payload.theme,
+        weather: payload.weather,
+        timeOfDay: payload.timeOfDay,
+        unlockedBiomes: payload.unlockedBiomes,
+        starterBuildings: payload.blueprints,
+        train: payload.trains[0] ?? DEFAULT_TRAIN_BLUEPRINT,
+        greeting: `Cloned ${payload.townName} from Town Share Code!`,
+      };
+      void handleCreateNewTown(payload.townName, imagined).then(() => {
+        if (payload.trains.length > 1) {
+          setTrainBlueprints(payload.trains);
+        }
+      });
+      return { ok: true, message: `Creating cloned town "${payload.townName}"...` };
+    },
+    [handleCreateNewTown, handleDesignTrain, handleMayorBuildStructure],
+  );
+
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-slate-950 text-slate-100">
       {/* Full-Screen 3D Town Canvas */}
@@ -5778,6 +6055,14 @@ export default function App() {
         onRenameStructure={handleRenameStructure}
         onAssignWorkerToPlot={handleAssignWorkerToPlot}
         onDemolishStructure={handleDemolishStructure}
+        heatmapMode={heatmapMode}
+        townNeeds={townNeeds}
+        activeTrainCameraIdx={activeTrainCameraIdx}
+        onOpenPlotStudio={(pid) => {
+          setSelectedPlotId(null);
+          setPlotStudioPlotId(pid);
+        }}
+        onBuildBlueprintOnPlot={handleBuildBlueprintOnPlot}
         onRegisterSnapshotFn={(fn) => {
           snapshotFnRef.current = fn;
         }}
@@ -5786,6 +6071,80 @@ export default function App() {
         onBusRadarUpdate={setBusRadarPos}
         onUserOrbitStart={() => setFollowActive(false)}
       />
+
+      {/* Non-Blocking Live Emergency or Council Debate Quick Banner */}
+      {activeEmergency && !studioDrawerOpen && !selectedPlotId && (
+        <div className="fixed top-18 left-1/2 z-30 w-[calc(100%-1.5rem)] max-w-md -translate-x-1/2 rounded-2xl border border-rose-400/45 bg-slate-950/95 p-3 shadow-2xl md:top-20">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-[11px] font-semibold text-rose-300">
+                {activeEmergency.severity === 'boom' ? 'Civic Boom Event' : 'Emergency Dispatch'}
+              </div>
+              <div className="font-display text-sm font-semibold text-white">
+                {activeEmergency.title}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveEmergency(null)}
+              aria-label="Dismiss emergency banner"
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <p className="mt-1 text-xs text-slate-300">{activeEmergency.description}</p>
+          <div className="mt-2.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            {activeEmergency.options.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => handleResolveEmergency(opt)}
+                className="flex min-h-[42px] flex-col items-start justify-center rounded-xl border border-white/15 bg-slate-900 px-2.5 py-1.5 text-left transition-colors hover:border-amber-400/50 hover:bg-slate-800"
+              >
+                <span className="text-xs font-semibold text-white">{opt.label}</span>
+                <span className="text-[10px] text-slate-400">{opt.detail}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!activeEmergency && activeDebate && !studioDrawerOpen && !selectedPlotId && (
+        <div className="fixed top-18 left-1/2 z-30 w-[calc(100%-1.5rem)] max-w-md -translate-x-1/2 rounded-2xl border border-amber-400/45 bg-slate-950/95 p-3 shadow-2xl md:top-20">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-[11px] font-semibold text-amber-300">Town Council Vote</div>
+              <div className="font-display text-sm font-semibold text-white">
+                {activeDebate.topic}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveDebate(null)}
+              aria-label="Dismiss council vote"
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            {[activeDebate.optionA, activeDebate.optionB].map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => handleVoteDebate(opt)}
+                className="flex min-h-[44px] flex-col items-start justify-center rounded-xl border border-white/15 bg-slate-900 px-2.5 py-1.5 text-left transition-colors hover:border-amber-400/50 hover:bg-slate-800"
+              >
+                <span className="text-xs font-semibold text-white">{opt.title}</span>
+                <span className="text-[10px] text-slate-400">
+                  {opt.leaderName.split(' ')[0]} · -{opt.goldCost}g
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Town Hall Quick Action Banner ("Talk to Mayor") */}
       {townHallPromptOpen && !mayorChatOpen && (
@@ -6260,6 +6619,23 @@ export default function App() {
           >
             <Video className="h-4 w-4" />
             <span className="hidden md:inline">Tour</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setStudioInitialTab('economy');
+              setStudioDrawerOpen(true);
+            }}
+            title="Town Studio: Tax, Heatmap, Rail Fleet, Council, Share Codes & Walk"
+            aria-label="Open Town Studio"
+            className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition-colors ${
+              studioDrawerOpen || heatmapMode !== 'off' || activeDebate || activeEmergency
+                ? 'bg-amber-500/20 text-amber-200'
+                : 'text-slate-300 hover:bg-white/5 hover:text-white'
+            }`}
+          >
+            <SlidersHorizontal className="h-4 w-4 text-amber-300" />
+            <span className="hidden sm:inline">Studio</span>
           </button>
           <button
             type="button"
@@ -6918,6 +7294,60 @@ export default function App() {
         onRefreshCouncilProposals={() => setCouncilRefreshNonce((n) => n + 1)}
         onExportJson={handleExportTownJson}
         onImportJson={handleImportTownJson}
+      />
+
+      {/* Interactive Plot Blueprint Studio */}
+      <PlotBlueprintStudio
+        open={Boolean(plotStudioPlotId)}
+        plotId={plotStudioPlotId}
+        onClose={() => setPlotStudioPlotId(null)}
+        onBuildOnPlot={handleBuildBlueprintOnPlot}
+      />
+
+      {/* Unified Town Studio Drawer (Economy, Heatmap, Rail Fleet, Council, Share Codes, Explore) */}
+      <TownControlDrawer
+        open={studioDrawerOpen}
+        initialTab={studioInitialTab}
+        onClose={() => setStudioDrawerOpen(false)}
+        townName={townName}
+        townTheme={townTheme}
+        weather={weather}
+        timeOfDay={timeOfDay}
+        unlockedBiomes={unlockedBiomes}
+        structures={structures}
+        resources={resources}
+        economy={economy}
+        townNeeds={townNeeds}
+        taxRate={taxRate}
+        onChangeTaxRate={setTaxRate}
+        heatmapMode={heatmapMode}
+        onChangeHeatmapMode={setHeatmapMode}
+        trainBlueprints={trainBlueprints}
+        activeTrainCameraIdx={activeTrainCameraIdx}
+        onSelectTrainCameraIdx={setActiveTrainCameraIdx}
+        onApplyTrainBlueprint={(bp, mode) => {
+          void handleDesignTrain(bp, mode);
+        }}
+        onRideTrain={(idx) => {
+          setActiveTrainCameraIdx(idx);
+          handleChangeCameraMode('train_cab');
+        }}
+        savedTowns={savedTowns.map((t) => ({ id: t.id, name: t.name }))}
+        activeTownId={activeTownId}
+        onDispatchCargo={handleDispatchCargo}
+        activeDebate={activeDebate}
+        onConveneDebate={() =>
+          setActiveDebate(generateCouncilDebate(structures, agents, trainBlueprints, turnCount))
+        }
+        onVoteDebate={handleVoteDebate}
+        activeEmergency={activeEmergency}
+        onTriggerEmergency={() =>
+          setActiveEmergency(pickEmergencyEvent(weather, unlockedBiomes, structures))
+        }
+        onResolveEmergency={handleResolveEmergency}
+        onImportShareCode={handleImportShareCode}
+        cameraMode={cameraMode}
+        onChangeCameraMode={(mode) => handleChangeCameraMode(mode)}
       />
 
       {/* Help & AI Integration Guide Modal */}

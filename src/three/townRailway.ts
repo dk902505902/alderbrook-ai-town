@@ -26,6 +26,7 @@ export interface TownRailwayHandle {
   setRailSpurBuilt: (enabled: boolean) => void;
   setInterTownRailBuilt: (enabled: boolean, targetTownName?: string) => void;
   setTrainFleet: (blueprints: TrainBlueprint[]) => void;
+  setCameraTrainIndex: (index: number) => void;
   update: (delta: number, elapsed: number) => void;
   applyTheme: (theme: TownTheme) => void;
   setGraphicsQuality: (quality: GraphicsQuality) => void;
@@ -1293,6 +1294,7 @@ export function buildTownRailway(
   ];
   let usingDefaultConsist = true;
   let fleetSignature = DEFAULT_TRAIN_BLUEPRINT.id;
+  let activeCameraTrainIdx = 0;
 
   const disposeExtraFleet = () => {
     for (const entry of fleet) {
@@ -1472,9 +1474,10 @@ export function buildTownRailway(
       outEye: THREE.Vector3,
       outLook: THREE.Vector3,
     ) => {
-      const lead = fleet[0];
-      const leadCar = lead?.carriages[0] ?? consist.carriages[0];
-      const leadLoco = lead?.locomotive ?? consist.locomotive;
+      const clampedIdx = Math.max(0, Math.min(fleet.length - 1, activeCameraTrainIdx));
+      const targetEntry = fleet[clampedIdx] ?? fleet[0];
+      const leadCar = targetEntry?.carriages[0] ?? consist.carriages[0];
+      const leadLoco = targetEntry?.locomotive ?? consist.locomotive;
       if (seat === 'passenger' && leadCar) {
         leadCar.updateMatrixWorld();
         outEye.set(0.86, 1.24, 0.05).applyMatrix4(leadCar.matrixWorld);
@@ -1540,6 +1543,9 @@ export function buildTownRailway(
       }
     },
     setTrainFleet,
+    setCameraTrainIndex: (index: number) => {
+      activeCameraTrainIdx = Math.max(0, Math.min(2, Math.floor(index)));
+    },
     setGraphicsQuality: (quality: GraphicsQuality) => {
       activeQuality = quality;
       const enableShadows = quality === 'high';

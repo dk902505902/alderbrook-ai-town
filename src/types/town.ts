@@ -279,12 +279,92 @@ export interface BuildingEconomyRow {
 export interface TownEconomySummary {
   treasuryGold: number;
   civicBaseTax: number;
+  apartmentRent: number;
+  trainTicketRevenue: number;
+  taxRate: number; // 0..20%
+  taxMoraleEffect: number; // -4..+3
   railwayBonus: number;
   buildingRevenue: number;
   workerUpkeep: number;
   netPerTurn: number;
   topBuildings: BuildingEconomyRow[];
 }
+
+export type HeatmapMode = 'off' | 'housing' | 'food' | 'safety' | 'recreation';
+
+export interface TownNeedsSummary {
+  housing: number; // 0-100
+  food: number; // 0-100
+  safety: number; // 0-100
+  recreation: number; // 0-100
+  overall: number; // 0-100
+  shortageHint: string;
+  plotScores: Partial<Record<PlotId, { housing: number; food: number; safety: number; recreation: number }>>;
+}
+
+export interface CouncilDebateOption {
+  id: string;
+  leaderName: string;
+  leaderRole: string;
+  accentColor: string;
+  title: string;
+  pitch: string;
+  actionKind: 'build' | 'train' | 'policy';
+  structureType?: StructureType;
+  blueprint?: BuildingBlueprint;
+  trainBlueprint?: TrainBlueprint;
+  goldCost: number;
+  moraleDelta: number;
+  orderDelta: number;
+}
+
+export interface CouncilDebateProposal {
+  id: string;
+  topic: string;
+  optionA: CouncilDebateOption;
+  optionB: CouncilDebateOption;
+  createdAtMs: number;
+}
+
+export type EmergencyEventKind = 'blizzard' | 'wildfire' | 'bridge_outage' | 'tourist_rush';
+
+export interface EmergencyEventOption {
+  id: string;
+  label: string;
+  detail: string;
+  goldDelta: number;
+  timberDelta: number;
+  stoneDelta: number;
+  moraleDelta: number;
+  orderDelta: number;
+  prosperityDelta: number;
+  responseNote: string;
+}
+
+export interface EmergencyEventState {
+  id: string;
+  kind: EmergencyEventKind;
+  title: string;
+  description: string;
+  severity: 'alert' | 'boom';
+  biomeHint?: BiomeId;
+  options: EmergencyEventOption[];
+  triggeredAtMs: number;
+}
+
+export type ShareCodePayload =
+  | { kind: 'building'; blueprint: BuildingBlueprint }
+  | { kind: 'train'; blueprint: TrainBlueprint }
+  | {
+      kind: 'town';
+      townName: string;
+      theme: TownTheme;
+      weather: WeatherMode;
+      timeOfDay: TimeOfDay;
+      unlockedBiomes: BiomeId[];
+      blueprints: BuildingBlueprint[];
+      trains: TrainBlueprint[];
+    };
 
 export interface TownEventOption {
   id: string;

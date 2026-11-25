@@ -2,27 +2,36 @@ import {
   ALL_BIOME_IDS,
   ALL_PLOT_IDS,
   ALL_STRUCTURE_TYPES,
+  computeTownHousingCapacity,
   createInitialAgents,
   createInitialLogs,
   DEFAULT_TOWN_METRICS,
+  generateFallbackBuildingBlueprint,
+  generateFallbackTrainBlueprint,
   getStructureDisplayLabel,
   MAX_TOWN_AGENTS,
   normalizeTownTheme,
   normalizeWeatherMode,
   PLOT_META,
+  sanitizeBuildingBlueprint,
+  sanitizeTrainBlueprint,
   STRUCTURE_META,
   type AgentId,
   type AgentRecord,
   type BiomeId,
+  type BuildingBlueprint,
   type BuildingEconomyRow,
+  type CouncilDebateProposal,
   type CouncilProposal,
   type CustomBuildingStyle,
   type DecorPackId,
   type DecorPackMeta,
+  type EmergencyEventState,
   type LocationId,
   type MilestoneId,
   type PlotId,
   type PolicyId,
+  type ShareCodePayload,
   type StructureType,
   type TimeOfDay,
   type TownEconomySummary,
@@ -32,6 +41,7 @@ import {
   type TownLogItem,
   type TownMetrics,
   type TownMilestone,
+  type TownNeedsSummary,
   type TownPolicyMeta,
   type TownRankInfo,
   type TownRelationship,
@@ -39,6 +49,7 @@ import {
   type TownResources,
   type TownStructure,
   type TownTheme,
+  type TrainBlueprint,
   type WeatherMode,
 } from '../types/town.ts';
 
@@ -157,12 +168,18 @@ export function computeTownEconomy(
   treasuryGold: number,
   activePolicies: PolicyId[] = [],
   decorPacks: DecorPackId[] = [],
+  taxRate = 8,
+  trainCount = 1,
 ): TownEconomySummary {
   const rows: BuildingEconomyRow[] = [];
   let buildingRevenue = 0;
   const hasGreenCharter = activePolicies.includes('green_charter');
   const hasOpenTrade = activePolicies.includes('open_trade');
   const hasFreeBread = activePolicies.includes('free_bread');
+  const cleanTax = Math.max(0, Math.min(20, Math.round(taxRate)));
+  const taxMult = 0.65 + (cleanTax / 20) * 0.95; // 0.65x at 0% tax, ~1.03x at 8%, 1.6x at 20%
+  const taxMoraleEffect =
+    cleanTax <= 5 ? 3 : cleanTax <= 9 ? 1 : cleanTax <= 13 ? 0 : cleanTax <= 16 ? -2 : -4;
 
   for (const s of structures) {
     if (s.status !== 'complete') continue;
@@ -210,11 +227,20 @@ export function computeTownEconomy(
 
   rows.sort((a, b) => b.goldPerTurn - a.goldPerTurn);
 
-  // Civic baseline tax + Steam Railway trade bonus + Decor tourism bump
+  // Crowd apartment rent + train ticket revenue + tax slider
+  const housing = computeTownHousingCapacity(structures);
+  const apartmentRent = Math.round(housing.dummyPopulation * (0.45 + cleanTax * 0.04));
+  const trainTicketRevenue = Math.round(
+    Math.max(1, Math.min(3, trainCount)) * (railSpurBuilt ? 14 : 7) +
+      housing.dummyPopulation * 0.14,
+  );
   const decorTourism = decorPacks.length * 3;
-  const civicBaseTax = 14 + Math.min(20, Math.round(agents.length * 1.5)) + decorTourism;
-  const railwayBonus = (railSpurBuilt ? 28 : 10) + (hasOpenTrade ? 18 : 0);
-  const grossIncome = civicBaseTax + railwayBonus + buildingRevenue;
+  const civicBaseTax = Math.round(
+    (12 + Math.min(20, Math.round(agents.length * 1.5)) + decorTourism) * taxMult,
+  );
+  const railwayBonus = (railSpurBuilt ? 24 : 8) + (hasOpenTrade ? 18 : 0);
+  const grossIncome =
+    civicBaseTax + apartmentRent + trainTicketRevenue + railwayBonus + buildingRevenue;
   const policyUpkeep = (hasFreeBread ? 10 : 0) + (hasGreenCharter ? 4 : 0);
   const workerUpkeep = Math.max(0, agents.length - 5) * 4 + 8 + policyUpkeep;
   const netPerTurn = grossIncome - workerUpkeep;
@@ -222,6 +248,10 @@ export function computeTownEconomy(
   return {
     treasuryGold,
     civicBaseTax,
+    apartmentRent,
+    trainTicketRevenue,
+    taxRate: cleanTax,
+    taxMoraleEffect,
     railwayBonus,
     buildingRevenue,
     workerUpkeep,
@@ -1387,5 +1417,485 @@ export function parseTownImport(
       ok: false,
       error: err instanceof Error ? `Invalid JSON file: ${err.message}` : 'Could not parse save file.',
     };
+  }
+}
+
+// ============================================================================
+// 11. Citizen Needs & 3D Happiness Heatmap Calculator
+// ============================================================================
+
+export function computeTownNeedsMetrics(
+  structures: TownStructure[],
+  agents: AgentRecord[],
+  unlockedBiomes: BiomeId[],
+  taxRate = 8,
+): TownNeedsSummary {
+  const completed = structures.filter((s) => s.status === 'complete');
+  const housingStats = computeTownHousingCapacity(structures);
+
+  const housingCount = completed.filter(
+    (s) => s.structureType === 'apartment' || (s.blueprint?.apartmentCapacity ?? 0) > 0,
+  ).length;
+  const foodCount = completed.filter((s) =>
+    ['bakery', 'greenhouse', 'granary', 'windmill'].includes(s.structureType),
+  ).length;
+  const safetyCount = completed.filter((s) =>
+    ['watchtower', 'defense_wall', 'triple_gun_tower', 'hospital'].includes(s.structureType),
+  ).length;
+  const recCount = completed.filter((s) =>
+    ['pavilion', 'library', 'clock_tower', 'custom'].includes(s.structureType),
+  ).length;
+
+  const taxMod = taxRate <= 6 ? 8 : taxRate >= 15 ? -10 : 0;
+  const housing = Math.max(
+    18,
+    Math.min(100, Math.round(35 + housingCount * 22 + Math.min(25, housingStats.housingCapacity * 0.25) + taxMod)),
+  );
+  const food = Math.max(
+    22,
+    Math.min(100, Math.round(42 + foodCount * 20 + (unlockedBiomes.includes('river') ? 8 : 0))),
+  );
+  const safety = Math.max(
+    20,
+    Math.min(
+      100,
+      Math.round(
+        36 +
+          safetyCount * 20 +
+          (agents.some((a) => /medic|guard|commander/i.test(a.role)) ? 10 : 0),
+      ),
+    ),
+  );
+  const recreation = Math.max(
+    25,
+    Math.min(100, Math.round(44 + recCount * 16 + unlockedBiomes.length * 4 + taxMod)),
+  );
+  const overall = Math.round((housing + food + safety + recreation) / 4);
+
+  const plotScores: TownNeedsSummary['plotScores'] = {};
+  for (const plotId of ALL_PLOT_IDS) {
+    const meta = PLOT_META[plotId];
+    let hScore = housing;
+    let fScore = food;
+    let sScore = safety;
+    let rScore = recreation;
+    for (const s of completed) {
+      const sMeta = PLOT_META[s.plotId];
+      if (!sMeta) continue;
+      const dist = Math.hypot(meta.x - sMeta.x, meta.z - sMeta.z);
+      if (dist > 18) continue;
+      const proximity = Math.max(0, 1 - dist / 18);
+      if (s.structureType === 'apartment' || (s.blueprint?.apartmentCapacity ?? 0) > 0) {
+        hScore += Math.round(28 * proximity);
+      }
+      if (['bakery', 'greenhouse', 'granary', 'windmill'].includes(s.structureType)) {
+        fScore += Math.round(28 * proximity);
+      }
+      if (['watchtower', 'defense_wall', 'triple_gun_tower', 'hospital'].includes(s.structureType)) {
+        sScore += Math.round(32 * proximity);
+      }
+      if (['pavilion', 'library', 'clock_tower', 'custom'].includes(s.structureType)) {
+        rScore += Math.round(24 * proximity);
+      }
+    }
+    plotScores[plotId] = {
+      housing: Math.min(100, hScore),
+      food: Math.min(100, fScore),
+      safety: Math.min(100, sScore),
+      recreation: Math.min(100, rScore),
+    };
+  }
+
+  const lowest = [
+    { key: 'Housing', val: housing, hint: 'Build a multi-story Apartment to grow crowd housing' },
+    { key: 'Food', val: food, hint: 'Add a Bakery, Greenhouse, or Windmill near the square' },
+    { key: 'Safety', val: safety, hint: 'Place a Town Hospital or Triple-Gun Tower for coverage' },
+    { key: 'Recreation', val: recreation, hint: 'Build a Pavilion, Library, or Sky-Cafe' },
+  ].sort((a, b) => a.val - b.val)[0];
+
+  return {
+    housing,
+    food,
+    safety,
+    recreation,
+    overall,
+    shortageHint: lowest.val >= 82 ? 'All citizen districts are thriving!' : `${lowest.key} priority: ${lowest.hint}`,
+    plotScores,
+  };
+}
+
+// ============================================================================
+// 12. AI Town Council Debates & Competing Leader Proposals
+// ============================================================================
+
+export function generateCouncilDebate(
+  structures: TownStructure[],
+  agents: AgentRecord[],
+  trainBlueprints: TrainBlueprint[],
+  turnCount: number,
+): CouncilDebateProposal {
+  const lyra = agents.find((a) => a.id === 'architect_lyra');
+  const vance = agents.find((a) => a.id === 'commander_vance');
+  const kai = agents.find((a) => a.id === 'worker_kai');
+  const pip = agents.find((a) => a.id === 'worker_pip');
+
+  const variants: Array<() => CouncilDebateProposal> = [
+    () => ({
+      id: `debate-skyline-${Date.now()}`,
+      topic: 'Skyline Growth vs. Perimeter Defense',
+      createdAtMs: Date.now(),
+      optionA: {
+        id: 'opt_sky_tower',
+        leaderName: lyra?.name ?? 'Architect Lyra',
+        leaderRole: lyra?.role ?? 'Builder & Economy',
+        accentColor: '#14b8a6',
+        title: 'Build 5-Story Sky-Apartments',
+        pitch: 'Expand housing right now so 30+ new crowd citizens move in and pay rent!',
+        actionKind: 'build',
+        structureType: 'apartment',
+        blueprint: generateFallbackBuildingBlueprint('5-Story Emerald Sky-Apartments'),
+        goldCost: 60,
+        moraleDelta: 6,
+        orderDelta: 2,
+      },
+      optionB: {
+        id: 'opt_triple_turret',
+        leaderName: vance?.name ?? 'Commander Vance',
+        leaderRole: vance?.role ?? 'Security & Logistics',
+        accentColor: '#3b82f6',
+        title: 'Erect Triple-Gun Defense Tower',
+        pitch: 'Ironhold Bastion is watching — reinforce our defenses before we expand upward.',
+        actionKind: 'build',
+        structureType: 'triple_gun_tower',
+        goldCost: 50,
+        moraleDelta: 2,
+        orderDelta: 8,
+      },
+    }),
+    () => ({
+      id: `debate-transit-${Date.now()}`,
+      topic: 'Express Rail Upgrade vs. Crystal Landmark',
+      createdAtMs: Date.now(),
+      optionA: {
+        id: 'opt_bullet_train',
+        leaderName: kai?.name ?? 'Worker Kai',
+        leaderRole: kai?.role ?? 'Guard & Hauler',
+        accentColor: '#f59e0b',
+        title:
+          trainBlueprints.length < 3
+            ? 'Commission Neon Bullet Train'
+            : 'Upgrade Lead Express Train',
+        pitch: 'High-speed rail brings bigger freight payouts and boosts ticket revenue every turn.',
+        actionKind: 'train',
+        trainBlueprint: generateFallbackTrainBlueprint('Starlight Neon Bullet Train'),
+        goldCost: 55,
+        moraleDelta: 5,
+        orderDelta: 3,
+      },
+      optionB: {
+        id: 'opt_crystal_temple',
+        leaderName: pip?.name ?? 'Worker Pip',
+        leaderRole: pip?.role ?? 'Artisan & Gatherer',
+        accentColor: '#ea580c',
+        title: 'Construct Crystal Dome Temple',
+        pitch: 'Give our citizens a radiant civic landmark that lifts town morale and tourism.',
+        actionKind: 'build',
+        structureType: 'custom',
+        blueprint: generateFallbackBuildingBlueprint('Crystal Dome Temple'),
+        goldCost: 45,
+        moraleDelta: 8,
+        orderDelta: 2,
+      },
+    }),
+    () => ({
+      id: `debate-civic-${Date.now()}`,
+      topic: 'Medical Wing vs. Pagoda Grand Market',
+      createdAtMs: Date.now(),
+      optionA: {
+        id: 'opt_hospital',
+        leaderName: vance?.name ?? 'Commander Vance',
+        leaderRole: vance?.role ?? 'Security & Logistics',
+        accentColor: '#ef4444',
+        title: 'Open Town Hospital Wing',
+        pitch: 'Guarantee rapid medic response during raids and winter storms.',
+        actionKind: 'build',
+        structureType: 'hospital',
+        goldCost: 40,
+        moraleDelta: 5,
+        orderDelta: 7,
+      },
+      optionB: {
+        id: 'opt_pagoda_plaza',
+        leaderName: lyra?.name ?? 'Architect Lyra',
+        leaderRole: lyra?.role ?? 'Builder & Economy',
+        accentColor: '#14b8a6',
+        title: 'Build 4-Story Pagoda Flats',
+        pitch: 'Blend scenic pagoda terraces with apartment housing for bustling street life.',
+        actionKind: 'build',
+        structureType: 'apartment',
+        blueprint: generateFallbackBuildingBlueprint('4-Story Pagoda Residence'),
+        goldCost: 55,
+        moraleDelta: 7,
+        orderDelta: 2,
+      },
+    }),
+  ];
+
+  const idx = (turnCount + structures.length) % variants.length;
+  return variants[idx]();
+}
+
+// ============================================================================
+// 13. Live Disaster & Emergency Response Events
+// ============================================================================
+
+export function pickEmergencyEvent(
+  weather: WeatherMode,
+  unlockedBiomes: BiomeId[],
+  structures: TownStructure[],
+): EmergencyEventState {
+  const hasHospital = structures.some((s) => s.structureType === 'hospital' && s.status === 'complete');
+  const events: EmergencyEventState[] = [
+    {
+      id: `emerg-blizzard-${Date.now()}`,
+      kind: 'blizzard',
+      title: 'Sudden Blizzard Heating Surge',
+      description:
+        'An icy squall swept across the valley! Apartment boilers need extra timber and civic hearth checks.',
+      severity: 'alert',
+      options: [
+        {
+          id: 'distribute_timber',
+          label: 'Distribute Reserve Timber (-6 Timber)',
+          detail: '+8 Morale · Apartments stay cozy',
+          goldDelta: 0,
+          timberDelta: -6,
+          stoneDelta: 0,
+          moraleDelta: 8,
+          orderDelta: 4,
+          prosperityDelta: 2,
+          responseNote: 'Emergency timber wagons warmed every apartment block before nightfall!',
+        },
+        {
+          id: 'fund_heaters',
+          label: 'Emergency Coal Subsidy (-35g)',
+          detail: '+6 Morale · +5 Order',
+          goldDelta: -35,
+          timberDelta: 0,
+          stoneDelta: 0,
+          moraleDelta: 6,
+          orderDelta: 5,
+          prosperityDelta: 3,
+          responseNote: 'Town Hall funded steam heating along the square and railway depot.',
+        },
+      ],
+      triggeredAtMs: Date.now(),
+    },
+    {
+      id: `emerg-wildfire-${Date.now()}`,
+      kind: 'wildfire',
+      title: 'Forest Edge Spark Alert',
+      description:
+        'Dry winds ignited brush near the timber perimeter. Rangers and medics await your containment order.',
+      severity: 'alert',
+      biomeHint: unlockedBiomes.includes('forest') ? 'forest' : undefined,
+      options: [
+        {
+          id: 'stone_firebreak',
+          label: 'Build Stone Firebreak (-6 Stone)',
+          detail: '+9 Order · Zero damage',
+          goldDelta: 0,
+          timberDelta: 0,
+          stoneDelta: -6,
+          moraleDelta: 4,
+          orderDelta: 9,
+          prosperityDelta: 2,
+          responseNote: 'Builders cut a rapid stone trench and halted the brushfire cleanly!',
+        },
+        {
+          id: 'medic_bucket_line',
+          label: hasHospital ? 'Deploy Medics & Bucket Line' : 'Mobilize Volunteers (-20g)',
+          detail: hasHospital ? 'Hospital Bonus: +8 Morale' : '+5 Morale · +5 Order',
+          goldDelta: hasHospital ? 0 : -20,
+          timberDelta: 0,
+          stoneDelta: 0,
+          moraleDelta: hasHospital ? 8 : 5,
+          orderDelta: 5,
+          prosperityDelta: 1,
+          responseNote: 'Villagers and crowd volunteers doused every ember together!',
+        },
+      ],
+      triggeredAtMs: Date.now(),
+    },
+    {
+      id: `emerg-bridge-${Date.now()}`,
+      kind: 'bridge_outage',
+      title: 'Outer Rail & Bridge Outage',
+      description:
+        'Heavy freight loosened bridge bolts near the crossing. Repair crews can reinforce it or run a quick patch.',
+      severity: 'alert',
+      biomeHint: unlockedBiomes.includes('river') ? 'river' : undefined,
+      options: [
+        {
+          id: 'reinforce_bridge',
+          label: 'Reinforce Steel Span (-4 Timber, -4 Stone)',
+          detail: '+45g Freight Bonus · +7 Order',
+          goldDelta: 45,
+          timberDelta: -4,
+          stoneDelta: -4,
+          moraleDelta: 3,
+          orderDelta: 7,
+          prosperityDelta: 6,
+          responseNote: 'The reinforced bridge now carries heavier express freight at top speed!',
+        },
+        {
+          id: 'express_patch',
+          label: 'Quick Crew Patch (-25g)',
+          detail: '+4 Order · Trains resume fast',
+          goldDelta: -25,
+          timberDelta: 0,
+          stoneDelta: 0,
+          moraleDelta: 2,
+          orderDelta: 4,
+          prosperityDelta: 2,
+          responseNote: 'Track engineers bolted the span and cleared the next express train.',
+        },
+      ],
+      triggeredAtMs: Date.now(),
+    },
+    {
+      id: `emerg-tourists-${Date.now()}`,
+      kind: 'tourist_rush',
+      title: 'Grand Express Tourist Rush!',
+      description:
+        'Travelers poured off the morning train to admire your procedural skyline and bustling square!',
+      severity: 'boom',
+      options: [
+        {
+          id: 'host_street_fair',
+          label: 'Host Skyline Street Fair (-20g)',
+          detail: '+95g Revenue · +9 Morale',
+          goldDelta: 75,
+          timberDelta: 0,
+          stoneDelta: 0,
+          moraleDelta: 9,
+          orderDelta: 2,
+          prosperityDelta: 8,
+          responseNote: 'Cafes, apartments, and train platforms buzzed with delighted visitors!',
+        },
+        {
+          id: 'guided_rail_tickets',
+          label: 'Sell Scenic Train Passes (Free)',
+          detail: '+55g Revenue · +5 Prosperity',
+          goldDelta: 55,
+          timberDelta: 0,
+          stoneDelta: 0,
+          moraleDelta: 4,
+          orderDelta: 3,
+          prosperityDelta: 5,
+          responseNote: 'Express ticket booths sold out within the hour!',
+        },
+      ],
+      triggeredAtMs: Date.now(),
+    },
+  ];
+
+  if (weather === 'winter') return events[0];
+  return events[Math.floor(Math.random() * events.length)];
+}
+
+// ============================================================================
+// 14. Compact Share & Import Codes (Buildings, Trains & Full Towns)
+// ============================================================================
+
+function toBase64Utf8(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) {
+    bin += String.fromCharCode(bytes[i]);
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function fromBase64Utf8(code: string): string {
+  const padded = code.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((code.length + 3) % 4);
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+export function encodeBlueprintShareCode(payload: ShareCodePayload): string {
+  const prefix =
+    payload.kind === 'building'
+      ? 'ALDER-BLDG:'
+      : payload.kind === 'train'
+        ? 'ALDER-TRAIN:'
+        : 'ALDER-TOWN:';
+  return `${prefix}${toBase64Utf8(JSON.stringify(payload))}`;
+}
+
+export function decodeBlueprintShareCode(
+  rawCode: string,
+): { ok: true; payload: ShareCodePayload } | { ok: false; error: string } {
+  try {
+    const trimmed = rawCode.trim();
+    const match = trimmed.match(/^ALDER-(BLDG|TRAIN|TOWN):([A-Za-z0-9_-]+)$/);
+    if (!match) {
+      return { ok: false, error: 'Code must start with ALDER-BLDG:, ALDER-TRAIN:, or ALDER-TOWN:' };
+    }
+    const parsed = JSON.parse(fromBase64Utf8(match[2])) as Record<string, unknown>;
+    if (match[1] === 'BLDG') {
+      return {
+        ok: true,
+        payload: {
+          kind: 'building',
+          blueprint: sanitizeBuildingBlueprint(parsed.blueprint ?? parsed),
+        },
+      };
+    }
+    if (match[1] === 'TRAIN') {
+      return {
+        ok: true,
+        payload: {
+          kind: 'train',
+          blueprint: sanitizeTrainBlueprint(parsed.blueprint ?? parsed),
+        },
+      };
+    }
+    const townName =
+      typeof parsed.townName === 'string' && parsed.townName.trim()
+        ? parsed.townName.trim().slice(0, 48)
+        : 'Imported Town';
+    const rawBps = Array.isArray(parsed.blueprints) ? parsed.blueprints : [];
+    const rawTrains = Array.isArray(parsed.trains) ? parsed.trains : [];
+    const rawBiomes = Array.isArray(parsed.unlockedBiomes)
+      ? parsed.unlockedBiomes.filter((b): b is BiomeId =>
+          ALL_BIOME_IDS.includes(b as BiomeId),
+        )
+      : [];
+    return {
+      ok: true,
+      payload: {
+        kind: 'town',
+        townName,
+        theme: normalizeTownTheme(parsed.theme),
+        weather: normalizeWeatherMode(parsed.weather),
+        timeOfDay:
+          parsed.timeOfDay === 'dawn' ||
+          parsed.timeOfDay === 'day' ||
+          parsed.timeOfDay === 'twilight' ||
+          parsed.timeOfDay === 'night'
+            ? parsed.timeOfDay
+            : 'day',
+        unlockedBiomes: rawBiomes,
+        blueprints: rawBps.slice(0, 8).map((b) => sanitizeBuildingBlueprint(b)),
+        trains: rawTrains.slice(0, 3).map((t) => sanitizeTrainBlueprint(t)),
+      },
+    };
+  } catch {
+    return { ok: false, error: 'Could not decode share code. Make sure the full code was pasted.' };
   }
 }

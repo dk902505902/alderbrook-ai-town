@@ -113,15 +113,18 @@ const TOWN_EXTRAS_STORAGE_PREFIX = 'alderbrook_town_extras_v1_';
 export interface TownExtrasSidecar {
   blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>>;
   trainBlueprints: TrainBlueprint[];
+  taxRate: number;
 }
 
 export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
   if (typeof window === 'undefined' || !townId) {
-    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT] };
+    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT], taxRate: 8 };
   }
   try {
     const raw = window.localStorage.getItem(`${TOWN_EXTRAS_STORAGE_PREFIX}${townId}`);
-    if (!raw) return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT] };
+    if (!raw) {
+      return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT], taxRate: 8 };
+    }
     const parsed = JSON.parse(raw) as Partial<TownExtrasSidecar>;
     const blueprintsByPlot: Partial<Record<PlotId, BuildingBlueprint>> = {};
     if (parsed.blueprintsByPlot && typeof parsed.blueprintsByPlot === 'object') {
@@ -135,9 +138,11 @@ export function loadTownExtrasLocal(townId: string): TownExtrasSidecar {
       Array.isArray(parsed.trainBlueprints) && parsed.trainBlueprints.length > 0
         ? parsed.trainBlueprints.slice(0, 3).map((t) => sanitizeTrainBlueprint(t))
         : [DEFAULT_TRAIN_BLUEPRINT];
-    return { blueprintsByPlot, trainBlueprints };
+    const taxNum = Number(parsed.taxRate);
+    const taxRate = Number.isFinite(taxNum) ? Math.max(0, Math.min(20, Math.round(taxNum))) : 8;
+    return { blueprintsByPlot, trainBlueprints, taxRate };
   } catch {
-    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT] };
+    return { blueprintsByPlot: {}, trainBlueprints: [DEFAULT_TRAIN_BLUEPRINT], taxRate: 8 };
   }
 }
 
@@ -145,6 +150,7 @@ export function saveTownExtrasLocal(
   townId: string,
   structures: TownStructure[],
   trainBlueprints: TrainBlueprint[],
+  taxRate = 8,
 ): void {
   if (typeof window === 'undefined' || !townId) return;
   try {
@@ -156,9 +162,10 @@ export function saveTownExtrasLocal(
     }
     const cleanTrains =
       trainBlueprints.length > 0 ? trainBlueprints.slice(0, 3) : [DEFAULT_TRAIN_BLUEPRINT];
+    const cleanTax = Math.max(0, Math.min(20, Math.round(taxRate)));
     window.localStorage.setItem(
       `${TOWN_EXTRAS_STORAGE_PREFIX}${townId}`,
-      JSON.stringify({ blueprintsByPlot, trainBlueprints: cleanTrains }),
+      JSON.stringify({ blueprintsByPlot, trainBlueprints: cleanTrains, taxRate: cleanTax }),
     );
   } catch {
     // Ignore storage quota errors

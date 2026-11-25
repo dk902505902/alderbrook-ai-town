@@ -26,6 +26,7 @@ import {
   UserCheck,
   Wheat,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   classifyAgentActivity,
@@ -39,20 +40,25 @@ import {
   type RaiderRadarSnapshot,
 } from '../three/townScene.ts';
 import {
+  generateFallbackBuildingBlueprint,
   getStructureDisplayLabel,
   PLOT_META,
   STRUCTURE_META,
   type AgentId,
   type AgentRecord,
   type BiomeId,
+  type BuildingBlueprint,
   type CameraMode,
   type DecorPackId,
   type EnemyCityState,
   type EnemyRaidState,
   type GraphicsQuality,
+  type HeatmapMode,
   type LocationId,
   type PlotId,
+  type StructureType,
   type TimeOfDay,
+  type TownNeedsSummary,
   type TownStructure,
   type TownTheme,
   type TrainBlueprint,
@@ -130,6 +136,15 @@ interface TownViewportProps {
   onRenameStructure?: (plotId: PlotId, newLabel: string) => void;
   onAssignWorkerToPlot?: (plotId: PlotId, agentId: AgentId | null) => void;
   onDemolishStructure?: (plotId: PlotId) => void;
+  heatmapMode?: HeatmapMode;
+  townNeeds?: TownNeedsSummary;
+  activeTrainCameraIdx?: number;
+  onOpenPlotStudio?: (plotId: PlotId) => void;
+  onBuildBlueprintOnPlot?: (
+    plotId: PlotId,
+    structureType: StructureType,
+    blueprint?: BuildingBlueprint,
+  ) => void;
   onRegisterSnapshotFn?: (
     fn: ((townName: string, subtitle?: string) => string | null) | null,
   ) => void;
@@ -219,6 +234,11 @@ export function TownViewport({
   onRenameStructure,
   onAssignWorkerToPlot,
   onDemolishStructure,
+  heatmapMode = 'off',
+  townNeeds,
+  activeTrainCameraIdx = 0,
+  onOpenPlotStudio,
+  onBuildBlueprintOnPlot,
   onRegisterSnapshotFn,
   onMinimapUpdate,
   onRaiderRadarUpdate,
@@ -237,6 +257,7 @@ export function TownViewport({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [confirmDemolish, setConfirmDemolish] = useState(false);
+  const [sprintActive, setSprintActive] = useState(false);
 
   const latestTownDataRef = useRef({
     townId,
@@ -481,7 +502,23 @@ export function TownViewport({
   useEffect(() => {
     if (loadedTownKeyRef.current !== currentTownKey) return;
     controllerRef.current?.setCameraMode(cameraMode, povVillagerId);
+    if (cameraMode !== 'free_roam') {
+      setSprintActive(false);
+      controllerRef.current?.setFreeRoamSprint(false);
+    }
   }, [cameraMode, povVillagerId, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setFreeRoamSprint(sprintActive);
+  }, [sprintActive]);
+
+  useEffect(() => {
+    controllerRef.current?.setHeatmapMode(heatmapMode, townNeeds);
+  }, [heatmapMode, townNeeds, currentTownKey]);
+
+  useEffect(() => {
+    controllerRef.current?.setTrainCameraIndex(activeTrainCameraIdx);
+  }, [activeTrainCameraIdx, currentTownKey]);
 
   useEffect(() => {
     if (!communicationEvent) return;
@@ -936,31 +973,45 @@ export function TownViewport({
         </div>
       )}
 
-      {/* Mobile & Touch Walk Joystick Pad (Free-Roam Walk Mode Only) */}
+      {/* Mobile & Touch Walk Joystick Pad + Sprint Toggle (Free-Roam Walk Mode Only) */}
       {cameraMode === 'free_roam' && (
-        <div
-          ref={joystickPadRef}
-          onPointerDown={(e) => {
-            joystickPointerIdRef.current = e.pointerId;
-            e.currentTarget.setPointerCapture(e.pointerId);
-            updateJoystickFromEvent(e);
-          }}
-          onPointerMove={(e) => {
-            if (joystickPointerIdRef.current !== e.pointerId) return;
-            updateJoystickFromEvent(e);
-          }}
-          onPointerUp={(e) => {
-            if (joystickPointerIdRef.current !== e.pointerId) return;
-            resetJoystick();
-          }}
-          onPointerCancel={resetJoystick}
-          aria-label="Touch movement joystick"
-          className="fixed bottom-24 left-5 z-25 flex h-28 w-28 touch-none items-center justify-center rounded-full border-2 border-white/25 bg-slate-950/75 shadow-xl md:bottom-20"
-        >
+        <div className="fixed bottom-24 left-5 z-25 flex items-end gap-3 md:bottom-20">
           <div
-            ref={joystickKnobRef}
-            className="h-11 w-11 rounded-full border border-amber-300/60 bg-amber-500/85 shadow-lg"
-          />
+            ref={joystickPadRef}
+            onPointerDown={(e) => {
+              joystickPointerIdRef.current = e.pointerId;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              updateJoystickFromEvent(e);
+            }}
+            onPointerMove={(e) => {
+              if (joystickPointerIdRef.current !== e.pointerId) return;
+              updateJoystickFromEvent(e);
+            }}
+            onPointerUp={(e) => {
+              if (joystickPointerIdRef.current !== e.pointerId) return;
+              resetJoystick();
+            }}
+            onPointerCancel={resetJoystick}
+            aria-label="Touch movement joystick"
+            className="flex h-28 w-28 touch-none items-center justify-center rounded-full border-2 border-white/25 bg-slate-950/75 shadow-xl"
+          >
+            <div
+              ref={joystickKnobRef}
+              className="h-11 w-11 rounded-full border border-amber-300/60 bg-amber-500/85 shadow-lg"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => setSprintActive((prev) => !prev)}
+            className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold shadow-lg transition-colors ${
+              sprintActive
+                ? 'border-amber-300 bg-amber-500 text-slate-950'
+                : 'border-white/20 bg-slate-950/85 text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Zap className="h-3.5 w-3.5" />
+            <span>{sprintActive ? 'Sprinting' : 'Sprint'}</span>
+          </button>
         </div>
       )}
 
@@ -1147,14 +1198,55 @@ export function TownViewport({
               </div>
             </div>
           ) : (
-            <div className="mt-2 space-y-2.5 text-xs text-slate-300">
-              <p>Staked and ready. Managers can propose a new building here automatically.</p>
+            <div className="mt-2 space-y-2 text-xs text-slate-300">
+              <p>Staked and ready. Design a procedural building right here or ask Lyra.</p>
+              {onOpenPlotStudio && (
+                <button
+                  type="button"
+                  onClick={() => onOpenPlotStudio(selectedPlotId)}
+                  className="inline-flex min-h-[42px] w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400"
+                >
+                  <Hammer className="h-3.5 w-3.5" />
+                  <span>Open Blueprint Studio</span>
+                </button>
+              )}
+              {onBuildBlueprintOnPlot && (
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onBuildBlueprintOnPlot(
+                        selectedPlotId,
+                        'apartment',
+                        generateFallbackBuildingBlueprint('5-Story Sunlit Apartment'),
+                      );
+                      onDismissPlot();
+                    }}
+                    className="min-h-[38px] rounded-xl border border-emerald-400/35 bg-emerald-500/15 px-2.5 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/25"
+                  >
+                    + 5F Apartment
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onBuildBlueprintOnPlot(
+                        selectedPlotId,
+                        'custom',
+                        generateFallbackBuildingBlueprint('6-Story Neon Sky-Tower'),
+                      );
+                      onDismissPlot();
+                    }}
+                    className="min-h-[38px] rounded-xl border border-cyan-400/35 bg-cyan-500/15 px-2.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/25"
+                  >
+                    + Sky-Tower
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => onWhisperBuildPlot(selectedPlotId, false)}
-                className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-3 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400"
+                className="inline-flex min-h-[38px] w-full items-center justify-center gap-2 rounded-xl border border-white/15 bg-slate-900 px-3 text-xs font-medium text-slate-200 transition-colors hover:bg-slate-800"
               >
-                <Hammer className="h-3.5 w-3.5" />
                 <span>Ask Architect Lyra to Build Here</span>
               </button>
             </div>

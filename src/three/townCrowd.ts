@@ -3,6 +3,7 @@ import {
   MAX_DUMMY_CITIZENS,
   PLOT_META,
   type GraphicsQuality,
+  type TimeOfDay,
   type TownStructure,
 } from '../types/town.ts';
 
@@ -11,14 +12,16 @@ import {
  * ---------------------------------------------
  * - Strictly 5 shared THREE.InstancedMesh draw calls total (torso, head, left leg, right leg, hat)
  *   for up to 140 ambient citizens walking along roads, sidewalks, plaza, and apartment entrances.
+ * - Dynamic Day/Night Commute Schedules: morning rush out of apartments toward Market & Station,
+ *   midday shopping bustle, sunset plaza/park strolls, and quiet nighttime returns home.
  * - Zero LLM/API calls, zero DOM nameplates, zero per-frame allocations (4 GB RAM Android safe).
- * - Scales rendered density automatically across Low / Medium / High graphics quality.
  */
 
 export interface TownCrowdHandle {
   group: THREE.Group;
   setTargetPopulation: (count: number) => void;
   setApartmentAnchors: (structures: TownStructure[]) => void;
+  setTimeOfDay: (tod: TimeOfDay) => void;
   setGraphicsQuality: (quality: GraphicsQuality) => void;
   setVisible: (visible: boolean) => void;
   getRenderedCount: () => number;
@@ -192,6 +195,7 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
   let apartmentAnchors: Array<{ x: number; z: number; entranceX: number; entranceZ: number }> = [];
   let targetPopulation = 16;
   let graphicsQuality: GraphicsQuality = 'medium';
+  let currentTimeOfDay: TimeOfDay = 'day';
   let activeCount = 0;
 
   function computeEffectiveCount(): number {
@@ -201,10 +205,17 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
         : graphicsQuality === 'medium'
           ? 96
           : MAX_DUMMY_CITIZENS;
-    const scale =
+    const qualityScale =
       graphicsQuality === 'low' ? 0.5 : graphicsQuality === 'medium' ? 0.8 : 1.0;
-    const desired = Math.round(targetPopulation * scale);
-    return Math.max(0, Math.min(cap, Math.min(MAX_DUMMY_CITIZENS, Math.max(targetPopulation > 0 ? 8 : 0, desired))));
+    // Nighttime brings quieter streets as residents head indoors; morning/day are peak rush hour
+    const todScale =
+      currentTimeOfDay === 'night'
+        ? 0.56
+        : currentTimeOfDay === 'twilight'
+          ? 0.88
+          : 1.0;
+    const desired = Math.round(targetPopulation * qualityScale * todScale);
+    return Math.max(0, Math.min(cap, Math.min(MAX_DUMMY_CITIZENS, Math.max(targetPopulation > 0 ? 6 : 0, desired))));
   }
 
   function applyCounts(): void {
@@ -218,7 +229,42 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
     const rA = deterministicRand(idx * 17.13 + elapsed * 1.7 + c.x);
     const rB = deterministicRand(idx * 29.71 + elapsed * 2.3 + c.z);
 
-    // If apartments exist, steer apartment-route & a slice of sidewalk citizens between apartment doors & plaza
+    // Time-of-day routine biases:
+    // - Morning: leave apartments briskly toward Market (-6.5, 4.5) & Train Station (0, 14.5)
+    // - Day: bustle around Market, Station, and Plaza shops
+    // - Sunset: stroll around illuminated Plaza fountain (0, 0) & Park (7.5, 5.5)
+    // - Night: return toward Apartment entrances
+    if (apartmentAnchors.length > 0 && currentTimeOfDay === 'night' && rA < 0.72) {
+      const anchor = apartmentAnchors[(c.apartmentIdx + Math.floor(rB * 5)) % apartmentAnchors.length];
+      c.targetX = anchor.entranceX + (rA - 0.5) * 1.25;
+      c.targetZ = anchor.entranceZ + (rB - 0.5) * 1.25;
+      return;
+    }
+
+    if (currentTimeOfDay === 'dawn' && rA < 0.52) {
+      // Morning rush toward Market Square or Train Station platform
+      const toStation = rB < 0.45;
+      c.targetX = toStation ? (rA - 0.5) * 6.5 : -6.2 + (rA - 0.5) * 3.8;
+      c.targetZ = toStation ? 12.6 + (rB - 0.5) * 2.2 : 4.2 + (rB - 0.5) * 3.4;
+      return;
+    }
+
+    if (currentTimeOfDay === 'twilight' && rA < 0.55) {
+      // Evening stroll around lit Park & Town Plaza
+      const toPark = rB < 0.5;
+      if (toPark) {
+        c.targetX = 7.2 + (rA - 0.5) * 4.2;
+        c.targetZ = 4.6 + (rB - 0.5) * 3.6;
+      } else {
+        const ang = rB * Math.PI * 2;
+        const rad = 2.4 + rA * 2.1;
+        c.targetX = Math.cos(ang) * rad;
+        c.targetZ = Math.sin(ang) * rad;
+      }
+      return;
+    }
+
+    // Standard apartment-to-plaza commute loop
     if (
       apartmentAnchors.length > 0 &&
       (c.routeKind === 'apartment' || (c.routeKind === 'sidewalk' && rA < 0.55))
@@ -229,7 +275,6 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
         c.targetX = anchor.entranceX + (rA - 0.5) * 1.4;
         c.targetZ = anchor.entranceZ + (rB - 0.5) * 1.4;
       } else {
-        // Stroll toward Town Square plaza ring
         const ang = rA * Math.PI * 2;
         const rad = 2.6 + rB * 2.2;
         c.targetX = Math.cos(ang) * rad;
@@ -311,6 +356,16 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
       apartmentAnchors = next;
     },
 
+    setTimeOfDay(tod: TimeOfDay) {
+      if (tod === currentTimeOfDay) return;
+      currentTimeOfDay = tod;
+      applyCounts();
+      // Gently nudge half the crowd onto fresh commute goals immediately on time shift
+      for (let i = 0; i < activeCount; i += 2) {
+        pickNextWaypoint(citizens[i], i, i * 0.41);
+      }
+    },
+
     setGraphicsQuality(quality: GraphicsQuality) {
       graphicsQuality = quality;
       applyCounts();
@@ -336,6 +391,14 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
       }
 
       const clampedDelta = Math.min(delta, 0.12);
+      const paceMult =
+        currentTimeOfDay === 'dawn'
+          ? 1.28
+          : currentTimeOfDay === 'day'
+            ? 1.05
+            : currentTimeOfDay === 'twilight'
+              ? 0.9
+              : 0.72;
 
       for (let i = 0; i < activeCount; i++) {
         const c = citizens[i];
@@ -352,7 +415,8 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
             pickNextWaypoint(c, i, elapsed);
           } else {
             const dist = Math.sqrt(distSq);
-            const step = Math.min(dist, c.speed * clampedDelta);
+            const effSpeed = c.speed * paceMult;
+            const step = Math.min(dist, effSpeed * clampedDelta);
             c.x += (dx / dist) * step;
             c.z += (dz / dist) * step;
             const desiredYaw = Math.atan2(dx, dz);
@@ -361,7 +425,7 @@ export function buildTownCrowdSystem(scene: THREE.Scene): TownCrowdHandle {
             while (diff > Math.PI) diff -= Math.PI * 2;
             while (diff < -Math.PI) diff += Math.PI * 2;
             c.yaw += diff * Math.min(1, clampedDelta * 7.5);
-            c.stridePhase += clampedDelta * c.speed * 7.2;
+            c.stridePhase += clampedDelta * effSpeed * 7.2;
             isWalking = true;
           }
         }

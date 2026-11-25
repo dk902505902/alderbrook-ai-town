@@ -21,9 +21,11 @@ import {
   type EnemyRaidState,
   type GraphicsQuality,
   type HatStyle,
+  type HeatmapMode,
   type LocationId,
   type PlotId,
   type TimeOfDay,
+  type TownNeedsSummary,
   type TownStructure,
   type TownTheme,
   type TrainBlueprint,
@@ -54,6 +56,7 @@ import {
 export type { RaiderRadarSnapshot } from './townRaiders.ts';
 import { buildTownShuttleBus, type TownBusHandle } from './townBus.ts';
 import { buildTownRailway, type TownRailwayHandle } from './townRailway.ts';
+import { buildTownVehiclesSystem, type TownVehiclesHandle } from './townVehicles.ts';
 import {
   buildCompletedStructureMesh,
   buildEmptyPlotMesh,
@@ -1661,7 +1664,15 @@ export class TownSceneController {
   private railwayHandle!: TownRailwayHandle;
   private busHandle!: TownBusHandle;
   private crowdHandle: TownCrowdHandle | null = null;
+  private vehiclesHandle: TownVehiclesHandle | null = null;
   private lifeHandle: TownLifeHandle | null = null;
+  private heatmapGroup: THREE.Group | null = null;
+  private heatmapMode: HeatmapMode = 'off';
+  private heatmapMeshes = new Map<
+    PlotId,
+    { ring: THREE.Mesh; pillar: THREE.Mesh; mat: THREE.MeshBasicMaterial }
+  >();
+  private heatmapSharedGeos: THREE.BufferGeometry[] = [];
   private dogVillagerCoords: Array<{ x: number; z: number }> = [];
   private raiderHandle: TownRaidersHandle | null = null;
   private raidState: EnemyRaidState = createDefaultEnemyRaidState(false);
@@ -1752,6 +1763,7 @@ export class TownSceneController {
   private freeRoamPitch = -0.05;
   private freeRoamJoyX = 0;
   private freeRoamJoyZ = 0;
+  private freeRoamSprint = false;
   private freeRoamBobPhase = 0;
   private freeRoamKeys = new Set<string>();
   private freeRoamDragActive = false;
@@ -1884,6 +1896,9 @@ export class TownSceneController {
     this.buildParticlesAndArc();
     this.crowdHandle = buildTownCrowdSystem(this.scene);
     this.disposables.push(this.crowdHandle);
+    this.vehiclesHandle = buildTownVehiclesSystem(this.scene);
+    this.disposables.push(this.vehiclesHandle);
+    this.buildHeatmapOverlay();
     this.lifeHandle = buildTownLifeAndDecor(this.sharedShadowTex);
     this.scene.add(this.lifeHandle.group);
     this.disposables.push(this.lifeHandle);
@@ -2414,6 +2429,7 @@ export class TownSceneController {
     this.railwayHandle?.setGraphicsQuality(quality);
     this.busHandle?.setGraphicsQuality(quality);
     this.crowdHandle?.setGraphicsQuality(quality);
+    this.vehiclesHandle?.setGraphicsQuality(quality);
     this.signalRelayHandle?.setGraphicsQuality(quality);
     this.raiderHandle?.setGraphicsQuality(quality);
     this.weatherPoints?.geometry.setDrawRange(0, quality === 'low' ? 80 : 160);
@@ -2479,6 +2495,10 @@ export class TownSceneController {
       this.weatherPoints.visible = false;
     }
 
+    this.crowdHandle?.setTimeOfDay(timeOfDay);
+    const nightFactor =
+      timeOfDay === 'night' ? 1 : timeOfDay === 'twilight' ? 0.55 : timeOfDay === 'dawn' ? 0.25 : 0;
+    this.vehiclesHandle?.setNightFactor(nightFactor);
     this.updateFireflyState();
   }
 
@@ -2680,6 +2700,76 @@ export class TownSceneController {
   public setFreeRoamInput(moveX: number, moveZ: number): void {
     this.freeRoamJoyX = THREE.MathUtils.clamp(moveX, -1, 1);
     this.freeRoamJoyZ = THREE.MathUtils.clamp(moveZ, -1, 1);
+  }
+
+  public setFreeRoamSprint(sprint: boolean): void {
+    this.freeRoamSprint = sprint;
+  }
+
+  public setTrainCameraIndex(index: number): void {
+    this.railwayHandle?.setCameraTrainIndex(index);
+  }
+
+  private buildHeatmapOverlay(): void {
+    const group = new THREE.Group();
+    group.name = 'citizen_needs_heatmap';
+    group.visible = false;
+
+    const ringGeo = new THREE.RingGeometry(1.9, 2.55, 24);
+    ringGeo.rotateX(-Math.PI / 2);
+    const pillarGeo = new THREE.CylinderGeometry(0.16, 0.34, 3.0, 8);
+    pillarGeo.translate(0, 1.5, 0);
+    this.heatmapSharedGeos.push(ringGeo, pillarGeo);
+
+    for (const plotId of ALL_PLOT_IDS) {
+      const meta = PLOT_META[plotId];
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x22c55e,
+        transparent: true,
+        opacity: 0.52,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const ring = new THREE.Mesh(ringGeo, mat);
+      ring.position.set(meta.x, 0.14, meta.z);
+      const pillar = new THREE.Mesh(pillarGeo, mat);
+      pillar.position.set(meta.x, 0.14, meta.z);
+      group.add(ring, pillar);
+      this.heatmapMeshes.set(plotId, { ring, pillar, mat });
+    }
+
+    this.scene.add(group);
+    this.heatmapGroup = group;
+    this.disposables.push({
+      dispose: () => {
+        for (const g of this.heatmapSharedGeos) g.dispose();
+        this.heatmapMeshes.forEach((entry) => entry.mat.dispose());
+      },
+    });
+  }
+
+  public setHeatmapMode(mode: HeatmapMode, needs?: TownNeedsSummary | null): void {
+    this.heatmapMode = mode;
+    if (!this.heatmapGroup) return;
+    if (mode === 'off') {
+      this.heatmapGroup.visible = false;
+      return;
+    }
+    this.heatmapGroup.visible = true;
+    const available = new Set<PlotId>(getAvailablePlotIds(this.unlockedBiomes));
+    const builtPlots = new Set<PlotId>(this.lastStructures.map((s) => s.plotId));
+
+    this.heatmapMeshes.forEach((entry, plotId) => {
+      const show = available.has(plotId) || builtPlots.has(plotId);
+      entry.ring.visible = show;
+      entry.pillar.visible = show;
+      if (!show) return;
+      const plotScore = needs?.plotScores[plotId]?.[mode] ?? needs?.[mode] ?? 65;
+      const hex = plotScore >= 75 ? 0x22c55e : plotScore >= 50 ? 0xf59e0b : 0xef4444;
+      entry.mat.color.setHex(hex);
+      const heightScale = 0.35 + (plotScore / 100) * 1.15;
+      entry.pillar.scale.set(1, heightScale, 1);
+    });
   }
 
   public captureSnapshotDataUrl(townName: string, subtitle?: string): string | null {
@@ -2996,6 +3086,10 @@ export class TownSceneController {
     this.applyMapExpansionBounds();
     this.expansionHandle?.setUnlockedBiomes(params.unlockedBiomes);
     this.expansionHandle?.setRoads(params.roads);
+    this.vehiclesHandle?.setUnlockedBiomes(params.unlockedBiomes);
+    this.vehiclesHandle?.setVisible(
+      params.isMainTown || params.unlockedBiomes.length > 0 || params.structures.length > 0,
+    );
     this.railwayHandle?.setRailSpurBuilt(params.railSpurBuilt || this.interTownRailBuilt);
     this.railwayHandle?.setInterTownRailBuilt(
       this.interTownRailBuilt,
@@ -3066,6 +3160,10 @@ export class TownSceneController {
     this.applyMapExpansionBounds();
     this.expansionHandle?.setUnlockedBiomes(unlockedBiomes);
     this.expansionHandle?.setRoads(roads);
+    this.vehiclesHandle?.setUnlockedBiomes(unlockedBiomes);
+    this.vehiclesHandle?.setVisible(
+      !this.isCleanFrontier || unlockedBiomes.length > 0 || this.lastStructures.length > 0,
+    );
     this.railwayHandle?.setRailSpurBuilt(railSpurBuilt || interTownRailBuilt);
     this.railwayHandle?.setInterTownRailBuilt(interTownRailBuilt, interTownRailTarget || undefined);
     if (this.railwayHandle) {
@@ -3839,7 +3937,7 @@ export class TownSceneController {
           const fwdZ = Math.cos(this.freeRoamYaw);
           const rightX = -fwdZ;
           const rightZ = fwdX;
-          const roamSpeed = 6.2;
+          const roamSpeed = this.freeRoamSprint ? 10.6 : 6.2;
           this.freeRoamPos.x += (fwdX * normFwd + rightX * normRight) * roamSpeed * delta;
           this.freeRoamPos.z += (fwdZ * normFwd + rightZ * normRight) * roamSpeed * delta;
           const roamDist = Math.hypot(this.freeRoamPos.x, this.freeRoamPos.z);
@@ -3848,7 +3946,7 @@ export class TownSceneController {
             this.freeRoamPos.x *= sc;
             this.freeRoamPos.z *= sc;
           }
-          this.freeRoamBobPhase += delta * 8.5;
+          this.freeRoamBobPhase += delta * (this.freeRoamSprint ? 12.0 : 8.5);
         }
         const bobY = moveMag > 0.02 ? Math.sin(this.freeRoamBobPhase) * 0.045 : 0;
         const eyeY = 1.65 + bobY;
@@ -4302,6 +4400,17 @@ export class TownSceneController {
 
       if (this.crowdHandle) {
         this.crowdHandle.update(delta, elapsed);
+      }
+
+      if (this.vehiclesHandle) {
+        this.vehiclesHandle.update(delta, elapsed);
+      }
+
+      if (this.heatmapGroup?.visible && this.heatmapMode !== 'off') {
+        const op = 0.44 + Math.sin(elapsed * 3.0) * 0.14;
+        this.heatmapMeshes.forEach((entry) => {
+          if (entry.ring.visible) entry.mat.opacity = op;
+        });
       }
 
       if (this.lifeHandle) {
